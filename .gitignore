@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# Envs
+.venv/
+venv/
+env/
+
+# Test / tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+
+# Data-layer caches (never commit downloaded/cached voxels)
+*.zarr/
+.vesuvius/
+slabcache/
+
+# OS / editor
+.DS_Store
+.idea
+
+submission/all_images

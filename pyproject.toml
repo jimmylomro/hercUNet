@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hercunet"
+version = "0.1.0"
+description = "Cross-volume surface (sheet) detection for carbonised Herculaneum scrolls — streaming data layer, iterative refiner, and full-volume inference."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Jaime Lomeli-R", email = "jaime@auravision.ai" }]
+keywords = ["vesuvius", "herculaneum", "ome-zarr", "segmentation", "ct", "papyrus"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Operating System :: POSIX :: Linux",
+]
+
+# Core = the DATA LAYER only (this stage). Streaming multiscale OME-Zarr reads with a chunk-aligned
+# parallel fetch, an on-disk L2 slab cache, transparent prefetch, and material tiling. Deps kept as
+# broad as possible on purpose (see §3 of the submission plan: "deps as compatible as possible").
+dependencies = [
+    "numpy>=1.21",
+    "zarr>=2.16,<3",          # v2 store API (ZarrSegment uses .vindex / fill_value / v2 group layout)
+    "fsspec>=2023.1",
+    "aiohttp>=3.8",           # async HTTP store backing zarr.open(https://…)
+    "requests>=2.25",
+    "s3fs>=2023.1",           # the s3:// read path (measured ~2x the https path)
+    "Pillow>=9.0",            # fragment / ink-projection rasters
+]
+
+[project.optional-dependencies]
+accel = ["obstore>=0.11"]     # native (non-boto) Rust object_store reader — benchmarked, opt-in
+dev = ["pytest>=7.0"]
+
+[project.urls]
+Repository = "https://github.com/jimmylomro/hercUNet"
+
+[tool.setuptools.packages.find]
+include = ["hercunet*"]
+
+[tool.pytest.ini_options]
+markers = ["network: hits the live Vesuvius S3 bucket (opt-in via HERCUNET_NET_TEST=1)"]

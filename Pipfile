@@ -1,0 +1,15 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+# Dependencies are declared in pyproject.toml (the single source of truth). This Pipfile just
+# installs the package editable with its dev extra, so `pipenv install --dev` sets up the dev env.
+[packages]
+hercunet = {editable = true, path = "."}
+
+[dev-packages]
+hercunet = {editable = true, path = ".", extras = ["dev"]}
+
+[requires]
+python_version = "3.12"
