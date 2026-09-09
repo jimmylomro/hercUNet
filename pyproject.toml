@@ -32,10 +32,15 @@ dependencies = [
 
 [project.optional-dependencies]
 accel = ["obstore>=0.11"]     # native (non-boto) Rust object_store reader — benchmarked, opt-in
+# stage-1 pseudo-label generation stack (needs a CUDA GPU at run time)
+labels = ["torch>=2.0", "scipy>=1.9", "scikit-learn>=1.1", "hdbscan>=0.8.38"]
 dev = ["pytest>=7.0"]
 
 [project.urls]
 Repository = "https://github.com/jimmylomro/hercUNet"
+
+[project.scripts]
+hercunet = "hercunet.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["hercunet*"]
