@@ -18,7 +18,7 @@ stage shipping with a visual tool that shows what it does.
 **All documentation lives in [`docs/`](docs/) — start with the [docs index](docs/README.md).** Each
 part of the project gets its own comprehensive guide there.
 
-- **[Data layer](docs/data_layer.md)** — streaming OME-Zarr reads, caching, prefetch, tiling. ✅ **Available now.**
+- **[Data layer](docs/data-layer.md)** — streaming OME-Zarr reads, caching, prefetch, tiling. ✅ **Available now.**
 
 ## Pipeline stages
 
@@ -54,7 +54,7 @@ block, origin = vol.read_window(level=0, z0=12160, z1=12176,
                                 y0=4096, y1=4160, x0=4096, x1=4160)
 ```
 
-See the **[data-layer guide](docs/data_layer.md)** for the full API — backends, prefetching,
+See the **[data-layer guide](docs/data-layer.md)** for the full API — backends, prefetching,
 material tiling, the on-disk cache, and configuration.
 
 ## Status
