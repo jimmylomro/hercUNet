@@ -158,6 +158,15 @@ class GrindSession:
             return self.corpus.write_window(meta, meshes, meshlet)
         return None
 
+    def delete(self, scroll, coords, level=0):
+        """Remove the window at ``scroll`` + ``coords`` (z,y,x) from the corpus (skip a bad one). Takes
+        explicit coords — not ``_current_meta`` — so a failed window can't delete the previous good one.
+        Returns the window id if it was present, else None."""
+        from .corpus import window_id
+        if self.corpus is None or scroll is None or coords is None:
+            return None
+        return self.corpus.delete_window(window_id(scroll, level, coords))
+
 
 class EditSession:
     """Drive the viewer over an EXISTING ``.herculabels`` corpus (the ``edit`` command) — each window is
@@ -228,3 +237,10 @@ class EditSession:
         from .edit import save_edited_window
         meta, meshes, meshlet = save_edited_window(ctx, meshes, self._current_meta)
         return self.corpus.write_window(meta, meshes, meshlet)
+
+    def delete(self, scroll, coords, level=0):
+        """Remove the window at ``scroll`` + ``coords`` from the corpus (same as :meth:`GrindSession.delete`)."""
+        from .corpus import window_id
+        if scroll is None or coords is None:
+            return None
+        return self.corpus.delete_window(window_id(scroll, level, coords))

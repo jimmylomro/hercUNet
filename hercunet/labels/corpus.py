@@ -116,6 +116,20 @@ class Corpus:
         """Flush the manifest to ``meta.json``."""
         self._save_manifest()
 
+    def delete_window(self, wid: str) -> str | None:
+        """Remove a window from the corpus — delete its ``.npz`` and drop its manifest entry. Returns the
+        window id if it was present, else None (idempotent)."""
+        p = self.window_path(wid)
+        existed = p.exists()
+        if existed:
+            p.unlink()
+        wins = self.meta.get("windows", [])
+        kept = [w for w in wins if w["id"] != wid]
+        removed = existed or len(kept) != len(wins)
+        self.meta["windows"] = kept
+        self._save_manifest()
+        return wid if removed else None
+
     def iter_windows(self):
         """Yield manifest window entries in creation order."""
         yield from self.meta.get("windows", [])

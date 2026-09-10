@@ -135,12 +135,18 @@ class InteractiveWindow(QMainWindow):
         ch.addStretch(1)
         self._counter = QLabel("")                               # "window k" / "window k / N"
         self._counter.setStyleSheet("color:#c9ccd2; font-size:12px; font-weight:600;")
+        self._btn_del_next = QPushButton("delete + next →")      # skip a bad window (removes it from the corpus)
+        self._btn_del_next.setStyleSheet(_DEL_QSS)
+        self._btn_del_next.setEnabled(False)
+        self._btn_del_next.setMinimumHeight(26)
+        self._btn_del_next.clicked.connect(self._on_delete_next)
         self._btn_next = QPushButton("save + next →")            # grind to the next window (saves this one)
         self._btn_next.setStyleSheet(_BTN_QSS)
         self._btn_next.setEnabled(False)
         self._btn_next.setMinimumHeight(26)
         self._btn_next.clicked.connect(self._on_next)
         ch.addWidget(self._counter)
+        ch.addWidget(self._btn_del_next)
         ch.addWidget(self._btn_next)
 
         central = QWidget()
@@ -262,6 +268,7 @@ class InteractiveWindow(QMainWindow):
         self._edited = False                                     # any edit made → save on advance
         self._current_coords = None                              # (scroll,z,y,x) of the loaded window
         self._split_cid = None
+        self._advance_delete = False                             # the pending advance deletes (skip) instead of saving
         self._pos_nbr = None                                     # per-point positive sample table (live only)
         self._neg_nbr = None                                     # per-point negative sample table (live only)
         self._sample_pts = None                                  # full point cloud for the samples overlay
@@ -364,7 +371,9 @@ class InteractiveWindow(QMainWindow):
         self._btn_merge.setEnabled(ready and n == 2)
         self._btn_delete.setEnabled(ready and n >= 1)
         self._btn_undo.setEnabled(bool(self._undo_stack) and not self._busy)
-        self._btn_next.setEnabled(self._pipeline_done and not self._busy and not self._grind_done)
+        advance_ready = self._pipeline_done and not self._busy and not self._grind_done
+        self._btn_next.setEnabled(advance_ready)
+        self._btn_del_next.setEnabled(advance_ready)
 
     # ---- grind: save this window, advance to the next ----
     def _on_next(self) -> None:
@@ -372,6 +381,19 @@ class InteractiveWindow(QMainWindow):
             return
         if not self._confirm_save_and_move():                   # "are you sure?" before saving + advancing
             return
+        self._advance_delete = False
+        if self._session.coords_list is not None:               # list mode → next entry, no chooser
+            self._advance(None)
+        else:                                                    # open-ended → random-or-specify chooser
+            self._next_menu()
+
+    def _on_delete_next(self) -> None:
+        """Skip a bad window: DELETE it from the corpus, then advance (same chooser as save + next)."""
+        if self._busy or not self._pipeline_done or self._grind_done:
+            return
+        if not self._confirm_delete_and_move():
+            return
+        self._advance_delete = True
         if self._session.coords_list is not None:               # list mode → next entry, no chooser
             self._advance(None)
         else:                                                    # open-ended → random-or-specify chooser
@@ -383,6 +405,14 @@ class InteractiveWindow(QMainWindow):
                else "Move to the next window? (no edits made — the base labels are already saved.)")
         return QMessageBox.question(self, "Save + next", msg,
                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) == QMessageBox.Yes
+
+    def _confirm_delete_and_move(self) -> bool:
+        from PySide6.QtWidgets import QMessageBox
+        return QMessageBox.question(
+            self, "Delete + next",
+            "Delete this window from the corpus and skip to the next? This removes the whole window's "
+            "labels and cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
 
     def _next_menu(self) -> None:
         # A modal popover (centred on the window, like the save confirmation) — NOT a drop-down — so the
@@ -428,10 +458,17 @@ class InteractiveWindow(QMainWindow):
         self._advance(req)
 
     def _advance(self, request) -> None:
-        """Save the current (edited) window off-thread, then load the next one."""
+        """Save the current (edited) window off-thread — or DELETE it when skipping — then load the next."""
         self._next_request = request
         self._busy = True
         self._update_action_buttons()
+        if self._advance_delete:                                 # skip: remove this window from the corpus
+            self._overlay.show_over("deleting this window from the corpus…")
+            cur = self._current_coords                           # (scroll, z, y, x) of the window on screen
+            wid = self._session.delete(cur[0], (cur[1], cur[2], cur[3])) if cur else None
+            self._log(f"deleted window {wid} from the corpus" if wid else "no saved window to delete — skipped")
+            self._on_saved(None)
+            return
         if self._edited and self._edit_ctx is not None:
             self._overlay.show_over("saving edited window…")
             ctx, meshes, region = self._edit_ctx, dict(self._meshes), self._conf_region

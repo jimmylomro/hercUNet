@@ -34,7 +34,7 @@ The stage-1 **methodology** (how the labels are derived) is the research write-u
 
 ### Stage 1 - HercuLabels
 
-Fully unsupervised sheet detection in small windows - specifically built for pseudo-label generation.
+Fully unsupervised sheet segmentation in small windows - specifically built for pseudo-label generation.
 
 In short:
 
@@ -54,6 +54,13 @@ pipenv run hercunet labels create /tmp/test.herculabels --scroll PHerc1447 --coo
 ```
 
 ![HercuLabels UI.](submission/images/sheets-with-sheets.jpg)
+
+This is a slow process - about 5 minutes per 192vx per-side cubes. It is best to run without `--interactive`,
+and leave overnight. I created about 4000 of these in the cloud, and fine-tuned nnUNet without cleaning them.
+But you can use the `merge` and `split` features to clean up your labels - not sure how that will work - I never tried.
+
+This method allows for sheet-width, normal and sheet-membership supervision.
+Also for topological augmentations like sheet merges and things like that, which I will explain in the HercUNet part.
 
 ### Stage 2 - HercUNet
 
