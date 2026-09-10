@@ -12,11 +12,13 @@ Stage 1 — pseudo-label corpora (``.herculabels``; see docs/herculabels.md):
     hercunet labels create <corpus.herculabels> --interactive [--scroll ID] [--coords-file F] [--himat F]
     hercunet labels create <corpus.herculabels> --count <N> [--scroll ID] [--coords Z,Y,X] [--himat F]
     hercunet labels edit   <corpus.herculabels>
+    hercunet labels merge  <out.herculabels> <in1.herculabels> <in2.herculabels> [...]
     hercunet labels export <corpus.herculabels> <train_out> [--no-augment]
 
 ``create`` builds a new corpus (fails if it exists): ``--interactive`` opens the viewer and grinds windows
 open-endedly (no ``--count``); otherwise it generates ``--count`` windows headless. ``edit`` re-opens the
-corpus in the viewer for correction. ``export`` derives the training corpus (augmentations on by default).
+corpus in the viewer for correction. ``merge`` unions several corpora into a new one (so you extend a corpus
+by creating a fresh one and merging). ``export`` derives the training corpus (augmentations on by default).
 """
 
 from __future__ import annotations
@@ -30,12 +32,15 @@ def _labels_create(args: argparse.Namespace) -> None:
         if args.count is not None:
             raise SystemExit("hercunet labels create: --interactive grinds windows open-endedly — "
                              "do not pass --count (close the viewer to stop)")
+    elif args.coords_file:
+        if args.count is not None:
+            raise SystemExit("hercunet labels create: --coords-file defines the windows — do not pass --count")
     elif args.count is None:
-        raise SystemExit("hercunet labels create: --count is required (unless --interactive)")
+        raise SystemExit("hercunet labels create: --count is required (unless --interactive or --coords-file)")
     if args.coords is not None:
         if not args.scroll:
             raise SystemExit("hercunet labels create: --coords requires an explicit --scroll")
-        if not args.interactive and args.count != 1:
+        if not args.interactive and not args.coords_file and args.count != 1:
             raise SystemExit("hercunet labels create: --coords targets one exact window, so requires --count 1")
     if args.himat is not None and not (0.0 <= args.himat <= 1.0):
         raise SystemExit("hercunet labels create: --himat must be a fraction in [0, 1]")
@@ -55,7 +60,7 @@ def _labels_create(args: argparse.Namespace) -> None:
         seed_stride_um=args.seed_stride_um,
         sample_um=args.sample_um,
         min_cluster_size=args.min_cluster_size,
-        slab_negatives=args.slab_negatives,
+        old_negatives=args.old_negatives,
         seed=args.seed,
         gpu=args.gpu,
         deterministic=args.deterministic,
@@ -81,9 +86,9 @@ def _add_labels_create(subparsers: argparse._SubParsersAction) -> None:
                    help="one exact window centred at these voxel coords (requires --scroll; headless requires "
                         "--count 1; interactive starts here then grinds open-endedly)")
     p.add_argument("--coords-file", default=None, metavar="FILE",
-                   help="(--interactive) grind through the windows listed in this file, one per line as "
-                        "'Z,Y,X' (uses --scroll) or 'SCROLL,Z,Y,X'; without it the viewer offers a "
-                        "random-or-specify chooser")
+                   help="generate exactly the windows listed in this file (one per line as 'Z,Y,X' with "
+                        "--scroll, or 'SCROLL,Z,Y,X'; '#'/blank lines ignored). Headless: generates them all "
+                        "into the corpus (no --count). With --interactive: grinds through them in order")
     p.add_argument("--himat", type=float, default=None, metavar="FRAC",
                    help="only accept windows whose material fill is at least FRAC (0-1) — mine HIGH-material "
                         "sheets via the coarse mask. Default: the standard 0.15 air-skip threshold")
@@ -98,15 +103,16 @@ def _add_labels_create(subparsers: argparse._SubParsersAction) -> None:
                    help="streamlet point sampling spacing in µm")
     p.add_argument("--min-cluster-size", type=int, default=250,
                    help="minimum cluster size (in units) for the probeom clustering")
-    p.add_argument("--slab-negatives", action="store_true",
-                   help="use the slab-field negatives (submission/md/herculabels.md §5.3, the newer method) "
-                        "instead of the default gap-gated negatives (§5.2) that generated the corpus")
+    p.add_argument("--old-negatives", action="store_true",
+                   help="use the OLD gap-gated negatives (submission/writeup/herculabels.md §5.2) that "
+                        "generated the PUBLISHED corpus, instead of the default slab-field negatives (§5.3, the "
+                        "current method). REQUIRED to reproduce the published corpus (run20260808)")
     p.add_argument("--seed", type=int, default=0,
                    help="base random seed for the deterministic sampling stream")
-    p.add_argument("--gpu", action=argparse.BooleanOptionalAction, default=True,
-                   help="use the GPU where available (--no-gpu to force CPU)")
-    p.add_argument("--deterministic", action=argparse.BooleanOptionalAction, default=True,
-                   help="bit-reproducible generation (--no-deterministic for fastest)")
+    p.add_argument("--no-gpu", dest="gpu", action="store_false", default=True,
+                   help="force CPU (GPU is used by default; label generation is impractically slow on CPU)")
+    p.add_argument("--no-deterministic", dest="deterministic", action="store_false", default=True,
+                   help="disable bit-reproducible generation (faster; determinism is on by default)")
     p.set_defaults(func=_labels_create)
 
 
@@ -126,6 +132,24 @@ def _add_labels_edit(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--no-gpu", dest="gpu", action="store_false", default=True,
                    help="force CPU (GPU is used by default for the per-window CT re-read)")
     p.set_defaults(func=_labels_edit)
+
+
+# ---------------------------------------------------------------------------- labels merge --
+def _labels_merge(args: argparse.Namespace) -> None:
+    from .labels import merge_corpora
+    merge_corpora(args.out, args.inputs)
+
+
+def _add_labels_merge(subparsers: argparse._SubParsersAction) -> None:
+    p = subparsers.add_parser(
+        "merge",
+        help="merge several .herculabels corpora into a new one",
+        description="Union the windows of INPUTS into a new corpus OUT (fails if OUT exists; inputs "
+                    "untouched). On a duplicate window the edited copy wins, else the later input.",
+    )
+    p.add_argument("out", metavar="OUT.herculabels", help="path of the merged corpus to create (must not exist)")
+    p.add_argument("inputs", metavar="IN.herculabels", nargs="+", help="corpora to merge (one or more)")
+    p.set_defaults(func=_labels_merge)
 
 
 # --------------------------------------------------------------------------- labels export --
@@ -162,6 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
     labels_cmds = labels.add_subparsers(dest="command", metavar="<command>", required=True)
     _add_labels_create(labels_cmds)
     _add_labels_edit(labels_cmds)
+    _add_labels_merge(labels_cmds)
     _add_labels_export(labels_cmds)
 
     return parser

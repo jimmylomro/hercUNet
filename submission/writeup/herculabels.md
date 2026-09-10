@@ -510,9 +510,7 @@ collapsed — where the fit was forced through mush — shows poor congruence an
 downstream. On our data it flags roughly a third of windows as containing at least one collapsed sheet — itself
 an honest measurement of where the method is and is not to be trusted.
 
-> **📷 Figure to add (after the code port) — `submission/images/sheets_3d_confidence.jpg`:** the same 3-D sheet
-> render as in Section 7, now coloured by a **confidence heatmap** (the combined field) instead of by cluster —
-> confident sheet cores warm, low-confidence bridges / seams / residual merges cool.
+![A harder window than the clean case in Section 7 — one dense with sheet intersections and embedding "thick necks" (wraps that do not fully separate in embedding space) — with its recovered sheets coloured by a confidence heatmap (the combined field) instead of by cluster. Confident sheet cores read warm; the low-confidence intersections, seams, and residual merges read cool, so the honest uncertainty falls exactly where the geometry is genuinely ambiguous.](../images/sheets-with-confidence.jpg)
 
 ---
 
@@ -528,12 +526,91 @@ is never mistaken for signal.
 
 ---
 
-## 11. Reproducibility
+## 11. Validation: the signal is in the labels, not the loss
 
-The generation is made bit-reproducible for provenance, on two levels: every random draw (embedding
+These pseudo-labels are only worth publishing if they carry sheet-*separation* signal that a
+segmentation-derived model does not already have. The natural yardstick is **m7** — the ScrollPrize
+`surface_m7_nnunet` surface detector, trained on labels derived from existing segmentations. To measure what
+our labels add, we fine-tuned over m7 and named it **ablA** (ablation A), a first model iteration, on our pseudo-labels alone (no human labels).
+
+A clean comparison has to isolate the *data* from the training recipe, and that forces a decision about the
+loss. Our labels have a very different class balance from the corpus m7 was trained on: because we cover a far
+larger area — whole windows sampled across the volume rather than the neighbourhoods an existing segmentation
+already delineates — they contain far **more negative (non-sheet) voxels**, the gaps, air and unlabelled
+material between and around the sheets. A loss tuned to m7's balance would be swamped by that
+negative volume, so the ablation uses one suited to it, with one job per term: a **symmetric Focal–Tversky**
+overlap term for precision, a **soft skeleton-recall** term for coverage — recall measured only against the
+labelled sheet skeleton, so the abundant negatives cannot dilute it — and a **separation penalty** that
+suppresses predicted surface inside the inter-sheet gaps (a simple anti-merge term). This is deliberately
+*not* the affinity / constrained-MALIS separation objective of HercUNet; the ablation holds this
+skeleton-recall loss **fixed** and varies only the labels, so any difference it exposes is a property of the
+data.
+
+The isolating experiment is **ablB** (ablation B): fine-tune m7 with the *exact same recipe and the same loss* as ablA,
+but on **m7's own labels** instead of ours. If the loss alone were doing the work, ablB would match ablA; if
+the signal lives in the data, ablA should recover structure ablB cannot.
+
+The result is telling. A fine-tuned m7 using our loss (ablB: on the right) remains degenerate in the very regions where ablA
+(on the left) finds coherent sheet signal: the separation our labels encode is not recoverable from segmentation-derived
+labels by a change of loss — it has to be present in the training data.
+
+![ablA (trained on our labels) versus ablB (m7's own labels, our loss) on the same region. The sheet structure ablA recovers is absent from ablB — with the loss held fixed, the difference is carried by the labels, not the objective.](../images/ablA-vs-ablB.jpg)
+
+The image below shows the public m7 volume on PHerc 1447 on the left and the non-thresholded output of ablA on the right.
+Even at this coarse scale the evidence of signal is clear.
+
+![ablA recovers coherent sheets deep in a region where the segmentation-derived baseline is degenerate, evidence that the training labels — not the objective — supply the signal.](../images/ablA-signal.jpg)
+
+Two caveats. First, ablA tends to **over-merge** sheets in places — welding neighbours that should stay apart.
+The image below shows the output of ablA on the left and the output of m7 on the right. Note this issue is addressed
+on the HercUNet section of this work (you can see a preview of the HercUNet output at the bottom of this file on the
+exact same region).
+
+![Over-merged sheets in the ablA output — the failure mode HercUNet is built to address.](../images/ablA-overmerge.jpg)
+
+This was an ablation, not the finished detector: the aim of this research is **HercUNet**, which attacks
+over-merging directly — iterative ∇φ propagation that re-separates sheets across passes, an explicit anti-merge
+separation objective, and the confidence channel that flags exactly these ambiguous seams. Second, these are
+**pure pseudo-labels**: no cleanup and no curation of the set — the published corpus is exactly what the
+generation method emits.
+
+That the labels can be *cleaned at all* is a property of how they are built. Because a window's sheets live in
+the 8-D embedding of §6 — where each meshlet is a point and a sheet is a cluster — a correction is a *cluster*
+operation, not voxel painting: an over-merged sheet is split by a cut in embedding space, two fragments are
+joined, a spurious cluster deleted, and the medial-mesh fit and confidence re-derive from the corrected
+clustering. The released tooling exposes exactly this — an interactive editor over the meshlet embedding — so
+progressively cleaner label sets can be extracted from the same corpus without re-running the pipeline.
+
+---
+
+## 12. Reproducibility
+
+The generation is made reproducible for provenance, on two levels: every random draw (embedding
 initialisation, negative sampling, augmentation) is keyed to a seed derived from the scroll and window
 coordinates, so the *same* random numbers are drawn on any machine; and the GPU floating-point reductions are
 placed in a deterministic mode, so the same arithmetic is performed in the same order and borderline labels do
 not flip at density seams from accumulation noise. Two independent runs of a full window reproduce every stored
 array exactly. Reproducibility is not required to use the labels, but they are intended as a published
 community asset, and provenance matters for that.
+
+**The reproducible unit is the window, not the coordinate draw.** Each window's master seed is
+`md5(run_id | scroll | level | z,y,x)`, so a window is fully determined by *which* window it is — its scroll
+and coordinates — independent of how it was chosen. The published corpus was mined by many parallel workers
+each drawing a disjoint seeded stream of coordinates, and re-deriving that exact set of coordinates is neither
+necessary nor the interesting property: what matters is that **given a window, the labels come out the same**.
+So reproduction is per-window and content-addressed — regenerate the specific scroll + coordinates and you get
+the same result, to within the equivalence of the code revisions the run spanned (the run was not pinned to a
+single commit, so the guarantee is *same method, same parameters* rather than byte-identical to one build).
+
+The complete provenance — the exact extraction parameters and every window (scroll, coordinates, sheet count,
+quality) in the published corpus — is catalogued in [`corpus.md`](corpus.md), together with the command that
+regenerates an equivalent corpus with the released tooling.
+
+
+---
+
+## Extra
+
+A peek of the output of HercUNet in the same region where ablA fails - again compared against m7.
+
+![A peek of the output of HercUNet where ablA fails.](../images/m7-vs-hercunet-merges.jpg)

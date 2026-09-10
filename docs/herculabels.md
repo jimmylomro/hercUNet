@@ -2,13 +2,13 @@
 
 **HercuLabels** is the pseudo-label generator (stage 1 of the pipeline): from raw micro-CT it produces,
 per window, an unsupervised **sheet-instance segmentation** plus honest per-voxel confidence, collected
-into an editable **`.herculabels` corpus** that you can grind, correct, and then **export** to the
-training format for the downstream refiner. This document covers **how to run it** — the three CLI verbs
-(`create` / `edit` / `export`), the interactive viewer, the corpus + export outputs, and the container
-layout.
+into an editable **`.herculabels` corpus** that you can grind, correct, combine, and then **export** to the
+training format for the downstream refiner. This document covers **how to run it** — the four CLI verbs
+(`create` / `edit` / `merge` / `export`), the interactive viewer, the corpus + export outputs, and the
+container layout.
 
 For **how it works** (the method — meshlets, slab, contrastive embedding, probeom clustering,
-medial-mesh fit, confidence), see the methodology write-up: [`../submission/md/herculabels.md`](../submission/md/herculabels.md).
+medial-mesh fit, confidence), see the methodology write-up: [`../submission/writeup/herculabels.md`](../submission/writeup/herculabels.md).
 
 ---
 
@@ -47,8 +47,11 @@ pipenv run hercunet labels create demo.herculabels --count 50
 # 3) Re-open the corpus later to keep correcting windows
 pipenv run hercunet labels edit demo.herculabels
 
-# 4) Export the training corpus (base + augmentations) for the refiner
-pipenv run hercunet labels export demo.herculabels ./train_out
+# 4) Extend a corpus: grind a fresh one, then merge into a combined corpus
+pipenv run hercunet labels merge combined.herculabels demo.herculabels more.herculabels
+
+# 5) Export the training corpus (base + augmentations) for the refiner
+pipenv run hercunet labels export combined.herculabels ./train_out
 ```
 
 ---
@@ -61,6 +64,7 @@ Three verbs operate over a `.herculabels` corpus (a directory; always editable �
 |---|---|---|
 | **create** | `create <corpus.herculabels> …` | Build a **new** corpus (fails if it exists). `--interactive` grinds windows in the viewer (open-ended, no `--count`); headless requires `--count N`. |
 | **edit** | `edit <corpus.herculabels>` | Re-open an existing corpus in the viewer and correct its windows in place (implicitly interactive; no pipeline re-run). |
+| **merge** | `merge <out.herculabels> <in…>` | Union several corpora into a **new** one (fails if `out` exists; inputs untouched). This is how you extend a corpus — grind a fresh one and merge. |
 | **export** | `export <corpus.herculabels> <train_out> [--no-augment]` | Derive the training corpus (per-window `.npz`, **no meshlets**). Augmentations on by default; `--no-augment` for a base-only export. Non-destructive + re-runnable. |
 
 ### create — headless
@@ -74,11 +78,17 @@ pipenv run hercunet labels create demo.herculabels --count 100 --scroll PHerc144
 
 # One exact window
 pipenv run hercunet labels create demo.herculabels --count 1 --scroll PHerc1447 --coords 11714,3293,3648
+
+# An exact SET of windows from a coordinate file (regenerate a known corpus) — no --count
+pipenv run hercunet labels create demo.herculabels --coords-file windows.txt
 ```
 
 Without `--coords`, windows are drawn randomly and windows that are mostly air are skipped. `--coords Z,Y,X`
-targets one exact window (needs `--scroll`, and `--count 1` in headless mode). Each window writes its base
-sheet meshes + meshlet cloud into the corpus and appends a manifest entry.
+targets one exact window (needs `--scroll`, and `--count 1` in headless mode). **`--coords-file FILE`**
+generates exactly the windows listed in `FILE` (one per line, `Z,Y,X` with `--scroll` or `SCROLL,Z,Y,X`;
+`#`/blank lines ignored) — the file defines the set, so no `--count`. This is how a published corpus is
+regenerated from its window list (see the corpus provenance record, `submission/writeup/corpus.md`). Each window
+writes its base sheet meshes + meshlet cloud into the corpus and appends a manifest entry.
 
 ### create — interactive (the grinding viewer)
 
@@ -120,6 +130,23 @@ Opens the corpus's windows in the same viewer, one after another (list-mode Next
 available it falls back to a blank background and points-only editing still works. Corrections are written
 back in place and the window is flagged `edited` in the manifest.
 
+### merge — combine corpora
+
+```bash
+# Union two (or more) corpora into a new combined one
+pipenv run hercunet labels merge combined.herculabels session1.herculabels session2.herculabels
+```
+
+`merge` builds a **new** output corpus (fails if it exists) holding the union of the inputs' windows; the
+inputs are never modified. It's the way to **extend** a corpus — rather than re-opening one to add windows,
+grind a fresh corpus and merge them — so `create`/`edit` stay simple.
+
+- **Duplicate windows** (the same scroll + coords ground in more than one input) are resolved automatically:
+  the **`edited` copy wins** over an unedited one, otherwise the later input wins (both logged). So a
+  hand-corrected window is never clobbered by a stale duplicate — grind-then-merge is safe to repeat.
+- Pure file + manifest operation (no GPU / data layer): windows are byte-copied. The merged `meta.json`
+  records each source under `create.merged_from` for provenance.
+
 ### export — derive the training corpus
 
 ```bash
@@ -155,14 +182,21 @@ Hovering a pane shows the **global `z y x` coords** (status bar) and, over a str
 (the big colour swatch, bottom right). The 3-D view orbits with drag and reports the sheet under the
 cursor.
 
-### The overlay selector (streamlets · none · confidence)
+### The overlay selector (streamlets · none · confidence · samples)
 
-A 3-way switch in the top controls bar chooses what the 2-D panes overlay on the CT:
+A switch in the top controls bar chooses what the 2-D panes overlay on the CT:
 
 - **streamlets** — the streamlet point cloud, coloured per sheet (grey before clustering finishes).
 - **none** — CT only.
 - **confidence** — a translucent **red low-confidence field**: the pipeline's combined uncertainty
   (intersection ⊕ sharp2 ⊕ dropped) plus any regions you deleted (see below), graded by uncertainty.
+- **samples** — the **contrastive sampling** behind the embedding: **hover a streamlet point** and its
+  training **positives light green** (the mutual surface slab) and its **negatives light red** (the
+  gap-gated negatives), with the hovered anchor in white — the points near each pane's current slice.
+  This lets you *see* whether the slab picks positives across a real between-sheet gap (a merge cause) or
+  negatives on the same sheet. **Live only:** the sample tables exist only while a window is being
+  generated (`create --interactive`); windows opened from a stored corpus via `edit` have no sampling to
+  show, so the option is inert there.
 
 The **3D section planes** toggle draws faint red planes in the 3-D view at each pane's current slice.
 
@@ -290,10 +324,38 @@ The generation knobs default to the validated corpus operating point; change the
 | `--seed-stride-um` | `40` | Spine seed spacing (larger ⇒ fewer streamlets, faster). |
 | `--sample-um` | `20` | Streamlet point spacing. |
 | `--min-cluster-size` | `250` | Minimum probeom cluster size (in units). |
-| `--slab-negatives` | off | Use the **slab-field** negatives (methodology §5.3) instead of the default **gap-gated** negatives (§5.2) that generated the corpus. |
+| `--old-negatives` | off | Use the **old gap-gated** negatives (methodology §5.2) instead of the default **slab-field** negatives (§5.3). ⚠️ The default is now the slab-field method; **the published corpus was generated with `--old-negatives`** — pass it to reproduce that corpus (see [Reproducing the published corpus](#reproducing-the-published-corpus)). |
 | `--seed` | `0` | Base seed for the deterministic sampling stream + `run_id`. |
-| `--gpu` / `--no-gpu` | on | GPU required; `--no-gpu` only for (slow) CPU testing. |
-| `--deterministic` / `--no-deterministic` | on | Bit-reproducible generation (same window ⇒ byte-identical bundle). |
+| `--no-gpu` | (GPU on) | Force CPU. GPU is used by default; label generation is impractically slow on CPU. |
+| `--no-deterministic` | (determinism on) | Disable bit-reproducible generation (faster). Determinism is on by default (same window ⇒ byte-identical base labels). |
+
+---
+
+## Reproducing the published corpus
+
+> ⚠️ **The published stage-1 corpus was generated with the OLD gap-gated negatives — you MUST pass
+> `--old-negatives` to regenerate it.** `create` now defaults to the newer slab-field negatives
+> (methodology §5.3); without `--old-negatives` you get an *equivalent* corpus under the current method,
+> **not** the published one.
+
+The published corpus is **4031 windows across 22 scrolls** (`run20260808`). Its full provenance — every
+window's coordinates and the exact extraction parameters — is in
+[`submission/writeup/corpus.md`](../submission/writeup/corpus.md), and the window list is the coordinate file
+[`submission/writeup/corpus_windows.txt`](../submission/writeup/corpus_windows.txt):
+
+```bash
+# regenerate exactly the published windows (note --old-negatives), then derive the training bundles:
+pipenv run hercunet labels create scroll_corpus.herculabels \
+    --old-negatives --coords-file submission/writeup/corpus_windows.txt
+pipenv run hercunet labels export scroll_corpus.herculabels ./train_out
+
+# …or a fresh, equivalent draw from the same operating point:
+pipenv run hercunet labels create scroll_corpus.herculabels --old-negatives --count 4031 --seed 20260808
+```
+
+Per-window content is deterministic from `(run_id, scroll, coords)`; the original run spanned several code
+revisions, so the result is equivalent by construction (same method, params, and `--old-negatives`) rather
+than byte-identical to any single commit.
 
 ---
 

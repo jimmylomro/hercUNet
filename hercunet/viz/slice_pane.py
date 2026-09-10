@@ -53,6 +53,7 @@ class SlicePane(QWidget):
     hovered = Signal(str, int, str)                             # coords text, sheet id (-1 noise, -2 none), colour hex
     sliceChanged = Signal(str, int)                              # axis, LOCAL slice index (for the 3D section plane)
     picked = Signal(int, bool)                                   # click: sheet id (-2 = air gap / noise), ctrl held
+    sample_hover = Signal(int)                                   # samples mode: point index under cursor (-1 = none)
 
     def __init__(self, axis: str = "z"):
         super().__init__()
@@ -76,6 +77,9 @@ class SlicePane(QWidget):
         self._dot_alpha = 220
         self._stamp = None                                       # cached (ss, dr, dc, coverage) round stamp
         self._sel = None                                         # selected sheet ids (others fade), or None
+        self._samp_full = None                                   # FULL point cloud [P,3] local — for samples-mode pick/highlight
+        self._samp_mode = False                                  # samples overlay active
+        self._samp_hi = None                                     # (anchor_idx, pos_idxs, neg_idxs) currently highlighted
 
         self._glw = pg.GraphicsLayoutWidget()
         self._vb = _SliceViewBox(lockAspect=True, invertY=True, enableMenu=False)
@@ -95,6 +99,9 @@ class SlicePane(QWidget):
         # points stay round and crisp when zoomed (a plain native-res square-stamp overlay pixelates badly).
         self._pts_img = _SmoothImageItem(axisOrder="row-major")
         self._vb.addItem(self._pts_img)
+        self._samp_img = _SmoothImageItem(axisOrder="row-major")  # samples overlay: anchor + green pos / red neg
+        self._samp_img.setVisible(False)
+        self._vb.addItem(self._samp_img)
 
         self._title = pg.LabelItem(justify="left")
         self._glw.addItem(self._title, row=1, col=0)
@@ -196,6 +203,71 @@ class SlicePane(QWidget):
         self._sel = list(sel) if sel else None
         self._render_points()
 
+    # ---- samples overlay (positive/negative sampling; live-only) -------------
+    def set_sample_cloud(self, pts) -> None:
+        """The FULL point cloud [P,3] local (z,y,x) that the sample tables index into (unfiltered — the
+        pane's own render drops noise, but sample indices are into the full cloud)."""
+        self._samp_full = None if pts is None else np.asarray(pts, np.float32)
+
+    def set_samples_visible(self, on: bool) -> None:
+        self._samp_mode = bool(on)
+        self._samp_img.setVisible(bool(on))
+        if not on:
+            self._samp_hi = None
+        self._render_samples()
+
+    def set_sample_highlight(self, anchor: int, pos, neg) -> None:
+        """Highlight one anchor's samples: ``anchor`` point index (< 0 clears), ``pos``/``neg`` = 1-D point
+        indices into the full cloud (its positives / negatives)."""
+        if anchor is None or int(anchor) < 0:
+            self._samp_hi = None
+        else:
+            self._samp_hi = (int(anchor), np.asarray(pos, np.int64), np.asarray(neg, np.int64))
+        self._render_samples()
+
+    def _render_samples(self) -> None:
+        if not self._samp_mode or self._samp_full is None or self._block is None or self._samp_hi is None:
+            self._samp_img.clear()
+            return
+        anchor, pos, neg = self._samp_hi
+        P = self._samp_full
+        H, W = self._block.shape[self._row], self._block.shape[self._col]
+        ss = int(np.clip(1800 // max(H, W, 1), 1, 3))
+        Hs, Ws = H * ss, W * ss
+        overlay = np.zeros((Hs, Ws, 4), np.uint8)
+        dr, dc, cov = self._dot_stamp(ss)
+
+        def splat(idxs, rgb):
+            idxs = np.asarray(idxs, np.int64)
+            idxs = idxs[(idxs >= 0) & (idxs < len(P))]
+            if not len(idxs):
+                return
+            p = P[idxs]
+            p = p[np.abs(p[:, self._along] - self._slice) <= self._band]   # only points near this slice
+            if not len(p):
+                return
+            rows = np.clip(np.round(p[:, self._row] * ss).astype(np.intp), 0, Hs - 1)
+            cols = np.clip(np.round(p[:, self._col] * ss).astype(np.intp), 0, Ws - 1)
+            for k in range(len(dr)):
+                rr = np.clip(rows + dr[k], 0, Hs - 1)
+                cc = np.clip(cols + dc[k], 0, Ws - 1)
+                overlay[rr, cc, :3] = rgb
+                overlay[rr, cc, 3] = np.uint8(cov[k] * self._dot_alpha)
+        splat(neg, (235, 60, 60))                                # negatives → red
+        splat(pos, (60, 210, 90))                                # positives → green (drawn over red on overlap)
+        splat([anchor], (255, 255, 255))                         # anchor → white, drawn last (wins)
+        self._samp_img.setImage(overlay)
+        self._samp_img.setRect(0.0, 0.0, float(W), float(H))
+
+    def _sample_point_under(self, xi: int, yi: int, r2: float = 36.0) -> int:
+        """Nearest FULL-cloud point index within ``sqrt(r2)`` px of (xi,yi) on this slice, else -1."""
+        if self._samp_full is None or not len(self._samp_full):
+            return -1
+        d2 = ((self._samp_full[:, self._row] - yi) ** 2 + (self._samp_full[:, self._col] - xi) ** 2
+              + (self._samp_full[:, self._along] - self._slice) ** 2)
+        j = int(np.argmin(d2))
+        return j if d2[j] <= r2 else -1
+
     # ---- rendering -----------------------------------------------------------
     def _render_slice(self) -> None:
         if self._block is None:
@@ -210,6 +282,7 @@ class SlicePane(QWidget):
         self._title.setText(f"{self.axis}-slice — global {'zyx'[self._along]}={gz}", size="9pt")
         self._render_points()
         self._render_conf()
+        self._render_samples()
         self.sliceChanged.emit(self.axis, s)
 
     def _fit(self) -> None:
@@ -324,6 +397,8 @@ class SlicePane(QWidget):
         if xy is None:
             return
         xi, yi = xy
+        if self._samp_mode:                                      # samples mode: report the point under the cursor
+            self.sample_hover.emit(self._sample_point_under(xi, yi))
         loc = [0, 0, 0]
         loc[self._along] = self._slice
         loc[self._row] = yi

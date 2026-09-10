@@ -120,7 +120,7 @@ class InteractiveWindow(QMainWindow):
         ch = QHBoxLayout(controls)
         ch.setContentsMargins(10, 5, 10, 5)
         ch.setSpacing(22)
-        self._overlay_mode = SegmentedToggle(["streamlets", "none", "confidence"], current=0)
+        self._overlay_mode = SegmentedToggle(["streamlets", "none", "confidence", "samples"], current=0)
         self._t_planes = LabelledToggle("3D section planes", checked=False)
         ch.addWidget(self._overlay_mode)
         ch.addWidget(self._t_planes)
@@ -231,6 +231,7 @@ class InteractiveWindow(QMainWindow):
             p.hovered.connect(self._on_hover)
             p.sliceChanged.connect(self._mesh.set_plane)         # scroll a pane → move its 3D section plane
             p.picked.connect(self._on_pick)                      # click a sheet → (de)select
+            p.sample_hover.connect(self._on_sample_hover)        # samples mode: highlight the point's pos/neg
         self._mesh.hovered.connect(self._on_hover)
         self._mesh.picked.connect(self._on_pick)
         self._overlay_mode.changed.connect(self._on_overlay_mode)
@@ -261,6 +262,9 @@ class InteractiveWindow(QMainWindow):
         self._edited = False                                     # any edit made → save on advance
         self._current_coords = None                              # (scroll,z,y,x) of the loaded window
         self._split_cid = None
+        self._pos_nbr = None                                     # per-point positive sample table (live only)
+        self._neg_nbr = None                                     # per-point negative sample table (live only)
+        self._sample_pts = None                                  # full point cloud for the samples overlay
         self._undo_stack.clear()
         self._pending_undo = None
 
@@ -271,6 +275,8 @@ class InteractiveWindow(QMainWindow):
             p.set_points(None)
             p.set_confidence(None)
             p.set_selection(None)
+            p.set_sample_cloud(None)
+            p.set_sample_highlight(-1, [], [])
         self._mesh.reset()
         self._swatch.clear()
         self._sel_hint.setText("click a sheet to select")
@@ -290,6 +296,7 @@ class InteractiveWindow(QMainWindow):
         s.clusters.connect(self._on_clusters)
         s.editctx.connect(self._on_editctx)
         s.confidence.connect(self._on_confidence)
+        s.samples.connect(self._on_samples)
         s.meshes.connect(self._on_meshes)
         s.finished.connect(self._on_finished)
         s.failed.connect(self._on_failed)
@@ -624,10 +631,15 @@ class InteractiveWindow(QMainWindow):
         self._edit_finish()
 
     def _on_overlay_mode(self, idx: int) -> None:
-        """3-way overlay selector: 0 = streamlets, 1 = none, 2 = confidence (low-conf region from deletes)."""
+        """4-way overlay selector: 0 = streamlets, 1 = none, 2 = confidence, 3 = samples (hover a point to see
+        its positives/negatives). 'samples' is populated only while generating a window (live create)."""
         for p in self._panes.values():
             p.set_streamlets_visible(idx == 0)
             p.set_confidence_visible(idx == 2)
+            p.set_samples_visible(idx == 3)
+        if idx == 3 and self._pos_nbr is None:
+            self._log("samples overlay: pos/neg sampling is only shown while generating (create --interactive), "
+                      "not for stored windows")
 
     def _on_brick(self, payload) -> None:
         bced, corner, vu = payload["bced"], payload["corner"], payload["voxel_um"]
@@ -651,6 +663,7 @@ class InteractiveWindow(QMainWindow):
 
     def _on_clusters(self, payload) -> None:
         pts, plab = payload["pts"], payload["plab"]
+        self._sample_pts = np.asarray(pts, np.float32)           # FULL cloud (incl noise) — the samples tables index into it
         self._colours = _initial_colours(plab, pts, getattr(self, "_voxel_um", None))  # persistent from here
         brush_by, gl_by, hex_by = _brush_maps(self._colours)
         self._gl_colours = gl_by
@@ -659,6 +672,7 @@ class InteractiveWindow(QMainWindow):
         for p in self._panes.values():
             p.set_points(pts, plab=plab, brush_by=brush_by)
             p.set_cluster_colours(hex_by)
+            p.set_sample_cloud(self._sample_pts)
         n = len({int(x) for x in plab if x >= 0})
         self._mesh.set_status(f"computing {n} sheets…")          # clusters done → only sheet meshes left
 
@@ -677,6 +691,25 @@ class InteractiveWindow(QMainWindow):
         ctx = self._edit_ctx
         if ctx is not None and "E" in ctx:
             self._mesh.set_embedding(ctx["E"], ctx["ulab"], self._gl_colours)
+
+    def _on_samples(self, payload) -> None:
+        """Live per-point sample tables (positives = mutual slab, negatives = gap-gated), for the 'samples'
+        overlay. Only emitted while generating a window; stored windows opened via ``edit`` have none."""
+        self._pos_nbr = np.asarray(payload["pos_nbr"])
+        self._neg_nbr = np.asarray(payload["neg_nbr"])
+        self._log("samples ready — pick 'samples' and hover a point to see its positives (green) / "
+                  "negatives (red)")
+
+    def _on_sample_hover(self, idx: int) -> None:
+        """Hover in samples mode: highlight the point's positives/negatives across all panes (or clear)."""
+        if self._pos_nbr is None or idx < 0 or idx >= len(self._pos_nbr):
+            for p in self._panes.values():
+                p.set_sample_highlight(-1, [], [])
+            return
+        pos = self._pos_nbr[idx]; pos = pos[pos >= 0]
+        neg = self._neg_nbr[idx]; neg = neg[neg >= 0]
+        for p in self._panes.values():
+            p.set_sample_highlight(idx, pos, neg)
 
     def _on_confidence(self, payload) -> None:
         """Pipeline low-confidence: combine the regional channels (intersection ⊕ sharp2 ⊕ dropped) into one

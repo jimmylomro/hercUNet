@@ -154,6 +154,8 @@ def generate(args, brick: dict, progress=None):
                               "corner": brick.get("corner")})
         from hercunet.labels.edit import build_edit_context             # hand the viewer the edit context
         progress("editctx", build_edit_context(C, args, dev))          # (in-process reference; edits + save)
+        if C.get("pos_nbr") is not None:                                # per-point positive/negative sample tables
+            progress("samples", {"pos_nbr": C["pos_nbr"], "neg_nbr": C["neg_nbr"]})  # viewer 'samples' overlay (live only)
 
     base_meshes = fit_sheet_meshes(pts, plab, C["bced"], None, vu, normals=C["normals"], jac=C["jac"],
                                    step_um=30.0, device=dev, verbose=False)

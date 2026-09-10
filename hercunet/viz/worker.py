@@ -23,6 +23,7 @@ class _Signals(QObject):
     clusters = Signal(object)   # {pts, plab, corner}  (labelled point cloud)
     editctx = Signal(object)    # interactive-edit context (labels arrays, by reference in-process)
     confidence = Signal(object)  # {intersection, sharp2, dropped} regional confidence volumes
+    samples = Signal(object)    # {pos_nbr, neg_nbr}   per-point positive/negative sample tables (live only)
     meshes = Signal(object)     # {meshes}             (fitted sheet meshes)
     finished = Signal(object)   # result of run() (e.g. .npz path)
     failed = Signal(str)

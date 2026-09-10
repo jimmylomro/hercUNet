@@ -81,4 +81,5 @@ def extract_window(args, brick: dict, progress=None) -> dict:
                 plab=plab.astype(np.int32), normals=normals.astype(np.float32), jac=jac.astype(np.float32),
                 E=np.asarray(info["E"], np.float32), prop_dist=prop_dist[isid].astype(np.float32),
                 ff_normal=np.asarray(ff["normal"], np.float32), ff_coherence=np.asarray(ff["coherence"], np.float32),
+                pos_nbr=np.asarray(info["pos_nbr"]), neg_nbr=np.asarray(info["neg_nbr"]),  # per-point sample tables (viewer 'samples' overlay; indexed like pts)
                 nB=int(nB))

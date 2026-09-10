@@ -104,6 +104,18 @@ class Corpus:
         wid = wid_or_entry["id"] if isinstance(wid_or_entry, dict) else wid_or_entry
         return bundle.load_window_bundle(self.window_path(wid))
 
+    def import_window(self, src: "Corpus", entry: dict) -> None:
+        """Byte-copy a window's ``.npz`` from another corpus into this one and upsert its manifest entry.
+        Does NOT save the manifest (call :meth:`save` after a batch). Used by ``merge``."""
+        import shutil
+        wid = entry["id"]
+        shutil.copyfile(src.window_path(wid), self.window_path(wid))
+        self._upsert_window(dict(entry))
+
+    def save(self) -> None:
+        """Flush the manifest to ``meta.json``."""
+        self._save_manifest()
+
     def iter_windows(self):
         """Yield manifest window entries in creation order."""
         yield from self.meta.get("windows", [])

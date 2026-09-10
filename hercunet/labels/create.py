@@ -1,7 +1,7 @@
 """STAGE 1 entry point — pseudo-label generation into a ``.herculabels`` corpus.
 
 ``create`` is the single function ``hercunet labels create`` lands behind. It orchestrates, per window,
-the pipeline documented in ``submission/md/herculabels.md``:
+the pipeline documented in ``submission/writeup/herculabels.md``:
 
     cleaned substrate + frame field → 2.5-D meshlets → slab selection (positive + gap-gated negative)
     → 8-D contrastive embedding → probeom clustering → medial-mesh fit → quality
@@ -52,7 +52,7 @@ def create(
     seed_stride_um: float = 40.0,
     sample_um: float = 20.0,
     min_cluster_size: int = 250,
-    slab_negatives: bool = False,
+    old_negatives: bool = False,
     seed: int = 0,
     gpu: bool = True,
     deterministic: bool = True,
@@ -60,9 +60,14 @@ def create(
     """Create the corpus at ``corpus_path`` (a ``.herculabels`` dir; fails if it exists). ``interactive``
     opens the viewer for open-ended grinding (no ``count``); otherwise ``count`` windows are generated
     headless. ``coords`` (``"z,y,x"``, requires ``scroll``) targets one exact window; ``coords_file`` grinds
-    an ordered list; ``himat`` mines high-material windows via the coarse mask."""
+    an ordered list; ``himat`` mines high-material windows via the coarse mask. ``old_negatives`` selects the
+    legacy gap-gated negatives (§5.2) that generated the published corpus; the default is the current
+    slab-field negatives (§5.3)."""
     _require_gpu(gpu)
     mat_thr = float(himat) if himat is not None else _MIN_MATERIAL_FRAC
+    # The slab-field negatives (§5.3) are now the DEFAULT; --old-negatives selects the gap-gated method
+    # (§5.2) that made the published corpus. Internally the pipeline still keys on ``slab_negatives``.
+    slab_negatives = not old_negatives
 
     from ..config import Config
     from ..data import get_backend
@@ -79,6 +84,7 @@ def create(
     params_hash = hashlib.md5(json.dumps(gen_params, sort_keys=True).encode()).hexdigest()[:12]
     create_params = dict(mode="interactive" if interactive else "headless", scroll=scroll, seed=seed,
                          source=source, coords=coords, coords_file=coords_file, himat=himat,
+                         negatives=("gap-gated" if old_negatives else "slab-field"),
                          count=count, gen_params=gen_params, params_hash=params_hash)
 
     # Build the container FIRST so an existing-corpus clash fails before any heavy compute.
@@ -116,6 +122,23 @@ def create(
             return False
         corpus.write_window(res.meta, res.meshes, res.meshlet)
         return True
+
+    if coords_file:                                              # regenerate an EXACT listed set of windows
+        from .grind import parse_coords_file
+        entries = parse_coords_file(coords_file, scroll)
+        print(f"[create] generating {len(entries)} window(s) from {coords_file}", flush=True)
+        made = 0
+        for i, (sid, cz, cy, cx) in enumerate(entries, 1):
+            target = find_scroll(be, sid)
+            brick = build_brick(be, target, (cz, cy, cx), level=0, gpu=gpu)
+            if _emit(target.scroll_id, cz, cy, cx, brick):
+                made += 1
+            else:
+                print(f"[skip] {sid} z{cz} y{cy} x{cx} — no fittable sheet", flush=True)
+            if i % 50 == 0:
+                print(f"[create]   {i}/{len(entries)} ({made} written)…", flush=True)
+        print(f"[create] wrote {made}/{len(entries)} window(s) into {corpus.root}", flush=True)
+        return
 
     if coords is not None:                                        # one exact, caller-specified window
         cz, cy, cx = (int(v) for v in coords.split(","))
