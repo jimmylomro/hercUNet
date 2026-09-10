@@ -64,6 +64,9 @@ def create(
     legacy gap-gated negatives (§5.2) that generated the published corpus; the default is the current
     slab-field negatives (§5.3)."""
     _require_gpu(gpu)
+    if interactive:                                             # fail fast (before making the corpus dir) if [viz] is missing
+        from ..viz.interactive import require_viewer
+        require_viewer()
     mat_thr = float(himat) if himat is not None else _MIN_MATERIAL_FRAC
     # The slab-field negatives (§5.3) are now the DEFAULT; --old-negatives selects the gap-gated method
     # (§5.2) that made the published corpus. Internally the pipeline still keys on ``slab_negatives``.

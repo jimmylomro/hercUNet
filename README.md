@@ -48,7 +48,7 @@ In short:
 8. **Sheets** — rasterised back to per-voxel sheet labels + honest confidence.
 9. **Fine-tune m7 to validate** - check if HercuLabels carry signal - they do...
 
-Try this, it's the window that started everything:
+Try this, it's the window that started everything (you need to install with \[viz], check the installation guide):
 ```shell
 pipenv run hercunet labels create /tmp/test.herculabels --scroll PHerc1447 --coords 11714,3293,3648 --interactive
 ```

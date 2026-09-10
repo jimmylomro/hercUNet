@@ -7,7 +7,10 @@ Qt is imported lazily HERE so the rest of the package (and the CLI's core paths)
 from __future__ import annotations
 
 
-def _require_qt():
+def require_viewer():
+    """Fail fast with an install hint if the viewer extra isn't present — uses ``find_spec`` (no import),
+    so it can be called early (before any corpus/backend work) to give a clean message rather than a
+    traceback. Public so ``create --interactive`` / ``edit`` can gate on it up front."""
     import importlib.util
     missing = [m for m in ("PySide6", "pyqtgraph", "OpenGL") if importlib.util.find_spec(m) is None]
     if missing:
@@ -21,7 +24,7 @@ def _require_qt():
 def launch_interactive(session):
     """Open the viewer and grind the ``session``'s windows one at a time — each runs the SAME
     build_brick→generate pipeline off-thread, streaming its stages into the UI. Blocks until closed."""
-    _require_qt()
+    require_viewer()
     import os
     import signal
     import sys

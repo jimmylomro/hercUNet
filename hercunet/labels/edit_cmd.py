@@ -12,10 +12,11 @@ def edit_corpus(corpus_path: str, *, gpu: bool = True) -> None:
     """Launch the viewer over the corpus at ``corpus_path`` and grind through its windows for correction."""
     from ..config import Config
     from ..data import get_backend
-    from ..viz.interactive import launch_interactive
+    from ..viz.interactive import launch_interactive, require_viewer
     from .corpus import Corpus
     from .grind import EditSession
 
+    require_viewer()                                            # fail fast with an install hint if [viz] is missing
     corpus = Corpus.open(corpus_path)
     if len(corpus) == 0:
         raise SystemExit(f"corpus {corpus.root} has no windows to edit")
