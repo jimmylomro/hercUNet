@@ -3,8 +3,9 @@ url = "https://pypi.org/simple"
 verify_ssl = true
 name = "pypi"
 
-# Dependencies are declared in pyproject.toml (the single source of truth). This Pipfile just
-# installs the package editable with its dev extra, so `pipenv install --dev` sets up the dev env.
+# Dependencies are declared in pyproject.toml (the single source of truth). Installing the package
+# editable pulls its full runtime — the data layer AND the stage-1 label-gen stack (both are core
+# deps) — so `pipenv install` sets up a fully runnable env. `pipenv install --dev` adds the test tooling.
 [packages]
 hercunet = {editable = true, path = "."}
 

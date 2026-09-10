@@ -111,4 +111,50 @@ def build_brick(be, target, coords, *, level=0, depth_um=1500.0, gpu=True) -> di
                                          sigma_tensor=mp["sigma_tensor"], recompute_every=0)
     print(f"[brick] {target.name} L{L} vox≈{voxel_um:.2f}µm block {Sz}×{S}×{S} centre z{zc} y{yc} x{xc} "
           f"({time.time()-t:.0f}s)", flush=True)
-    return dict(bced=np.ascontiguousarray(bced, np.float32), voxel_um=voxel_um, org=(zc, yc, xc))
+    return dict(bced=np.ascontiguousarray(bced, np.float32), voxel_um=voxel_um, org=(zc, yc, xc),
+                corner=(z0, y0, x0))                             # block origin in GLOBAL scroll voxels
+
+
+_MASK_CACHE: dict = {}                                            # scroll_id -> (mask5, l0_per_l5, (Z5,Y5,X5))
+
+
+def scroll_material_mask(be, target, *, mask_level=5):
+    """Read the whole scroll at a COARSE pyramid level ONCE and threshold it into a material mask (dense
+    voxels vs air), the fast way the m7 himat scout finds material (scripts/mine_m7_labels.py). Cached per
+    scroll. With it, a window's material fill is an instant numpy slice-mean — no full-res read per window."""
+    key = target.scroll_id
+    if key in _MASK_CACHE:
+        return _MASK_CACHE[key]
+    vol = be.open_scroll_volume(target)
+    m = vol.meta
+    L = int(np.clip(mask_level, 0, m.num_levels - 1))
+    Z5, Y5, X5 = m.level_shapes[L]
+    ct5, _ = vol.read_window(L, 0, Z5, 0, Y5, 0, X5)             # coarse level → tiny read
+    ct5 = np.asarray(ct5)
+    thr = float(np.percentile(ct5, 55))                         # material = above the scroll's 55th percentile
+    mask = np.ascontiguousarray(ct5 > thr)
+    fac = float(m.level_shapes[0][0] / Z5)                      # L0 voxels per coarse voxel (~2**mask_level)
+    out = (mask, fac, (int(Z5), int(Y5), int(X5)))
+    _MASK_CACHE[key] = out
+    return out
+
+
+def window_material_frac(be, target, coords, *, mask_level=5):
+    """Material fill fraction of the window centred at ``coords`` (L0 voxels), estimated from the cached
+    coarse mask — instant, no full-res read. Same window footprint as :func:`build_brick`."""
+    from hercunet.labels.common.scales import window_px, window_z_px
+    mask, fac, (Z5, Y5, X5) = scroll_material_mask(be, target, mask_level=mask_level)
+    voxel_um = be.open_scroll_volume(target).meta.voxel_size_um
+    Sxy, Sz = window_px(voxel_um), window_z_px(voxel_um)
+    zc, yc, xc = coords
+
+    def rng(c, s, n5):
+        a = int(np.clip((c - s / 2) / fac, 0, n5))
+        b = int(np.clip((c + s / 2) / fac, 0, n5))
+        return a, max(a + 1, b)
+
+    z0, z1 = rng(zc, Sz, Z5)
+    y0, y1 = rng(yc, Sxy, Y5)
+    x0, x1 = rng(xc, Sxy, X5)
+    sub = mask[z0:z1, y0:y1, x0:x1]
+    return float(sub.mean()) if sub.size else 0.0

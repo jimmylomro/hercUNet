@@ -9,7 +9,7 @@ recto/verso positive balance.
 
 The trained embedding ``E`` is clustered into per-sheet labels downstream by ``embedding.affinity``
 (probeom). Euclidean and ordinal by construction — never spherical (a sphere collapses the ordinal
-magnitude ladder). See ``docs/pseudo-labels.md`` §6 for the method.
+magnitude ladder). See ``submission/md/herculabels.md`` §6 for the method.
 """
 from __future__ import annotations
 

@@ -1,22 +1,28 @@
-"""STAGE 1 entry point — pseudo-label generation.
+"""STAGE 1 entry point — pseudo-label generation into a ``.herculabels`` corpus.
 
-``create`` is the single function the CLI (``hercunet labels create``) and any programmatic caller
-land behind. It orchestrates, per window, the pipeline documented in ``docs/pseudo-labels.md``:
+``create`` is the single function ``hercunet labels create`` lands behind. It orchestrates, per window,
+the pipeline documented in ``submission/md/herculabels.md``:
 
     cleaned substrate + frame field → 2.5-D meshlets → slab selection (positive + gap-gated negative)
-    → 8-D contrastive embedding → probeom clustering → medial-mesh fit → ∇φ / owner_full
-    → confidence + quality → .npz
+    → 8-D contrastive embedding → probeom clustering → medial-mesh fit → quality
+
+and writes each window (base sheet meshes + the meshlet cloud) into a corpus container. With
+``--interactive`` it opens the Qt viewer and grinds windows open-endedly; otherwise it generates
+``--count`` windows headless. Augmentations are NOT produced here — they are a re-runnable ``export``
+(see docs/herculabels.md).
 """
 
 from __future__ import annotations
 
-from pathlib import Path
+import hashlib
+import json
 from types import SimpleNamespace
 
 import numpy as np
 
 _MIN_MATERIAL_FRAC = 0.15         # skip windows with less material than this
-_MAX_ATTEMPTS_PER_WINDOW = 40     # give up drawing a non-air window after this many tries
+_MAX_ATTEMPTS_PER_WINDOW = 40     # give up drawing a non-air window after this many tries (default screen)
+_MAX_HIMAT_SCAN = 20000           # coarse-mask himat screen is instant → allow a big scan before falling back
 
 
 def _require_gpu(gpu: bool) -> None:
@@ -33,12 +39,14 @@ def _require_gpu(gpu: bool) -> None:
 
 
 def create(
+    corpus_path: str,
     *,
-    count: int,
-    output_dir: str,
+    count: int | None,
+    interactive: bool = False,
     scroll: str | None = None,
-    visualise: str | None = None,
-    visualise_output_dir: str | None = None,
+    coords: str | None = None,
+    coords_file: str | None = None,
+    himat: float | None = None,
     voxel_min: float = 7.5,
     voxel_max: float = 9.5,
     seed_stride_um: float = 40.0,
@@ -49,66 +57,118 @@ def create(
     gpu: bool = True,
     deterministic: bool = True,
 ) -> None:
-    """Generate ``count`` sheet-membership pseudo-label windows into ``output_dir``.
-
-    Parameters mirror the CLI flags one-to-one. ``visualise`` (only valid with ``count == 1``) renders
-    the window: ``"image"`` writes a cross-section montage of the streamlets coloured by cluster to
-    ``visualise_output_dir`` (default: ``output_dir``); ``"interactive"`` is not implemented yet.
-    """
-    if visualise and count != 1:
-        raise ValueError("visualise requires count == 1")
-    if visualise not in (None, "image", "interactive"):
-        raise ValueError(f"visualise must be None, 'image' or 'interactive' (got {visualise!r})")
-    if visualise == "interactive":
-        raise SystemExit(
-            "hercunet labels create: --visualise interactive (the live viewer) is not implemented yet. "
-            "Use --visualise image for the cross-section montage."
-        )
+    """Create the corpus at ``corpus_path`` (a ``.herculabels`` dir; fails if it exists). ``interactive``
+    opens the viewer for open-ended grinding (no ``count``); otherwise ``count`` windows are generated
+    headless. ``coords`` (``"z,y,x"``, requires ``scroll``) targets one exact window; ``coords_file`` grinds
+    an ordered list; ``himat`` mines high-material windows via the coarse mask."""
     _require_gpu(gpu)
-    viz_out = visualise_output_dir or output_dir
+    mat_thr = float(himat) if himat is not None else _MIN_MATERIAL_FRAC
 
     from ..config import Config
     from ..data import get_backend
-    from ._brick import build_brick, find_scroll, in_band_scrolls, sample_windows
+    from ._brick import build_brick, find_scroll, in_band_scrolls, sample_windows, window_material_frac
     from ._generate import generate
+    from .corpus import Corpus
 
-    out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
     be = get_backend(Config.from_env())
-
-    if scroll:
-        target0 = find_scroll(be, scroll)
-        scrolls = {target0.scroll_id: float(target0.resolution_um or 8.64)}
-    else:
-        scrolls = in_band_scrolls(be, voxel_min, voxel_max)
-        if not scrolls:
-            raise SystemExit(f"no scrolls with voxel size in [{voxel_min}, {voxel_max}] µm")
-    print(f"[create] sampling {count} window(s) from: {', '.join(scrolls)}", flush=True)
-
     run_id = f"run{seed}"
+    gen_params = dict(voxel_min=voxel_min, voxel_max=voxel_max, seed_stride_um=seed_stride_um,
+                      sample_um=sample_um, min_cluster_size=min_cluster_size, slab_negatives=slab_negatives,
+                      sigma_tensor=4.0, merge_size=3, n_merges=2, n_splits=2, conf_ds=4, level=0)
+    source = "coords-file" if coords_file else ("coords" if coords is not None else "random")
+    params_hash = hashlib.md5(json.dumps(gen_params, sort_keys=True).encode()).hexdigest()[:12]
+    create_params = dict(mode="interactive" if interactive else "headless", scroll=scroll, seed=seed,
+                         source=source, coords=coords, coords_file=coords_file, himat=himat,
+                         count=count, gen_params=gen_params, params_hash=params_hash)
+
+    # Build the container FIRST so an existing-corpus clash fails before any heavy compute.
+    corpus = Corpus.create(corpus_path, create_params=create_params)
+    print(f"[create] new corpus {corpus.root}  (mode={create_params['mode']}, source={source})", flush=True)
+
+    def _args_for(sid, cz, cy, cx):
+        return SimpleNamespace(
+            scroll=sid, coords=f"{cz},{cy},{cx}", level=0, gpu=gpu,
+            deterministic=deterministic, run_id=run_id, sigma_tensor=4.0,
+            seed_stride_um=seed_stride_um, sample_um=sample_um, min_cluster_size=min_cluster_size,
+            merge_size=3, n_merges=2, n_splits=2, conf_ds=4, slab_negatives=slab_negatives, source=source,
+        )
+
+    if interactive:                                              # launch the Qt viewer; it grinds into the corpus
+        from ..viz.interactive import launch_interactive
+        from .grind import GrindSession, parse_coords_file
+
+        scrolls = _resolve_scrolls(be, scroll, voxel_min, voxel_max, find_scroll, in_band_scrolls)
+        coords_list = first = None                               # None,None = open-ended random grinding
+        if coords_file:
+            coords_list = parse_coords_file(coords_file, scroll)
+        elif coords is not None:
+            cz, cy, cx = (int(v) for v in coords.split(","))
+            first = (find_scroll(be, scroll).scroll_id, cz, cy, cx)
+        session = GrindSession(be, scrolls, _args_for, gpu, seed, corpus=corpus,
+                               scroll=scroll, coords_list=coords_list, first=first, himat=himat)
+        launch_interactive(session)
+        return
+
+    # ---- headless generation ----
+    def _emit(sid, cz, cy, cx, brick):
+        res = generate(_args_for(sid, cz, cy, cx), brick)
+        if res is None:
+            return False
+        corpus.write_window(res.meta, res.meshes, res.meshlet)
+        return True
+
+    if coords is not None:                                        # one exact, caller-specified window
+        cz, cy, cx = (int(v) for v in coords.split(","))
+        target = find_scroll(be, scroll)
+        print(f"[create] exact window {target.scroll_id} z{cz} y{cy} x{cx}", flush=True)
+        brick = build_brick(be, target, (cz, cy, cx), level=0, gpu=gpu)
+        frac = float((brick["bced"] > np.percentile(brick["bced"], 55)).mean())
+        if frac < mat_thr:
+            print(f"[warn] material {frac:.2f} < {mat_thr} — window looks mostly air", flush=True)
+        made = int(_emit(target.scroll_id, cz, cy, cx, brick))
+        print(f"[create] wrote {made}/1 window into {corpus.root}", flush=True)
+        return
+
+    scrolls = _resolve_scrolls(be, scroll, voxel_min, voxel_max, find_scroll, in_band_scrolls)
+    print(f"[create] sampling {count} window(s) from: {', '.join(scrolls)}"
+          + (f" (himat ≥{mat_thr:.2f})" if himat is not None else ""), flush=True)
+
     made = attempts = 0
     stream = sample_windows(be, scrolls, level=0, seed=seed)
-    for sid, coords in stream:
+    cap = _MAX_HIMAT_SCAN if himat is not None else count * _MAX_ATTEMPTS_PER_WINDOW
+    best = None                                                  # (frac, sid, coords) fallback when himat unmet
+    for sid, wcoords in stream:
         if made >= count:
             break
         attempts += 1
-        if attempts > count * _MAX_ATTEMPTS_PER_WINDOW:
-            print(f"[create] gave up after {attempts} draws with only {made}/{count} non-air windows", flush=True)
+        if attempts > cap:
+            print(f"[create] gave up after {attempts} draws with {made}/{count} windows", flush=True)
             break
         target = find_scroll(be, sid)
-        brick = build_brick(be, target, coords, level=0, gpu=gpu)
-        frac = float((brick["bced"] > np.percentile(brick["bced"], 55)).mean())
-        if frac < _MIN_MATERIAL_FRAC:
-            print(f"[skip-air] {sid} {coords} material {frac:.2f}", flush=True)
-            continue
-        args = SimpleNamespace(
-            scroll=sid, coords=f"{coords[0]},{coords[1]},{coords[2]}", level=0, gpu=gpu,
-            deterministic=deterministic, run_id=run_id, out=str(out), sigma_tensor=4.0,
-            seed_stride_um=seed_stride_um, sample_um=sample_um, min_cluster_size=min_cluster_size,
-            merge_size=3, n_merges=2, n_splits=2, conf_ds=4,
-            visualise=visualise, visualise_out=str(viz_out), slab_negatives=slab_negatives,
-        )
-        if generate(args, brick) is not None:
+        if himat is not None:                                    # instant coarse-mask screen — read only winners
+            frac = window_material_frac(be, target, wcoords)
+            if best is None or frac > best[0]:
+                best = (frac, sid, wcoords)
+            if frac < mat_thr:
+                continue
+        brick = build_brick(be, target, wcoords, level=0, gpu=gpu)
+        if himat is None:                                        # default: read + screen each candidate
+            frac = float((brick["bced"] > np.percentile(brick["bced"], 55)).mean())
+            if frac < mat_thr:
+                print(f"[skip-air] {sid} {wcoords} material {frac:.2f} < {mat_thr}", flush=True)
+                continue
+        if _emit(sid, wcoords[0], wcoords[1], wcoords[2], brick):
             made += 1
 
-    print(f"[create] generated {made}/{count} pseudo-label window(s) into {out}", flush=True)
+    print(f"[create] wrote {made}/{count} window(s) into {corpus.root}", flush=True)
+
+
+def _resolve_scrolls(be, scroll, voxel_min, voxel_max, find_scroll, in_band_scrolls) -> dict:
+    """{scroll_id: voxel_um} to sample from — one explicit ``--scroll`` or the in-band corpus set."""
+    if scroll:
+        t0 = find_scroll(be, scroll)
+        return {t0.scroll_id: float(t0.resolution_um or 8.64)}
+    scrolls = in_band_scrolls(be, voxel_min, voxel_max)
+    if not scrolls:
+        raise SystemExit(f"no scrolls with voxel size in [{voxel_min}, {voxel_max}] µm")
+    return scrolls

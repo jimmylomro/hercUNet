@@ -17,9 +17,10 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
 ]
 
-# Core = the DATA LAYER only (this stage). Streaming multiscale OME-Zarr reads with a chunk-aligned
-# parallel fetch, an on-disk L2 slab cache, transparent prefetch, and material tiling. Deps kept as
-# broad as possible on purpose (see §3 of the submission plan: "deps as compatible as possible").
+# Everything the library needs to run out of the box: the streaming data layer (numpy/zarr/fsspec/
+# aiohttp/requests/s3fs/Pillow) AND the stage-1 pseudo-label generation stack (torch/scipy/scikit-learn/
+# hdbscan). Deps kept as broad as possible on purpose (see §3 of the submission plan: "deps as
+# compatible as possible"). Label generation needs a CUDA GPU at run time, but the deps install anywhere.
 dependencies = [
     "numpy>=1.21",
     "zarr>=2.16,<3",          # v2 store API (ZarrSegment uses .vindex / fill_value / v2 group layout)
@@ -28,12 +29,19 @@ dependencies = [
     "requests>=2.25",
     "s3fs>=2023.1",           # the s3:// read path (measured ~2x the https path)
     "Pillow>=9.0",            # fragment / ink-projection rasters
+    "torch>=2.0",             # embedding training + GPU slab/frame compute (stage-1 label gen)
+    "scipy>=1.9",             # KDTree / ndimage across the label pipeline
+    "scikit-learn>=1.1",      # HDBSCAN (probeom clustering)
+    "hdbscan>=0.8.38",        # condensed-tree access for the probabilistic-EOM selection
+    "matplotlib>=3.5",        # --visualise image montage
 ]
 
 [project.optional-dependencies]
 accel = ["obstore>=0.11"]     # native (non-boto) Rust object_store reader — benchmarked, opt-in
-# stage-1 pseudo-label generation stack (needs a CUDA GPU at run time)
-labels = ["torch>=2.0", "scipy>=1.9", "scikit-learn>=1.1", "hdbscan>=0.8.38"]
+# the interactive Qt viewer (hercunet/viz) — NOT a core dep; label generation + the CLI image
+# montage never import it. Install with `pip install -e ".[viz]"` (or `.[full]`).
+viz = ["PySide6>=6.5", "pyqtgraph>=0.13", "PyOpenGL>=3.1"]
+full = ["PySide6>=6.5", "pyqtgraph>=0.13", "PyOpenGL>=3.1", "obstore>=0.11"]
 dev = ["pytest>=7.0"]
 
 [project.urls]

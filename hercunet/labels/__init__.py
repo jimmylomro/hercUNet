@@ -2,10 +2,13 @@
 
 The per-window pipeline (cleaned substrate + frame field → 2.5-D meshlets → slab selection →
 8-D contrastive embedding → probeom clustering → medial-mesh fit → ∇φ / owner_full →
-confidence + quality → .npz) is documented in ``docs/pseudo-labels.md`` and is being moved into
+confidence + quality → .npz) is documented in ``submission/md/herculabels.md`` and is being moved into
 this package stage by stage. :func:`create` is the stable entry point the CLI lands behind.
 """
 
+from .corpus import Corpus
 from .create import create
+from .edit_cmd import edit_corpus
+from .export import export
 
-__all__ = ["create"]
+__all__ = ["create", "edit_corpus", "export", "Corpus"]

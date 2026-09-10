@@ -335,13 +335,14 @@ def _slab_bump_torch(cand, med, nrm, jac, halfw, L, idx, own_lab, sn_cap, ss2, s
     halfw_t = torch.as_tensor(halfw, dtype=torch.float32, device=dev)
     L_t = torch.as_tensor(L, device=dev)
     cand_t = torch.as_tensor(cand, dtype=torch.float32, device=dev)
-    idx_t = torch.as_tensor(idx, dtype=torch.long, device=dev)
     own_t = torch.as_tensor(own_lab, device=dev)
     cap_t = torch.as_tensor(sn_cap, dtype=torch.float32, device=dev)
+    # NB: the full neighbour-index array `idx` [Ncand, kk] int64 is ~2.3GB for a whole window — do NOT move it
+    # to the GPU wholesale (that was the build_gradphi OOM). Keep it on CPU; move only each chunk's slice.
     out = np.empty(len(cand), np.float32)
     for s in range(0, len(cand), chunk):
         e = min(s + chunk, len(cand))
-        ix = idx_t[s:e]
+        ix = torch.as_tensor(idx[s:e], dtype=torch.long, device=dev)
         same = (L_t[ix] == own_t[s:e, None])
         V = cand_t[s:e, None, :] - med_t[ix]
         n = nrm_t[ix]; J = jac_t[ix]

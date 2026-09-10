@@ -86,19 +86,19 @@ def probeom_labels(z, min_cluster_size=250, min_samples=None, soft_max_frac=1.5,
     med = float(np.median(np.sort(uc)[:-1])) if len(uc) > 1 else (float(np.median(uc)) if len(uc) else 50.0)
     soft_max = max(soft_max_frac * med, 1.0)
 
-    raw = cl.condensed_tree_.to_pandas()
+    raw = cl.condensed_tree_.to_numpy()                          # structured array: parent, child, lambda_val, child_size
     root = int(raw["parent"].min())
     crows = raw[raw["child_size"] > 1]
     births = {root: 0.0}
-    for _, r in crows.iterrows():
+    for r in crows:
         births[int(r["child"])] = float(r["lambda_val"])
-    cluster_ids = [root] + sorted(int(c) for c in crows["child"].unique())
+    cluster_ids = [root] + sorted(int(c) for c in np.unique(crows["child"]))
     idset = set(cluster_ids)
     stability = {cid: float(((raw[raw["parent"] == cid]["lambda_val"] - births[cid])
                              * raw[raw["parent"] == cid]["child_size"]).sum()) for cid in cluster_ids}
     children_map = {cid: [] for cid in cluster_ids}
     size = {}
-    for _, r in crows.iterrows():
+    for r in crows:
         p, c = int(r["parent"]), int(r["child"])
         if p in idset:
             children_map[p].append(c)
@@ -132,10 +132,10 @@ def probeom_labels(z, min_cluster_size=250, min_samples=None, soft_max_frac=1.5,
 
     select(root, is_root=True)
 
-    cluster_parent = {int(r["child"]): int(r["parent"]) for _, r in crows.iterrows()}
+    cluster_parent = {int(r["child"]): int(r["parent"]) for r in crows}
     labels = np.full(n, -1, int)
     lut = {cid: i for i, cid in enumerate(sorted(selected))}
-    for _, r in raw[raw["child_size"] == 1].iterrows():
+    for r in raw[raw["child_size"] == 1]:
         pid, cur = int(r["child"]), int(r["parent"])
         while cur is not None:
             if cur in selected:

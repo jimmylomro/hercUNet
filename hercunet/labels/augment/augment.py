@@ -107,6 +107,54 @@ def borderline_split(E, ulab, cluster, *, pcs=15, min_gap=1.0, max_pairs=None):
     return best[1], float(best[0])
 
 
+def forced_split(E, ulab, cluster, *, pcs=15):
+    """FORCE a split of one cluster at its weakest embedding seam — for interactive label editing.
+
+    Unlike :func:`borderline_split` (which only splits a GENUINELY bimodal cluster and returns ``None``
+    otherwise), this always splits a cluster of ≥2 units into two non-empty parts at its weakest point:
+    the most-separated top-``pcs`` global-PCA axis by a 2-component GMM, and — when no axis gives a clean
+    GMM cut — the LARGEST GAP along PC1 (the weakest link in the ordinal ladder). Returns
+    (unit_side [bool over the cluster's units, ascending unit id; True = side B], separation) or None
+    (a cluster with <2 units, or degenerate/coincident embeddings, can't be split)."""
+    from sklearn.mixture import GaussianMixture
+    sel = np.where(ulab == cluster)[0]
+    if len(sel) < 2:
+        return None
+    Ec = E[sel]
+    mu = E[ulab >= 0].mean(0)
+    _, _, Vt = np.linalg.svd(E[ulab >= 0] - mu, full_matrices=False)
+    ax = Vt[:min(pcs, Vt.shape[0])]
+    proj = (Ec - mu) @ ax.T                                            # [n, pcs]
+    best = None
+    if len(sel) >= 8:                                                  # a GMM needs a few points per mode
+        for j in range(proj.shape[1]):
+            x = proj[:, j:j + 1]
+            try:
+                g2 = GaussianMixture(2, covariance_type="full", random_state=0).fit(x)
+            except Exception:
+                continue
+            m0, m1 = g2.means_[:, 0]
+            s = np.sqrt(g2.covariances_[:, 0, 0]).mean()
+            gap = abs(m0 - m1) / (s + 1e-9)
+            side = (g2.predict(x) == int(m1 > m0))
+            if 0 < int(side.sum()) < len(side) and (best is None or gap > best[0]):
+                best = (gap, side)
+    if best is not None:
+        return best[1], float(best[0])
+    x = proj[:, 0]                                                     # fallback: cut the biggest gap along PC1
+    order = np.argsort(x)
+    xs = x[order]
+    gaps = np.diff(xs)
+    if len(gaps) == 0 or float(gaps.max()) <= 0.0:
+        return None
+    k = int(np.argmax(gaps)) + 1
+    thr = 0.5 * (xs[k - 1] + xs[k])
+    side = x > thr
+    if int(side.sum()) == 0 or int(side.sum()) == len(side):
+        return None
+    return side, float(gaps.max())
+
+
 def dropped_lowconf(pts, plab, shape, *, smooth_px=3.0, norm_pct=99.0, gamma=2.5, region_eps=0.1):
     """SMOOTH but TIGHTLY-LOCALISED low-confidence from DROPPED points (plab < 0 = eom noise /
     sub-min_cluster_size fragments): structure we detected but couldn't confidently assign a sheet. Splat the

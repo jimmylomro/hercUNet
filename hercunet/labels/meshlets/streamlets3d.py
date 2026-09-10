@@ -9,7 +9,7 @@ the meshlets at a physical ``sample_um`` (:func:`sample_streamlet_points`).
 :func:`cluster_streamlets` is the entry the per-window pipeline calls: it builds the mutual-slab /
 gap-gated tables and trains the contrastive embedding (``embedding.paperlet``), then labels that
 embedding by probeom (``embedding.affinity``). One embedding vector per meshlet — a meshlet's points
-move together as one unit. All lengths are µm→px via ``voxel_um``; see ``docs/pseudo-labels.md`` §3–4.
+move together as one unit. All lengths are µm→px via ``voxel_um``; see ``submission/md/herculabels.md`` §3–4.
 """
 
 from __future__ import annotations

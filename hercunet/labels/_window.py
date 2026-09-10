@@ -20,12 +20,16 @@ from hercunet.labels.meshlets.streamlets3d import (
 from hercunet.labels.selection.membership import normal_jacobian_batch
 
 
-def extract_window(args, brick: dict) -> dict:
+def extract_window(args, brick: dict, progress=None) -> dict:
     """Frame → spines+ribs → embedding → probeom for one window.
 
     ``args`` carries: ``sigma_tensor``, ``gpu``, ``seed_stride_um``, ``sample_um``,
     ``min_cluster_size``. ``brick`` = ``{bced, voxel_um, org}``. Returns the per-point superset
     (points, labels, normals/jac, embedding, propagation distance, full-res fibre field).
+
+    ``progress`` (optional ``callable(stage, payload)``) is an OBSERVER hook for the interactive
+    viewer — it never changes the computation. Emits ``"streamlets"`` with the pre-cluster point
+    cloud (local z,y,x + spine/rib kind) once growth+sampling finishes, before clustering starts.
     """
     bced = np.ascontiguousarray(brick["bced"], np.float32)
     vu = brick["voxel_um"]
@@ -51,6 +55,8 @@ def extract_window(args, brick: dict) -> dict:
     cent = np.zeros((S, 3)); cnt = np.zeros(S)
     np.add.at(cent, sid, pts); np.add.at(cnt, sid, 1.0); cent /= np.maximum(cnt[:, None], 1.0)
     print(f"grew {S} spines + {len(ribs)} ribs → {len(pts)} pts", flush=True)
+    if progress is not None:                                           # observer hook (viewer) — pre-cluster cloud
+        progress("streamlets", {"pts": pts.astype(np.float32), "kind": kind.astype(np.int8)})
 
     lab, nB, info = cluster_streamlets(spines, bced, ff, vu, sample_um=args.sample_um, sigma_n_um=25.0,
                                        pos_pull=1.0, seed=0, presampled=(pts, sid, cent), n_units=S,

@@ -132,14 +132,14 @@ def structure_tensor_frame_torch(
         fibre = np.empty((n, 3), np.float32) if want_fibre else None
         normal = np.empty((n, 3), np.float32)
         coh = np.empty(n, np.float32)
-        chunk = 1_000_000 if want_fibre else 8_000_000        # closed-form is cheap → bigger chunks
-        if want_fibre and jzz.is_cuda:
-            # cuSOLVER's batched syev raises CUSOLVER_STATUS_INVALID_VALUE on 3×3 batches (torch 2.8/CUDA12.8
-            # Blackwell/Ada); MAGMA handles them and is bundled in the cu124/cu128 wheels.
-            try:
-                torch.backends.cuda.preferred_linalg_library("magma")
-            except Exception:
-                pass
+        # eigh chunk: torch's batched syevd workspace is ~270KB per 3×3 matrix on some CUDA builds
+        # (e.g. 2.14/cu130), so a 1M batch wants ~270GB and thrashes VRAM. Cap the GPU batch to a size
+        # that fits (~2GB); on CPU (LAPACK) the workspace is tiny, so keep big chunks. Closed-form path
+        # is cheap either way. (Measured: batch 8k → ~2.2GB peak, 20k → ~5.4GB, 40k → OOM on an 8GB card.)
+        if want_fibre:
+            chunk = 8_000 if jzz.is_cuda else 1_000_000
+        else:
+            chunk = 8_000_000
         for i in range(0, n, chunk):
             sl = slice(i, i + chunk)
             if want_fibre:
@@ -147,8 +147,11 @@ def structure_tensor_frame_torch(
                     [torch.stack([jzz[sl], jzy[sl], jzx[sl]], dim=-1),
                      torch.stack([jzy[sl], jyy[sl], jyx[sl]], dim=-1),
                      torch.stack([jzx[sl], jyx[sl], jxx[sl]], dim=-1)], dim=-2)
-                w, vec = torch.linalg.eigh(jc)                 # ascending eigenvalues
-                fibre[sl] = vec[..., :, 0].cpu().numpy()       # smallest λ → along fibre
+                try:
+                    w, vec = torch.linalg.eigh(jc)             # default backend (cuSOLVER on current torch)
+                except Exception:                              # old cuSOLVER rejects 3×3 batches / rare backend OOM
+                    w, vec = torch.linalg.eigh(jc.cpu())       # → CPU LAPACK (small: chunk×3×3)
+                fibre[sl] = vec[..., :, 0].cpu().numpy()       # smallest λ → along fibre  (.cpu() no-op if CPU)
                 normal[sl] = vec[..., :, 2].cpu().numpy()      # largest λ  → across sheet
                 coh[sl] = (1.0 - w[..., 0] / (w[..., 2] + 1e-12)).cpu().numpy()
                 del jc, w, vec

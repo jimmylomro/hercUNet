@@ -132,7 +132,7 @@ it a streamline meanders within the sheet, loops back on itself, or slips across
 neighbouring wrap wherever the in-plane orientation is ambiguous; with it the primitive stays a clean planar
 cross whose two arms report the sheet's true local tangent frame.
 
-![The 2.5-D meshlet primitive: a spine grown along the fibre and ribs grown perpendicular, each confined to a seed-frozen plane so it pitches across the normal but never yaws within the sheet.](../submission/images/meshlet_primitive.jpg)
+![The 2.5-D meshlet primitive: a spine grown along the fibre and ribs grown perpendicular, each confined to a seed-frozen plane so it pitches across the normal but never yaws within the sheet.](../images/meshlet_primitive.jpg)
 
 Points are sampled along the spine and ribs at **20 µm** spacing to form a small cloud; each point is tagged by
 which arm it came from — spine-derived (**recto**) or rib-derived (**verso**) — a distinction the embedding later
@@ -165,7 +165,7 @@ compressed sheets without leaking onto their neighbours. The same slab machinery
 **positive** pulls same-sheet points together (this section), and a **negative** pushes the adjacent wrap away
 (Section 5).
 
-![The positive slab. Left: the slab is an anisotropic Gaussian hugging a curved sheet — wide in-plane σ_s, tight (asymmetric) σ_n across the normal, curvature-following — so a far same-sheet point is captured while the adjacent wrap is cut off. Right: mutuality — a pair counts as positive only if both slabs contain each other, which rejects the adjacent wrap (A's slab may reach C, but C's slab, with its normal flipped, does not reach A).](../submission/images/sheet_slab.jpg)
+![The positive slab. Left: the slab is an anisotropic Gaussian hugging a curved sheet — wide in-plane σ_s, tight (asymmetric) σ_n across the normal, curvature-following — so a far same-sheet point is captured while the adjacent wrap is cut off. Right: mutuality — a pair counts as positive only if both slabs contain each other, which rejects the adjacent wrap (A's slab may reach C, but C's slab, with its normal flipped, does not reach A).](../images/sheet_slab.jpg)
 
 ### 4.1 The slab: an anisotropic Gaussian in the surface frame
 
@@ -321,7 +321,7 @@ ordering (Section 6).
 This gap-gated selection, on the two-sided asymmetric slab frame, is the method that generated the entire label
 corpus.
 
-![The gap-gated negative. Left: from the anchor the density is traced along the normal; a negative fires only on a valley-then-rise (material → gap → material), and the push is gathered at the far ridge c = anchor + D·n̂ where the profile rises, weighted by a kernel that is Gaussian across the ray and exponentially near-favouring along it. Right: the relative profile rel(t) with the valley threshold τ, the neighbour-rise threshold τ_nb, the conservative gate, the valley depth, and the measured pitch D.](../submission/images/gap_gated_negative.jpg)
+![The gap-gated negative. Left: from the anchor the density is traced along the normal; a negative fires only on a valley-then-rise (material → gap → material), and the push is gathered at the far ridge c = anchor + D·n̂ where the profile rises, weighted by a kernel that is Gaussian across the ray and exponentially near-favouring along it. Right: the relative profile rel(t) with the valley threshold τ, the neighbour-rise threshold τ_nb, the conservative gate, the valley depth, and the measured pitch D.](../images/gap_gated_negative.jpg)
 
 ### 5.3 The slab-field refinement (the current improvement)
 
@@ -441,14 +441,9 @@ contribution to per-voxel confidence.
 The net behaviour is that heavily over-merged windows split into their true wraps while already-clean windows
 are left untouched — the correction acts only where the bias was doing damage.
 
-> **📷 Figure to add (after the code port) — `submission/images/embedding_space.jpg`:** a low-dimensional
-> projection (PCA/UMAP to 2–3 D) of the trained 8-D embedding for a real window, coloured by the **probeom
-> cluster** assigned here, showing same-sheet primitives collapsed into tight cores and the adjacent wraps laid
-> out as an ordered ladder, with the propagated filler shaded by its distance-to-core (the low-confidence signal).
+![A 3-D PCA projection of the trained 8-D embedding for a real window, coloured by the probeom cluster assigned here: same-sheet primitives collapse into tight cores and the adjacent wraps lay out as an ordered ladder, with the propagated filler shaded by its distance-to-core (the low-confidence signal). The recovered sheets are shown alongside for reference.](../images/sheets-with-embeddings.jpg)
 
-> **📷 Figure to add (after the code port) — `submission/images/sheets_3d.jpg`:** a 3-D render of the recovered
-> sheets in a real window, each cluster drawn as its own solid-material surface in a distinct colour — the same
-> clustering as the embedding figure above, now seen in the volume as separated papyrus sheets.
+![The recovered sheets in a real window, each cluster drawn as its own solid-material medial surface in a distinct colour — the same clustering as the embedding figure above, now seen in the volume as separated papyrus sheets.](../images/sheets-with-sheets.jpg)
 
 ---
 
