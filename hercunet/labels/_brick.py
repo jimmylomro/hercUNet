@@ -134,7 +134,7 @@ def scroll_material_mask(be, target, *, mask_level=5):
     thr = float(np.percentile(ct5, 55))                         # material = above the scroll's 55th percentile
     mask = np.ascontiguousarray(ct5 > thr)
     fac = float(m.level_shapes[0][0] / Z5)                      # L0 voxels per coarse voxel (~2**mask_level)
-    out = (mask, fac, (int(Z5), int(Y5), int(X5)))
+    out = (mask, fac, (int(Z5), int(Y5), int(X5)), float(m.voxel_size_um))
     _MASK_CACHE[key] = out
     return out
 
@@ -143,8 +143,7 @@ def window_material_frac(be, target, coords, *, mask_level=5):
     """Material fill fraction of the window centred at ``coords`` (L0 voxels), estimated from the cached
     coarse mask — instant, no full-res read. Same window footprint as :func:`build_brick`."""
     from hercunet.labels.common.scales import window_px, window_z_px
-    mask, fac, (Z5, Y5, X5) = scroll_material_mask(be, target, mask_level=mask_level)
-    voxel_um = be.open_scroll_volume(target).meta.voxel_size_um
+    mask, fac, (Z5, Y5, X5), voxel_um = scroll_material_mask(be, target, mask_level=mask_level)
     Sxy, Sz = window_px(voxel_um), window_z_px(voxel_um)
     zc, yc, xc = coords
 

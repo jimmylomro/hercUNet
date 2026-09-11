@@ -171,13 +171,18 @@ def create(
             print(f"[create] gave up after {attempts} draws with {made}/{count} windows", flush=True)
             break
         target = find_scroll(be, sid)
-        if himat is not None:                                    # instant coarse-mask screen — read only winners
-            frac = window_material_frac(be, target, wcoords)
-            if best is None or frac > best[0]:
-                best = (frac, sid, wcoords)
-            if frac < mat_thr:
-                continue
-        brick = build_brick(be, target, wcoords, level=0, gpu=gpu)
+        try:
+            if himat is not None:                                # instant coarse-mask screen — read only winners
+                frac = window_material_frac(be, target, wcoords)
+                if best is None or frac > best[0]:
+                    best = (frac, sid, wcoords)
+                if frac < mat_thr:
+                    continue
+            brick = build_brick(be, target, wcoords, level=0, gpu=gpu)
+        except Exception as exc:                                 # a scroll/window that won't read (metadata already
+            print(f"[skip] {sid} {wcoords} — read failed after retries "  # retried) must not kill the whole sample
+                  f"({type(exc).__name__}: {str(exc)[:100]}); drawing another", flush=True)
+            continue
         if himat is None:                                        # default: read + screen each candidate
             frac = float((brick["bced"] > np.percentile(brick["bced"], 55)).mean())
             if frac < mat_thr:

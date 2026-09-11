@@ -69,13 +69,36 @@ def parse_voxel_um(url: str, default: float | None = None) -> float | None:
     return float(m.group(1)) if m else default
 
 
-def _http_ok(url: str, timeout: int = 15) -> bool:
-    import requests
+_TRANSIENT_STATUS = frozenset({429, 500, 502, 503, 504})
 
-    try:
-        return requests.get(url, timeout=timeout).status_code == 200
-    except requests.RequestException:
-        return False
+
+def _http_get(url: str, timeout: int = 15, tries: int = 3, base: float = 0.5):
+    """GET a metadata object with transient-retry, mirroring the chunk-read :func:`_retry`. The open-time
+    metadata reads (``discover_levels``) hit the public HTTPS bucket, which occasionally hiccups; a single-shot
+    read there turned a blip into a spurious 'no zarr arrays found'. A 404 is a DEFINITIVE 'absent' (the
+    level-probe loop relies on it to stop) and returns immediately — only connection errors, timeouts and
+    5xx/429 are retried with exponential backoff. Returns the final ``requests.Response`` (200 or 404), or
+    ``None`` if every attempt errored/was transient."""
+    import requests
+    import time
+
+    resp = None
+    for i in range(tries):
+        try:
+            resp = requests.get(url, timeout=timeout)
+        except requests.RequestException:
+            resp = None
+        else:
+            if resp.status_code == 200 or resp.status_code == 404:
+                return resp
+        if i + 1 < tries:
+            time.sleep(base * (2 ** i))
+    return resp
+
+
+def _http_ok(url: str, timeout: int = 15) -> bool:
+    r = _http_get(url, timeout=timeout)
+    return r is not None and r.status_code == 200
 
 
 _UNIT_TO_UM = {
@@ -113,13 +136,8 @@ def voxel_um_from_metadata(base: str) -> float | None:
 
 
 def _http_json(url: str, timeout: int = 15):
-    import requests
-
-    try:
-        r = requests.get(url, timeout=timeout)
-    except requests.RequestException:
-        return None
-    if r.status_code != 200:
+    r = _http_get(url, timeout=timeout)
+    if r is None or r.status_code != 200:
         return None
     try:
         return r.json()

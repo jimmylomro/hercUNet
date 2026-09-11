@@ -449,13 +449,15 @@ class S3Backend(SegmentSource):
 
 # --------------------------------------------------------------------------- helpers --
 def _open_first(candidates: list[str]) -> SegmentVolume:
-    """Try candidate zarr URLs in preference order; return the first that opens."""
+    """Try candidate zarr URLs in preference order; return the first that opens. Transient HTTPS hiccups during
+    the metadata open are absorbed inside ``discover_levels`` (``_http_json``/``_http_ok`` retry with backoff),
+    so a ValueError here means the candidate genuinely has no readable arrays — move to the next one."""
     errors = []
     for url in _ordered(candidates):
         try:
             return ZarrSegment(url, parse_voxel_um(url))
         except Exception as exc:  # try the next candidate rather than hiding the scroll
-            errors.append(f"{url.rsplit('/', 1)[-1] or url}: {type(exc).__name__}")
+            errors.append(f"{url.rsplit('/', 1)[-1] or url}: {type(exc).__name__}: {str(exc)[:80]}")
     raise ValueError("no zarr opened — " + "; ".join(errors[:3]))
 
 
