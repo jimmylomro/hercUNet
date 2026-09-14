@@ -53,7 +53,7 @@ def create(
     sample_um: float = 20.0,
     min_cluster_size: int = 250,
     old_negatives: bool = False,
-    seed: int = 0,
+    seed: int | None = None,
     gpu: bool = True,
     deterministic: bool = True,
 ) -> None:
@@ -62,8 +62,13 @@ def create(
     headless. ``coords`` (``"z,y,x"``, requires ``scroll``) targets one exact window; ``coords_file`` grinds
     an ordered list; ``himat`` mines high-material windows via the coarse mask. ``old_negatives`` selects the
     legacy gap-gated negatives (§5.2) that generated the published corpus; the default is the current
-    slab-field negatives (§5.3)."""
+    slab-field negatives (§5.3). ``seed`` seeds the window-sampling stream; pass ``None`` (the default)
+    for a fresh random draw each run, or a fixed integer for a reproducible one — the resolved value is
+    recorded in the corpus manifest either way."""
     _require_gpu(gpu)
+    if seed is None:                                            # no --seed → a genuinely random draw each run
+        seed = int(np.random.SeedSequence().entropy) % (2**32)  # OS-entropy; recorded below so it stays reproducible
+        print(f"[create] no seed given — using random seed {seed} (pass --seed {seed} to reproduce)", flush=True)
     if interactive:                                             # fail fast (before making the corpus dir) if [viz] is missing
         from ..viz.interactive import require_viewer
         require_viewer()
