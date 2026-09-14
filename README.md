@@ -30,9 +30,11 @@ Start there. Each part of the project also has its own guide under [`docs/`](doc
 - **[Install & CLI](docs/README.md)** — requirements, `pipenv` install, CUDA build selection, the `hercunet` CLI. ✅
 - **[Data layer](docs/data-layer.md)** — streaming OME-Zarr reads, caching, prefetch, tiling, with a quickstart. ✅
 - **[Stage 1 — label generation](docs/herculabels.md)** — the `hercunet labels` CLI, the interactive grinding viewer, the `.herculabels` corpus format. ✅
+- **Stage 2 — HercUNet refiner** — training + iterative inference CLI. 🚧 coming soon (methodology: [`submission/writeup/hercunet.md`](submission/writeup/hercunet.md)).
 
-The stage-1 **methodology** (how the labels are derived) is the research write-up
-[`submission/writeup/herculabels.md`](submission/writeup/herculabels.md).
+The **methodology** research write-ups: stage-1 (how the labels are derived) is
+[`submission/writeup/herculabels.md`](submission/writeup/herculabels.md), and stage-2 (the iterative refiner) is
+[`submission/writeup/hercunet.md`](submission/writeup/hercunet.md).
 
 ## Pipeline stages
 
@@ -40,6 +42,7 @@ The stage-1 **methodology** (how the labels are derived) is the research write-u
 |---|---|---|
 | **Data layer** — streaming multiscale OME-Zarr reads (chunk-cache + parallel prefetch + material tiling) | `hercunet.data` | ✅ implemented |
 | **Stage 1 — Pseudo-label generation** | `hercunet.labels` | ✅ implemented |
+| **Stage 2 — Iterative refiner (HercUNet)** | `hercunet.refine` / `hercunet.infer` | 🚧 coming soon |
 
 ### Stage 1 - HercuLabels
 
@@ -56,6 +59,8 @@ In short:
 7. **Clustering** — density clustering in the embedding recovers per-sheet instances.
 8. **Sheets** — rasterised back to per-voxel sheet labels + honest confidence.
 9. **Fine-tune m7 to validate** - check if HercuLabels carry signal - they do...
+
+**Full methodology → [`submission/writeup/herculabels.md`](submission/writeup/herculabels.md).**
 
 Try this, it's the window that started everything (you need to install with \[viz], check the installation guide):
 ```shell
@@ -86,6 +91,8 @@ In short:
 7. **DAgger** — condition on the model's *own* output as `prev`, not only on labels, so it learns to correct its own mistakes.
 8. **Train** — about 500 epochs, warm-started from m7 weights.
 9. **Iterate at inference** — run 3–4 passes, each taking the previous pass's output as `prev` (with the seam-free overlap blend).
+
+**Full methodology → [`submission/writeup/hercunet.md`](submission/writeup/hercunet.md).**
 
 ![m7 (blue) versus our refiner (magenta) on a 1 cm cross-section of PHerc0800.](submission/images/PHerc0800-m7-vs-ours.jpg)
 
