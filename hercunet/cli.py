@@ -30,11 +30,12 @@ import argparse
 def _labels_create(args: argparse.Namespace) -> None:
     if args.interactive:
         if args.count is not None:
-            raise SystemExit("hercunet labels create: --interactive grinds windows open-endedly — "
-                             "do not pass --count (close the viewer to stop)")
+            raise SystemExit("hercunet labels create: cannot use --count with --interactive — "
+                             "interactive mode grinds windows open-endedly (close the viewer to stop)")
     elif args.coords_file:
         if args.count is not None:
-            raise SystemExit("hercunet labels create: --coords-file defines the windows — do not pass --count")
+            raise SystemExit("hercunet labels create: cannot use --count with --coords-file — "
+                             "the file defines exactly which windows to generate")
     elif args.count is None:
         raise SystemExit("hercunet labels create: --count is required (unless --interactive or --coords-file)")
     if args.coords is not None:
@@ -107,8 +108,9 @@ def _add_labels_create(subparsers: argparse._SubParsersAction) -> None:
                    help="use the OLD gap-gated negatives (submission/writeup/herculabels.md §5.2) that "
                         "generated the PUBLISHED corpus, instead of the default slab-field negatives (§5.3, the "
                         "current method). REQUIRED to reproduce the published corpus (run20260808)")
-    p.add_argument("--seed", type=int, default=0,
-                   help="base random seed for the deterministic sampling stream")
+    p.add_argument("--seed", type=int, default=None,
+                   help="base seed for the window-sampling stream; omit for a fresh random draw each run "
+                        "(the seed used is printed and recorded in the manifest), or pass a value to reproduce a run")
     p.add_argument("--no-gpu", dest="gpu", action="store_false", default=True,
                    help="force CPU (GPU is used by default; label generation is impractically slow on CPU)")
     p.add_argument("--no-deterministic", dest="deterministic", action="store_false", default=True,

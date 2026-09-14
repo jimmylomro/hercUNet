@@ -1,6 +1,15 @@
 # HercUNet
 
+![The iterative refiner across passes (magenta) versus the m7 baseline (blue), on a 2 mm cross-section of PHerc1447.](submission/images/banner-PHerc1447-m7-passes.jpg)
+
 **Cross-volume surface (sheet) detection for carbonised Herculaneum scrolls.**
+
+> **⚠️ Faces vs medials — read before comparing.** HercUNet predicts the **medial** crest of each sheet (a thin
+> surface at the sheet's centre, a few voxels inboard of the **faces** that all other labels — manual or m7-mined —
+> annotate). This is a deliberate, different target, not an error, and it is why we report no Dice against face
+> labels. Our stance: **it is better to have a sheet detection whose face lives flat at a few voxels' offset than
+> one that is flat at zero offset only in some regions and waves harshly everywhere** — a consistent, correctable
+> offset beats intermittent exactness.
 
 Ink and text cannot be read until the papyrus sheets inside a scroll are correctly detected and
 separated. Even if ink is detected on the wrapped volume, we need to unroll to read.
@@ -64,7 +73,21 @@ Also for topological augmentations like sheet merges and things like that, which
 
 ### Stage 2 - HercUNet
 
-Still writing...
+A self-refining and growing sheet detection UNet architecture.
+
+In short:
+
+1. **m7 backbone** — start from the `m7` nnU-Net ResEnc plan and its trained weights.
+2. **New inputs** — add the model's own previous output (`prev`) and a carried orientation field read from the CT's structure tensor (8-channel input: CT + `prev` + 6 orientation).
+3. **Affinity head** — add an affinity output that drives instance separation.
+4. **Loss stack** — supervise with symmetric Focal–Tversky (detection), a separation penalty, skeleton-recall (clDice), constrained MALIS on the affinity field, and a CT-material growth term.
+5. **`prev` from labels** — a fixed fraction of the time, feed the HercuLabels (with their merge/split augmentations) as the `prev` input.
+6. **Bootstrap** — zero the `prev` channel a fraction of the time, so the model also learns cold detection from the raw CT.
+7. **DAgger** — condition on the model's *own* output as `prev`, not only on labels, so it learns to correct its own mistakes.
+8. **Train** — about 500 epochs, warm-started from m7 weights.
+9. **Iterate at inference** — run 3–4 passes, each taking the previous pass's output as `prev` (with the seam-free overlap blend).
+
+![m7 (blue) versus our refiner (magenta) on a 1 cm cross-section of PHerc0800.](submission/images/PHerc0800-m7-vs-ours.jpg)
 
 ## Status
 
