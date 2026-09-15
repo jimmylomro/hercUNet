@@ -1,5 +1,7 @@
 # HercUNet
 
+📄 **[Read the paper (v0) → `paper_v0.pdf`](submission/writeup/paper_v0.pdf)** — the full write-up of both stages (HercuLabels + HercUNet), frozen as the first submission version.
+
 ![The iterative refiner across passes (magenta) versus the m7 baseline (blue), on a 2 mm cross-section of PHerc1447.](submission/images/banner-PHerc1447-m7-passes.jpg)
 
 **Cross-volume surface (sheet) detection for carbonised Herculaneum scrolls.**
@@ -9,7 +11,9 @@
 > annotate). This is a deliberate, different target, not an error, and it is why we report no Dice against face
 > labels. Our stance: **it is better to have a sheet detection whose face lives flat at a few voxels' offset than
 > one that is flat at zero offset only in some regions and waves harshly everywhere** — a consistent, correctable
-> offset beats intermittent exactness.
+> offset beats intermittent exactness. See the figure below.
+
+![Faces vs medials — a YZ cross-section of PHerc1447: m7 annotates the sheet face (blue); our detector predicts the medial crest (magenta), a consistent few-voxel offset inboard of the same sheet.](submission/images/faces-vs-medials-1447-yz.jpg)
 
 Ink and text cannot be read until the papyrus sheets inside a scroll are correctly detected and
 separated. Even if ink is detected on the wrapped volume, we need to unroll to read.
