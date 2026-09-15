@@ -8,7 +8,9 @@
 > error, and it is the main reason we report no Dice against face labels (see §11). Our position is blunt: **it is
 > better to have a sheet detection whose face lives flat at a few voxels' offset than a detection that is flat at
 > zero offset only in some regions and waves harshly everywhere.** A consistent, correctable offset beats
-> intermittent exactness.
+> intermittent exactness. The figure below makes the difference concrete.
+
+![Faces vs medials — a YZ cross-section of PHerc1447. m7 annotates the sheet **face** (blue); our detector predicts the **medial** crest (magenta), sitting a consistent few voxels inboard of the same sheet. The offset is constant and trivially correctable, not a miss.](../images/faces-vs-medials-1447-yz.jpg)
 
 We present the second stage of the pipeline: a learned refiner that turns the unsupervised pseudo-labels of
 the first stage into a dense, self-correcting surface predictor. The refiner is a UNet network based on m7
@@ -335,6 +337,8 @@ logs the two populations (`our` / `m7`) separately and one can watch each actual
 design — the point is to cover the compressed regions our labels cannot, not to let a segmentation-derived
 teacher dominate.
 
+![The mined m7 labels help *a lot* with retaining separation in semi-compressed regions: in a half-compressed region — where our own pseudo-labels are thin and a refiner trained without the blend tends to over-merge — HercUNet keeps the adjacent wraps apart (shown against m7). The small, train-only m7 blend supplies the separation supervision there.](../images/m7-vs-hercunet-merges.jpg)
+
 ---
 
 ## 9. The herculabels carry signal even where they appear to fail
@@ -363,9 +367,7 @@ regions uncertain and keeping them beats deleting them or overwriting them with 
 therefore train on the **uncurated** corpus, keep the small compressed-region m7 blend of §8 as purely additive
 coverage, and never let cleanup drop or replace our own hard cases.
 
-> _[FIGURE PLACEHOLDER: corpus-cleanup signal loss — the cleaned/curated corpus (dropped dirty labels +
-> m7-substituted failures) trained a refiner no better than the uncertain-region-dropped baseline, versus the
-> uncurated corpus. To be added. WE WILL NEED TO RE-RUN THE CLEANED MODELS TO GET IMAGES... )]_
+![The cleaned labels were also carrying signal. A 2 mm XY cross-section of PHerc1447: m7 (blue), and two refiners trained with the *same* recipe but different label sets — ours on the cleaned/curated corpus (yellow; "dirty" windows dropped, failures m7-substituted) and HercUNet on the full uncurated corpus (magenta). The cleaned-corpus model loses the coherent sheet signal HercUNet recovers here — removing the "dirty" labels removed real signal.](../images/cleaned-labels-signal-loss.jpg)
 
 ---
 
@@ -420,6 +422,14 @@ covered, and across the iterative passes (the figures above) — and invite the 
 matter: coherence, completion of broken sheets, and separation of touching wraps. Those are precisely the
 properties a single overlap number, computed against biased, differently-thick, leakage-prone labels, cannot
 report.
+
+**A note on generalisation — a hypothesis, not a result.** The refiner is trained on **4,000+ HercuLabels
+windows mined across 22 carbonised scrolls**, rather than on the labelled neighbourhoods of a single corpus. On
+the standard argument that training breadth improves out-of-distribution behaviour, one would expect it to
+generalise across volumes better than a per-corpus detector — and the cross-scroll results above are at least
+consistent with that. We are deliberately careful not to overstate it: with no independent held-out ground
+truth, we cannot quantify the effect, so we offer it as a reasoned expectation grounded in the training regime,
+not a measured claim.
 
 ---
 

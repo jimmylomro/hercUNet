@@ -23,6 +23,22 @@ env/
 .vesuvius/
 slabcache/
 
+# LaTeX build artifacts (keep the .tex source and the .pdf output)
+*.aux
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.bbl
+*.blg
+*.nav
+*.snm
+*.vrb
+
 # OS / editor
 .DS_Store
 .idea

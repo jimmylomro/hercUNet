@@ -1,0 +1,1297 @@
+%!TeX program = pdflatex
+% =====================================================================
+%  HercUNet — combined submission paper (Stage 1 + Stage 2)
+%  Self-contained: compiles with a stock pdflatex / Overleaf, no special
+%  document class required. Figures are read from ../images/ (submission/images).
+%  To match Socratic's ACM-TOG look on Overleaf, swap the \documentclass line
+%  for  \documentclass[acmtog,review,anonymous]{acmart}  and adapt the front
+%  matter; everything below is class-agnostic.
+% =====================================================================
+\documentclass[10pt,twocolumn,a4paper]{article}
+
+\usepackage[a4paper,top=0.7in,bottom=0.7in,left=0.62in,right=0.62in,columnsep=16pt]{geometry}
+\usepackage{microtype}                                  % tighter, cleaner line-packing
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+\usepackage{upgreek}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage[font=footnotesize,labelfont=bf]{caption}
+\usepackage{enumitem}
+\usepackage{stfloats}                                   % allow figure* at column bottoms in twocolumn
+\usepackage[colorlinks=true,linkcolor=black,citecolor=blue,urlcolor=blue]{hyperref}
+
+% loosen float placement so full-width figures distribute instead of piling up
+\renewcommand{\topfraction}{0.92}
+\renewcommand{\bottomfraction}{0.7}
+\renewcommand{\textfraction}{0.06}
+\renewcommand{\floatpagefraction}{0.75}
+\renewcommand{\dbltopfraction}{0.92}
+\renewcommand{\dblfloatpagefraction}{0.75}
+\setcounter{topnumber}{3}
+\setcounter{bottomnumber}{2}
+\setcounter{totalnumber}{5}
+\setcounter{dbltopnumber}{3}
+% tighten vertical rhythm a touch
+\setlength{\parskip}{0pt}
+\setlength{\abovedisplayskip}{4pt}
+\setlength{\belowdisplayskip}{4pt}
+
+\graphicspath{{../images/}{images/}{./}}
+
+% --- convenience macros --------------------------------------------------
+\newcommand{\um}{\ensuremath{\,\upmu\mathrm{m}}}      % micrometres
+\newcommand{\nhat}{\ensuremath{\hat{\mathbf{n}}}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\dgrad}{\ensuremath{\nabla\phi}}
+
+% figure-with-missing-asset fallback (so the doc builds before all assets exist)
+\newcommand{\figasset}[3]{% {file}{width}{placeholder-height}
+  \IfFileExists{../images/#1}{\includegraphics[width=#2]{#1}}%
+    {\fbox{\parbox[c][#3][c]{#2}{\centering\small\textbf{FIGURE RESERVED}\\[.4em]\texttt{\detokenize{#1}}}}}}
+
+\begin{document}
+
+\twocolumn[{%
+\centering
+{\LARGE\bfseries HercUNet\par}\vspace{4pt}
+{\large A self-refining UNet architecture for sheet detection in Herculaneum
+scrolls\par}\vspace{9pt}
+{\large Jaime Lomeli-R.\quad\textnormal{\normalsize\textbullet}\quad\today\par}\vspace{6pt}
+}]
+
+{\small
+\begin{center}\textbf{Abstract}\end{center}
+\noindent
+Sheet detection must not only find surface but \emph{separate} touching wraps.
+Existing detectors, trained per corpus, do not generalise: they merge touching
+wraps and break thin sheets---topological errors voxel-accuracy metrics never
+expose. We present a two-stage pipeline. \textbf{Stage~1} generates surface
+pseudo-labels fully unsupervised, at a quality high enough to train an nnU-Net,
+on the premise that separation is a problem of \emph{measurement}, not learning:
+adjacent wraps are locally identical, and the only cue between them is the thin
+gap seen edge-on across the sheet normal. From the raw micro-CT we estimate a
+per-voxel orientation frame, grow oriented \emph{primitives} longer than the
+inter-wrap spacing, measure same-sheet and across-gap relations with an
+anisotropic curvature-following slab, and train a contrastive embedding in which
+wraps form an ordered ladder; a size-penalised density clustering recovers
+per-sheet instances, rasterised into a surface crest and a per-voxel sheet
+identity with honest confidence. \textbf{Stage~2} distils these into an iterative
+refiner $D(\mathrm{CT},\mathrm{prev})\!\to\!\mathrm{surface}$ applied repeatedly on
+its own output: a carried CT orientation field supplies the separating cue that
+survives fusion, a constrained-MALIS affinity objective decouples completing a
+sheet from merging two, and the iteration is taught by a synthetic prior channel
+and online DAgger. From learned tractography we take one idea---that a network can
+track a structure through the raw signal beyond the traces it was shown---to grow
+sheets into material the labels never reached. We are candid about the open limit
+(separating \emph{already-merged} wraps is unsolved) and about evaluation: we
+report no Dice, and explain why.
+\par}
+
+\medskip
+\noindent\textbf{Overview.} The pipeline runs over one shared streaming data layer
+for teravoxel OME-Zarr volumes, in two stages: Part~\ref{part:labels} is the
+unsupervised pseudo-label generator (\emph{HercuLabels}); Part~\ref{part:refiner}
+the learned refiner (\emph{HercUNet}) that turns those labels into a dense,
+self-correcting, cross-volume predictor. \emph{A note before comparing:} this
+detector predicts sheet \textbf{medials}, a few voxels inboard of the
+\textbf{faces} every other label (manual or mined from m7) annotates---a
+deliberate, different target, not an error, and the main reason we report no Dice
+against face labels (\S\ref{sec:eval}). \emph{It is better to have a detection
+whose face lives flat at a few voxels' offset than one flat at zero offset only in
+some regions and waving harshly everywhere}: a consistent, correctable offset beats
+intermittent exactness (Figure~\ref{fig:facemed}).
+
+\begin{figure}[t]
+  \centering
+  \figasset{faces-vs-medials-1447-yz.jpg}{\linewidth}{4.5cm}
+  \caption{Faces vs.\ medials --- a YZ cross-section of PHerc1447. m7 annotates
+  the sheet \textbf{face} (blue); our detector predicts the \textbf{medial} crest
+  (magenta), sitting a consistent few voxels inboard of the same sheet. The
+  offset is constant and trivially correctable, not a miss.}
+  \label{fig:facemed}
+\end{figure}
+
+\begin{figure*}[t]
+  \centering
+  \figasset{banner-PHerc1447-m7-passes.jpg}{\textwidth}{4cm}
+  \caption{The iterative refiner across passes (magenta) versus the m7 baseline
+  (blue), on a 2\,mm cross-section of PHerc1447.}
+  \label{fig:banner}
+\end{figure*}
+
+% =====================================================================
+\part{Pseudo-Label Generation (HercuLabels)}
+\label{part:labels}
+% =====================================================================
+
+We generate pseudo-labels fully unsupervised, at a quality high enough to train an
+nnU-Net. The central difficulty is \emph{measurement}, not learning: inside a small
+window two adjacent wraps are locally indistinguishable---same fibre texture,
+thickness, appearance---and the \emph{only} cue between them is the thin gap seen
+edge-on across the sheet normal. Any method that decides membership from a single
+scalar (a density, a coordinate) is fooled wherever sheets bend, fold, or compress
+together.
+
+Our pipeline is built around that fact. From the raw micro-CT we estimate a
+per-voxel orientation \textbf{frame field}; along it we grow oriented surface
+\textbf{primitives} longer than the inter-wrap spacing; between primitives we
+measure two relations---\emph{same-sheet} affinity and \emph{across-gap}
+opposition---with an \textbf{anisotropic, curvature-following, asymmetric slab}
+that conforms to the local material. These train a low-dimensional
+\textbf{contrastive embedding} in which same-sheet primitives collapse and
+adjacent wraps separate into an ordered ladder; a \textbf{size-penalised density
+clustering} then recovers per-sheet instances, rasterised into the two fields
+the refiner consumes---a surface crest and a per-voxel \textbf{sheet-instance
+identity}, each with an honest confidence. The principle throughout: clean
+sheets with truthfully-marked uncertain regions beat confidently-wrong ones.
+
+\section{Setting and notation}
+We work on one window at a time, usually a cube of 192 voxels. A direction always
+means the sheet \textbf{normal} \nhat---across the sheet, along which neighbouring
+wraps separate---and \emph{in-plane} the two tangent directions.
+
+\section{The cleaned substrate and the orientation frame}
+Every later stage needs two things at every point: a clean local density, and
+the direction the sheet faces. Both come from one operator---the
+\textbf{structure tensor} of the density---used first to clean the volume and
+then to read the frame off it.
+
+\paragraph{The structure tensor.} At each voxel we differentiate the density
+with a derivative-of-Gaussian at a small \emph{noise} scale (so it does not
+amplify the voxel grain) and take the outer product of the gradient---a
+$3\times3$ matrix. A lone outer product is rank-one and noisy; the structure
+tensor \textbf{averages} them over a larger \emph{integration} neighbourhood (a
+second Gaussian at the sheet scale). That averaging is decisive: individual
+gradients on a fibre-textured sheet scatter, but their averaged outer product
+has a dominant eigenvector pointing reliably \textbf{across} the sheet.
+Diagonalising (ascending eigenvalues) gives an orthonormal frame---the
+\textbf{largest}-eigenvalue eigenvector is the \textbf{normal} \nhat, the
+\textbf{smallest} the in-plane \textbf{fibre} direction, and the eigenvalue
+anisotropy is a \textbf{coherence} (near one on a crisp sheet, near zero in noise
+or where orientations collide). The two scales---small derivative, larger
+integration---are what let a single robust orientation survive the fibre texture.
+
+\paragraph{Cleaning the substrate (coherence-enhancing diffusion).} The raw CT is
+grainy and its gaps faint, degrading every geometric estimate. We pre-clean it
+with Weickert-style \textbf{coherence-enhancing anisotropic diffusion}~\cite{weickert}
+steered by the frame: intensity flows \textbf{freely in-plane and barely across
+the normal} (diffusion tensor $=$ identity with its across-normal eigenvalue
+$\ll1$), so the flux is the gradient minus its across-normal part. Over a few
+explicit steps---the frame re-estimated as edges sharpen---this smears each sheet
+into a clean connected band while \textbf{widening and sharpening the inter-wrap
+gaps}, the two properties the slab and gap trace depend on. It is destructive by
+design and used only as this geometric substrate, never as a detection input;
+the frame field is the structure tensor of \emph{this cleaned density}.
+
+\paragraph{Why the frame is read from the CT, and sign-free.} The frame is
+derived, never learned, and read from the CT rather than any prediction: where
+two wraps have visually merged the CT still carries \emph{both} orientations even
+though a detector fused them, and that surviving discontinuity is the cue that
+later separates them. The normal is \textbf{sign-free}---within a window nothing
+says which way the umbilicus lies, so any quantity flipping under
+$\nhat\to-\nhat$ is avoided throughout.
+
+\section{The primitive: an oriented 2.5-D surface patch}
+We do not classify voxels. We tile each sheet with a \textbf{primitive}---a small
+planar cross of a \textbf{spine} and perpendicular \textbf{ribs}---sampling the
+local tangent frame. Each arm is a \textbf{streamline}: an integral curve of a
+direction field traced from a seed by \textbf{fixed-step midpoint (RK2)
+integration}, growing both ways, sampled by trilinear interpolation. What
+distinguishes ours from fibre tractography is \emph{which} field is integrated
+and how it is constrained.
+
+Order the structure-tensor eigenvectors by eigenvalue: the \textbf{normal}
+$\mathbf{e}_0$ (largest, across the sheet), the \textbf{fibre} $\mathbf{e}_2$
+(smallest, along the papyrus fibres), and the \textbf{middle} $\mathbf{e}_1$ (the
+second in-plane tangent, across the fibres). Each arm is grown aligned to one
+in-plane axis.
+
+\paragraph{Growing the spine.} A spine is seeded on high-coherence material on a
+40\um\ grid and grown \textbf{along the fibre} $\mathbf{e}_2$. The trick is to
+\textbf{freeze a plane at the seed}---spanned by the seed's normal $\mathbf{e}_0$
+and fibre $\mathbf{e}_2$, so its plane-normal is the middle eigenvector
+$\mathbf{e}_1$---and require the spine to stay both on the sheet and in that
+plane. The step direction is the local normal crossed with the frozen
+plane-normal,
+\begin{equation}
+  \mathbf{d}(p) \;=\; \mathrm{localNormal}(p)\times \mathbf{e}_1(\text{seed}),
+\end{equation}
+perpendicular to the local normal (riding the sheet) and to $\mathbf{e}_1$
+(staying in the plane). Where the sheet is flat this is the fibre direction;
+where it undulates, $\mathbf{d}$ \textbf{pitches} across the normal to follow the
+surface but can \textbf{never yaw} out of the frozen plane---projected onto the
+seed's tangent plane, the spine is a straight line along the fibre. Two details:
+the step is driven by the \textbf{local normal} (the structure tensor's most
+stable output) rather than the fibre eigenvector, which is ill-defined where the
+two in-plane eigenvalues are close and makes a streamline wander; and each 8\um\
+step is \textbf{sign-coherent} and \textbf{gap-shy} (coasting through a few
+low-signal steps), so the spine drives through a locally incongruent stretch
+instead of stopping. Growth halts at 250\um\ per side.
+
+\paragraph{Growing the ribs.} Ribs are the dual. They are seeded at
+\textbf{arc-length samples of the spine, every 20\um}---so each begins on a recto
+point---and grown along the \textbf{middle eigenvector} $\mathbf{e}_1$
+(perpendicular to the spine), same 8\um\ step, out to 100\um\ per side. The rule
+is identical with the frozen plane-normal swapped from $\mathbf{e}_1$ to the
+\textbf{fibre} $\mathbf{e}_2$: the rib is flat in the fibre direction while
+pitching across the normal. Ribs gate on \textbf{planarity} rather than
+fibre-coherence, so they are \emph{less} shy than the spine and run straight
+across low-congruency regions; each remembers its parent spine.
+
+\paragraph{Why one direction is held flat.} Each arm grows freely along one
+in-plane axis while the other is \textbf{frozen}---the spine flat to
+$\mathbf{e}_1$, each rib flat to $\mathbf{e}_2$. That constraint makes the
+primitive \emph{hug} the sheet: free to pitch across the normal to track
+undulation, forbidden to yaw sideways (Figure~\ref{fig:meshlet}). Without it a
+streamline meanders, loops, or slips across a faint gap onto the neighbour
+wherever the in-plane orientation is ambiguous.
+
+\begin{figure}[h]
+  \centering
+  \figasset{meshlet_primitive.jpg}{0.85\linewidth}{5cm}
+  \caption{The 2.5-D meshlet primitive: a spine grown along the fibre and ribs
+  grown perpendicular, each confined to a seed-frozen plane so it pitches across
+  the normal but never yaws within the sheet.}
+  \label{fig:meshlet}
+\end{figure}
+
+Points are sampled along the spine and ribs at 20\um\ spacing to form a small
+cloud; each point is tagged by which arm it came from---spine-derived
+(\textbf{recto}) or rib-derived (\textbf{verso})---a distinction the embedding
+later relies on. A primitive is a piece of geometry only; it is never treated as
+a node in a graph, and no connectivity is asserted between primitives at this
+stage.
+
+A window tiles into of order \textbf{twenty thousand spines} and a few hundred
+thousand ribs, sampling to a few million points---of which, because ribs are
+short and dense, only about \textbf{10\,\% are recto (spine) and 90\,\% verso
+(rib)}, an imbalance corrected later. The length scales (40\um\ seed grid,
+20\um\ point spacing, 250/100\um\ arms) were set by sweeping seed stride and
+sampling distance for a quality-vs-runtime operating point that keeps generation
+tractable while still resolving sheets cleanly---not a fundamental limit.
+
+Two properties make the primitive the right unit: it is \textbf{oriented}, so the
+slab can be posed in the sheet's own frame; and it is \textbf{longer than the
+merge} it must survive---a patch spanning more than the inter-wrap gap cannot be
+explained by a single wrong wrap, so the cue to separate two wraps lives within
+the primitive, not only across many.
+
+\section{The surface slab --- the central measurement}
+All membership decisions reduce to one question about a pair of points:
+\emph{does the candidate lie on the same sheet as the anchor?} We answer it with
+a \textbf{slab}---a soft, thin, sheet-shaped region attached to the anchor,
+scoring high inside and low outside. It is the core measurement of the method,
+and its shape is what lets the pipeline follow curved and compressed sheets
+without leaking onto neighbours (Figure~\ref{fig:slab}). The same machinery serves
+both relations: a \textbf{positive} pulls same-sheet points together (this
+section), a \textbf{negative} pushes the adjacent wrap away (\S\ref{sec:negatives}).
+
+\begin{figure*}[tb]
+  \centering
+  \figasset{sheet_slab.jpg}{\textwidth}{5cm}
+  \caption{The positive slab. Left: the slab is an anisotropic Gaussian hugging
+  a curved sheet---wide in-plane $\sigma_s$, tight (asymmetric) $\sigma_n$ across
+  the normal, curvature-following---so a far same-sheet point is captured while
+  the adjacent wrap is cut off. Right: mutuality---a pair counts as positive only
+  if both slabs contain each other, which rejects the adjacent wrap (A's slab may
+  reach C, but C's slab, with its normal flipped, does not reach A).}
+  \label{fig:slab}
+\end{figure*}
+
+\subsection{The slab: an anisotropic Gaussian in the surface frame}
+Let the anchor (one of the points sampled at the spines) sit at a point with
+unit normal \nhat, and let a candidate be reached by the offset vector
+$\mathbf{v}$. In the anchor's local \textbf{Darboux frame}---the two in-plane
+tangents together with the normal---we split $\mathbf{v}$ into a signed distance
+\emph{across} the sheet and the residual \emph{in-plane} displacement:
+\begin{itemize}[nosep]
+  \item across-normal distance: $d_n = \mathbf{v}\cdot\nhat$;
+  \item in-plane residual: $\mathbf{v}_\parallel = \mathbf{v}-d_n\nhat$, with
+        in-plane distance $\rho=|\mathbf{v}_\parallel|$.
+\end{itemize}
+The slab score is an \textbf{anisotropic Gaussian} in this frame---$\exp(-d^2)$
+for a \textbf{Mahalanobis distance} $d$, generous in-plane and tight across the
+normal:
+\begin{equation}
+  S(\text{anchor}\!\to\!\text{candidate}) =
+  \exp\!\Big(-\rho^2/\sigma_s^2 - d_n^2/\sigma_n^2\Big),
+\end{equation}
+with $\sigma_n\ll\sigma_s$. A point on the same flat sheet has $d_n\approx0$ at
+any $\rho$ and scores near one; a point on the adjacent wrap has large $|d_n|$
+and is cut off---an isotropic neighbourhood could not tell a far same-sheet point
+from a near adjacent-wrap one. Two refinements follow: a curvature-corrected
+distance (\S\ref{sec:curv}) and a two-sided, material-adaptive $\sigma_n$
+(\S\ref{sec:asym}).
+
+\subsection{Following the curvature}\label{sec:curv}
+Sheets are not flat, and a na\"ive across-normal test punishes a curved sheet's
+own far parts as if they left it. We correct with the local \textbf{shape
+operator} (the Jacobian of the normal field): from it we read the normal
+curvature $\kappa$ along $\mathbf{v}_\parallel$ and replace $d_n$ with a distance
+measured from the osculating sheet rather than the flat tangent plane:
+\begin{equation}
+  r \;=\; \frac{d_n - \tfrac12\,\kappa\,\rho^2}{\sqrt{1+\kappa^2\rho^2}}.
+\end{equation}
+The $\tfrac12\kappa\rho^2$ term is how far the curved sheet has risen off its
+tangent plane at $\rho$, so a point following the bend keeps $r\approx0$ while
+only a genuine gap-crossing earns a large $r$. The slab thus hugs a rolling sheet
+instead of slicing a chord.
+
+\subsection{The asymmetric across-normal width}\label{sec:asym}
+Putting the curvature-corrected $r$ in place of $d_n$ gives the score we actually
+evaluate,
+\begin{equation}
+  S(\text{anchor}\to\text{candidate}) \;=\;
+  \exp\!\Big(-\rho^2/\sigma_s^2 - r^2/\sigma_n^2\Big),
+\end{equation}
+with in-plane reach $\sigma_s$ ($\sim$180\um, the primitive's scale) and an
+across-normal half-width $\sigma_n$ that is the delicate part. A fixed $\sigma_n$
+is wrong: near a tight gap it bleeds onto the neighbour, and the material around
+the medial is \textbf{not symmetric}---the distance to the ridge edge and to the
+next wrap differs on the two sides.
+
+We make the width \textbf{two-sided and material-adaptive}. Sampling density
+outward along $\pm\nhat$, on each side we find the first point where it falls
+below a fixed fraction of the anchor value---the local ridge edge, where the gap
+begins. The half-width for that side is a fixed fraction of that edge distance,
+clamped so it can only \textbf{tighten} below the default (near edges and tight
+gaps), never widen (clear space falls back to the cap). The slab uses
+$\sigma_n^{+}$ for $d_n\ge0$ and $\sigma_n^{-}$ otherwise: an \textbf{asymmetric
+slab} conforming to the material envelope---further on the open side, pulled in on
+the crowded side, never crossing a gap the density reports, on either face
+independently.
+
+\subsection{From the slab to positive (same-sheet) pairs}
+An anchor's slab tells us which candidates \emph{it} considers same-sheet, but an
+adjacent wrap across the normal can fall inside its generous in-plane reach. We
+therefore require \textbf{mutuality}: a pair is positive only if each lies in the
+other's slab, evaluated in its \emph{own} frame; the weight is the product of the
+two scores. This structurally rejects the neighbour---one sheet's slab may reach
+across the gap, but the neighbour's, with its normal pointing back, does not reach
+the anchor, so the product collapses.
+
+One safeguard is a \textbf{down-weighting, never a repulsion}: a soft attenuation
+that fades a positive as its across-normal distance grows, weakening a spurious
+glue across a small step. Being one-directional---it can stop a bad glue but never
+push apart---keeps it \textbf{fold-safe}: a genuine fold is held together by its
+in-plane path even as the attenuation fades.
+
+\section{Opposition across the gap --- the negatives}\label{sec:negatives}
+Pulling same-sheet points together does not separate wraps; something must
+actively \textbf{push the adjacent wrap away}. Choosing these negative pairs is
+the hardest part of the method; it went through three generations, and the
+failure of the first motivates the third.
+
+\subsection{The corridor (the failed first attempt)}
+The first approach took, from each patch, \textbf{any} other displaced by more
+than a wrap-thickness along the normal, on the logic that a same-sheet point
+projects to near-zero across-normal distance. This holds on a \textbf{flat} sheet
+but not a \textbf{curved} one: a bend lifts a sheet's own far parts off the
+tangent plane (the $\tfrac12\kappa\rho^2$ rise), so they project large
+across-normal distances and are swept up as false negatives; the embedding pushes
+a sheet \textbf{apart from itself} and sheets fragment. The corridor had no notion
+of a gap---it measured only across-normal distance, exactly the quantity
+curvature corrupts.
+
+\subsection{Gap-gating (the working method, used to generate the corpus)}
+The fix: fire a negative \textbf{only where there is a demonstrable gap}, placed
+on its far side. The rule operates on the \textbf{relative density profile} along
+the normal, normalised by the anchor value so it is contrast-independent:
+\begin{equation}
+  \mathrm{rel}(t) \;=\; \frac{d(\text{anchor}+t\,\nhat)}{d(\text{anchor})},
+  \quad t=0,2,4,\dots\um
+\end{equation}
+sampled on both normal sides.
+
+\paragraph{The valley-then-rise gate.} A side fires only if three conditions hold
+together: the material genuinely ends ($\sigma_n<\sigma_{\max}$); the profile
+\textbf{falls into a valley}, $\mathrm{rel}(t)<\tau$ beyond a conservative gate
+$t\ge\max(\mathrm{margin}_k\cdot\sigma_n,\,t_{\text{floor}})$ (so the anchor's own
+tail is never read as a gap); and it \textbf{rises again},
+$\mathrm{rel}(t')\ge\tau_{nb}$ at $t'>t$---\emph{material $\to$ gap $\to$
+material}. With $\tau\approx0.3$, $\tau_{nb}\approx0.5$,
+$t_{\text{floor}}\approx15$\um, $\mathrm{margin}_k\approx2.5$, this is a
+\textbf{matched criterion for one inter-wrap gap}. If the profile continues---through
+a fold, or compressed material with no valley---no negative is produced, so the
+method is \textbf{fold-safe by construction}.
+
+\paragraph{The gather point.} The distance of the neighbour rise, $D=t'$, is the
+measured local \textbf{pitch} to the next wrap, and the negative is gathered at
+the \textbf{far ridge}: we query the point cloud for the nearest patches to
+\begin{equation}
+  \mathbf{c} \;=\; \text{anchor}+D\,\nhat \qquad (\text{the blob centre}),
+\end{equation}
+not to the anchor. Those nearest-to-$\mathbf{c}$ patches \emph{are} the adjacent
+wrap. (Gathering near the anchor instead---as one naturally would---returns the
+anchor's own in-plane neighbourhood, which never reaches across the gap; that
+mistake once produced essentially zero negative coverage.)
+
+\paragraph{The weight.} Each gathered candidate $q$ is scored by a
+\textbf{separable anisotropic kernel} in the normal-ray frame, decomposing
+$q-\text{anchor}$ into an along-normal projection $\mathrm{proj}$ and a
+perpendicular offset $\mathrm{perp}$:
+\begin{equation}
+  \mathrm{neg\_w}(q) \;=\; e^{-\mathrm{depth}/\sigma_d}\cdot
+  e^{-\frac12(\mathrm{perp}/\sigma_{ip})^2}\cdot e^{-\mathrm{proj}/\lambda}.
+\end{equation}
+The three factors: a \textbf{depth gate} $e^{-\mathrm{depth}/\sigma_d}$ on how
+deep the valley fell (deeper $\Rightarrow$ stronger push; a shallow same-sheet
+valley $\Rightarrow\approx0$, the fold-safety); a \textbf{Gaussian across the
+ray} $e^{-\frac12(\mathrm{perp}/\sigma_{ip})^2}$ keeping the push on-axis
+($\sigma_{ip}\approx40$\um); and an \textbf{exponential decay along the ray}
+$e^{-\mathrm{proj}/\lambda}$ favouring the nearest wrap ($\lambda\approx60$\um).
+It is the dual of the positive slab---a \textbf{Gaussian} centred on the anchor
+there, an anisotropic kernel centred on the \textbf{far ridge} here, Gaussian
+on-axis and exponentially near-favouring.
+
+\paragraph{Ordinality for free.} Because the trace stops at the \emph{first}
+valley-then-rise, the negative lands on the \textbf{immediately} adjacent wrap
+and never skips one---the property that later orders the embedding
+(\S\ref{sec:embedding}). This gap-gated selection on the asymmetric slab frame
+(Figure~\ref{fig:negative}) generated the entire corpus.
+
+\begin{figure*}[tb]
+  \centering
+  \figasset{gap_gated_negative.jpg}{\textwidth}{5cm}
+  \caption{The gap-gated negative. Left: from the anchor the density is traced
+  along the normal; a negative fires only on a valley-then-rise (material $\to$
+  gap $\to$ material), and the push is gathered at the far ridge
+  $\mathbf{c}=\text{anchor}+D\nhat$ where the profile rises, weighted by a kernel
+  that is Gaussian across the ray and exponentially near-favouring along it.
+  Right: the relative profile $\mathrm{rel}(t)$ with the valley threshold $\tau$,
+  the neighbour-rise threshold $\tau_{nb}$, the conservative gate, the valley
+  depth, and the measured pitch $D$.}
+  \label{fig:negative}
+\end{figure*}
+
+\subsection{The slab-field refinement (the current improvement)}
+Gap-gating weakens exactly where wraps are crushed together: the raw density
+between them stays grey rather than dropping to a valley, and the boundary test
+(which requires the across-normal width below its cap) rejects the thick material
+outright, so few anchors get a negative and residual merges survive.
+
+The improvement makes the gap \textbf{visible} first. Instead of the raw density
+we \textbf{splat every patch's asymmetric slab into a shared volume}. Because the
+slabs are thin across the normal, the compressed inter-wrap space becomes a
+\textbf{deep valley} in the accumulated field---the anisotropy manufactures
+contrast the raw density lacked---and the valley test fires where it could not.
+Two smaller changes accompany it (decoupling the boundary test from the tightness
+cap, relaxing the valley threshold), together raising negative coverage in
+compressed windows several-fold with no regression on clean ones. This is for
+future label generation; the existing corpus predates it.
+
+\subsection{The honest limit}
+Where two wraps genuinely \textbf{touch}, with no valley at any scale, no density
+cue can separate them---the winding continues and the normal flips across the
+fold. This is topological, not a tuning failure, and no slab refinement addresses
+it. Rather than emit a confident wrong boundary, the pipeline marks those regions
+\textbf{low-confidence} (\S\ref{sec:confidence}) and leaves the fix to an
+orientation/continuity signal outside this stage.
+
+\section{The contrastive embedding}\label{sec:embedding}
+The two relations train a small embedding assigning \textbf{one vector per
+primitive} (a spine and its ribs share one) in \textbf{eight dimensions}---the
+relations' effective rank is low and a compact space clusters far more cleanly. A
+window carries of order \textbf{twenty thousand} vectors.
+
+\paragraph{The training scheme.} The slab tables give each anchor a shortlist (up
+to $\sim$48 positives, $\sim$32 negatives), but we sample rather than use them
+all. Each step draws a large batch of anchors and, per anchor, a \textbf{few
+pairs}---one recto and one verso positive ($\propto$ mutual slab weight) and one
+gap negative ($\propto$ push weight)---for one Adam step. Over training each
+anchor is visited $\sim$100 times, so every primitive sees many partners and
+opponents without materialising the full pair graph. Anchors are the sample
+points themselves ($\sim$10\,\% recto / $\sim$90\,\% verso).
+
+\paragraph{The loss.} Four terms are summed each step, the first two the working
+forces and the last two a faint regulariser borrowed from \textbf{VICReg}
+(variance--invariance--covariance regularisation)~\cite{vicreg}:
+\begin{itemize}[nosep]
+  \item \textbf{Invariance (pull)}---the mean squared distance from the anchor
+  to each of its drawn positives, $\|z_a-z_p\|^2$. Always on; it is the
+  sheet-cohesion force.
+  \item \textbf{Push}---a hinge on the distance to the drawn gap negative,
+  $\mathrm{relu}(\mathrm{margin}-\|z_a-z_{\mathrm{neg}}\|)$, weighted by the
+  negative's strength and applied only where a gap actually fired. It separates
+  the adjacent wrap.
+  \item \textbf{Variance}---a per-dimension floor,
+  $\mathrm{relu}(1-\mathrm{std}_d)$ averaged over dimensions, which forces every
+  embedding dimension to keep a minimum spread so the space cannot collapse to a
+  point or a line.
+  \item \textbf{Covariance}---the sum of the squared off-diagonal covariances
+  between dimensions, which decorrelates the dimensions so the eight axes carry
+  independent information rather than redundant copies of one.
+\end{itemize}
+The variance and covariance terms carry a \textbf{tiny weight} ($\sim$a tenth and
+a hundredth of the pull): a stabiliser, not the objective. At healthy negative
+coverage the push is its own anti-collapse; their only job is to stop a
+\emph{starved} window---too few negatives fired---from imploding into a blob.
+Given real weight they overwhelm pull and push and smear the sheets together,
+exactly the failure of full VICReg (no negatives) as the whole loss.
+
+Two choices matter disproportionately. First, because verso points vastly
+outnumber recto ones, uniform sampling starves the recto links that tie a sheet
+together in-plane; we \textbf{balance} them, drawing an equal-weight recto and
+verso positive per anchor---the largest single quality gain in the embedding.
+Second, wrap ordering is left to \textbf{emerge}: each negative lands on the
+immediately adjacent wrap, so wrap $N$ is pushed off both $N{-}1$ and $N{+}1$ and
+the embedding self-organises into a ladder where two-apart wraps sit at opposite
+ends and cannot glue. Any residual merge is bounded to \emph{contiguous}
+wraps---the only geometrically plausible place.
+
+\section{Clustering: probabilistic excess-of-mass}
+The embedding is clustered by density, but standard density clustering has a
+systematic bias that is fatal here; the correction is a small, general
+contribution.
+
+\paragraph{Why the standard method over-merges.} Hierarchical density
+clustering~\cite{hdbscan} builds a tree of nested clusters and selects a flat set
+by \emph{excess of mass}: each cluster is scored by its total density-stability,
+and a parent is kept over its children when its stability exceeds their sum. The
+bias is structural---a child's stability accrued \textbf{before it separates} is
+credited to the parent, inflating its score toward keeping the merge---and in our
+data a single cluster swallows three or more wraps. The usual patch, a hard
+max-size cutoff, is brittle and does not transfer across window scales.
+
+\paragraph{The fix: a smooth size penalty on a scale-invariant split signal.} We
+keep the tree but change the rule. Bottom-up, at each node we compare its
+stability against its children's sum as a \textbf{normalised difference}
+\begin{equation}
+  \Delta \;=\; \frac{S_{\text{node}} - \sum S_{\text{children}}}
+                    {|S_{\text{node}}| + |\sum S_{\text{children}}|}\;\in[-1,1].
+\end{equation}
+Normalisation is essential: raw stabilities are enormous and scale with point
+count, so an absolute penalty never bites; $\Delta$ is a scale-free measure of how
+much the node prefers to stay whole. Against it we apply a \textbf{soft size
+pressure}, zero up to a single-sheet size and growing smoothly beyond. The node
+stays whole when a logistic of \emph{($\Delta$ minus the size pressure)} exceeds
+one half, else splits into its children; a kept node deselects everything below,
+and the root is never a cluster. Splits can occur only at the tree's existing
+branches---the weakest density seams---so the pressure decides only \textbf{whether}
+to accept a seam split, never where to cut, and \textbf{recurses}, peeling a
+three-way merge one seam at a time. A coherent sheet resists ($\Delta$ stays
+high); a merge yields (its children are stable). The rule is deterministic, so the
+labels carry no clustering randomness.
+
+\paragraph{Recovering coverage without re-merging.} After selection the cores
+occupy only part of the points; the peeled inter-sheet material is left as noise.
+We fill it back \textbf{in the embedding only}: each unlabelled primitive takes
+the majority identity of its nearest labelled cores---a Voronoi fill along the
+boundaries the clustering drew, restoring coverage without dragging the cores
+together. The distance travelled to reach those cores is kept as a signal (zero at
+a core, large in deep filler): the embedding's contribution to per-voxel
+confidence.
+
+So heavily over-merged windows split into their true wraps while clean windows are
+untouched---the correction acts only where the bias did damage. The trained
+embedding and the sheets it recovers are shown in Figures~\ref{fig:embedding}
+and~\ref{fig:sheets}.
+
+\begin{figure}[h]
+  \centering
+  \figasset{sheets-with-embeddings.jpg}{\linewidth}{5cm}
+  \caption{A 3-D PCA projection of the trained 8-D embedding for a real window,
+  coloured by the probeom cluster assigned here: same-sheet primitives collapse
+  into tight cores and the adjacent wraps lay out as an ordered ladder, with the
+  propagated filler shaded by its distance-to-core (the low-confidence signal).
+  The recovered sheets are shown alongside for reference.}
+  \label{fig:embedding}
+\end{figure}
+
+\begin{figure}[h]
+  \centering
+  \figasset{sheets-with-sheets.jpg}{\linewidth}{5cm}
+  \caption{The recovered sheets in a real window, each cluster drawn as its own
+  solid-material medial surface in a distinct colour---the same clustering as the
+  embedding figure above, now seen in the volume as separated papyrus sheets.}
+  \label{fig:sheets}
+\end{figure}
+
+\section{From clusters to labels}
+Per-primitive cluster identities become voxel labels by a geometric fit. For each
+cluster we fit a \textbf{medial} surface plus a local thickness, rather than either
+face, because a medial segments more cleanly and is less ambiguous. The fitted
+sheets are rasterised to the two fields the refiner consumes:
+\begin{itemize}[nosep]
+  \item a \textbf{surface crest}, a soft three-way field marking surface (and where
+  the label abstains); and
+  \item a per-voxel \textbf{sheet identity} by nearest-medial-sheet (a Voronoi
+  partition among the fitted sheets)---a genuine instance segmentation, not a binary
+  mask, which is what lets us supervise the refiner's separation objective at all.
+\end{itemize}
+
+\section{Confidence and quality}\label{sec:confidence}
+Nothing is thresholded or discarded at generation; every window carries honest
+per-voxel and per-sheet uncertainty, so what to trust is decided later. Two
+\textbf{regional} confidence fields are produced from independent evidence and
+combined.
+
+\paragraph{The intersection (geometric) confidence.} Where two rasterised medial
+envelopes \emph{interpenetrate}, an \textbf{overlap} signal is written---a direct
+symptom of a merge or mis-fit. We Gaussian-smooth it, \textbf{coverage-normalised}
+(divided by the smoothed sheet mask, so air never dilutes it), and set
+\begin{equation}
+  \mathrm{conf}_{\text{intersection}} \;=\; 1 - \mathrm{smoothed\_overlap}
+  \;\in[0,1],
+\end{equation}
+low where fitted sheets collide, high where they partition cleanly. It is a
+separate channel and never modulates the crest.
+
+\paragraph{The \code{sharp2} (embedding) confidence.} From the clustering's
+\textbf{propagation distance}: each primitive carries $\mathrm{pd}$, the mean
+embedding distance to the cores it was voted into (zero for a core, large for deep
+filler or a residual merge). We normalise $\mathrm{pd}$ by its 90th percentile to
+an uncertainty in $[0,1]$, \textbf{splat} it into the volume (summed uncertainty
+and hit count per voxel), Gaussian-smooth both, and take the weighted average:
+\begin{equation}
+  \mathrm{conf}_{\text{sharp2}} \;=\; 1 - \langle\text{uncertainty}\rangle_{\text{smoothed}},
+\end{equation}
+low wherever ambiguous, far-propagated meshlets sit---the bridges, seams and
+residual merges the geometry alone cannot see. (\code{sharp2} is a legacy channel
+key.)
+
+\paragraph{Combining them.} The channels merge as a \textbf{soft-OR of their
+doubts}: with $u_i=1-\mathrm{conf}_i$, the combined confidence is
+$1-\prod_i(1-u_i)$, algebraically the \textbf{product}
+$\mathrm{conf}_{\text{intersection}}\cdot\mathrm{conf}_{\text{sharp2}}$. Either
+channel's doubt pulls it down---a merge shows in the geometry, an ambiguous fill in
+the embedding; the combined field on a hard window is shown in
+Figure~\ref{fig:confidence}.
+
+\paragraph{Per-sheet quality.} Separately, each fitted sheet is scored by the
+agreement between its own surface normals and the fibre-field orientation. A
+collapsed sheet---the fit forced through mush---shows poor congruence and scores
+low. The score is \emph{stamped}, not acted on: the window is emitted regardless
+and the collapse threshold ($\sim$0.80) is applied downstream. On our data it
+flags roughly a third of windows as holding at least one collapsed sheet---an
+honest measurement of where the method is not to be trusted.
+
+\begin{figure}[h]
+  \centering
+  \figasset{sheets-with-confidence.jpg}{\linewidth}{5cm}
+  \caption{A harder window than the clean case above---one dense with sheet
+  intersections and wraps that do not fully separate in embedding space---with its
+  recovered sheets coloured by a confidence
+  heatmap (the combined field) instead of by cluster. The low-confidence
+  intersections, seams, and residual merges read warm (red); confident sheet cores
+  read cool, so the honest uncertainty falls exactly where the geometry is
+  genuinely ambiguous.}
+  \label{fig:confidence}
+\end{figure}
+
+\section{Augmentations}
+Because the dominant error the refiner must undo is a \emph{merge}, each window
+also emits controlled corruptions of itself, reusing primitives and clusters
+otherwise discarded. A \textbf{merge} augmentation fuses adjacent sheets in the
+embedding and paints the region low-confidence; a \textbf{split} augmentation
+removes a sheet and re-partitions its space. These give paired examples of the
+very failures---spurious welds and missing sheets---the refiner is trained to
+repair, the affected regions marked low-confidence so the corruption is never
+mistaken for signal.
+
+\section{Validation: the signal is in the labels, not the loss}\label{sec:val1}
+These pseudo-labels are only worth publishing if they carry sheet-\emph{separation}
+signal a segmentation-derived model does not already have. The yardstick is
+\textbf{m7}---the ScrollPrize \code{surface\_m7\_nnunet} detector, trained on
+labels derived from existing segmentations. To measure what our labels add, we
+fine-tuned m7 on our pseudo-labels alone (no human labels) and named it
+\textbf{ablA} (ablation A).
+
+A clean comparison must isolate the \emph{data} from the recipe, which forces a
+decision about the loss. Because we cover whole windows sampled across the volume
+rather than the neighbourhoods an existing segmentation delineates, our labels
+carry far \textbf{more negative (non-sheet) voxels}, and a loss tuned to m7's
+balance would be swamped. The ablation uses one suited to it, one job per term: a
+\textbf{symmetric Focal--Tversky} term for precision, a \textbf{soft
+skeleton-recall} term for coverage (recall measured only against the labelled
+skeleton, so the abundant negatives cannot dilute it), and a \textbf{separation
+penalty} suppressing predicted surface inside the inter-sheet gaps. This is
+deliberately \emph{not} HercUNet's affinity/MALIS objective; the ablation holds
+the loss \textbf{fixed} and varies only the labels, so any difference it exposes
+is a property of the data.
+
+The isolating experiment is \textbf{ablB}: fine-tune m7 with the \emph{same recipe
+and loss} as ablA but on \textbf{m7's own labels}. If the loss did the work, ablB
+would match ablA; if the signal lives in the data, ablA recovers structure ablB
+cannot. It does (Figure~\ref{fig:ablAB}): ablB stays degenerate in the very regions
+where ablA finds coherent sheet signal---the separation our labels encode is not
+recoverable from segmentation-derived labels by a change of loss. On its own, ablA
+also recovers coherent sheets deep in regions where the m7 baseline is degenerate
+(Figure~\ref{fig:ablAsignal}).
+
+\begin{figure}[tb]
+  \centering
+  \figasset{ablA-vs-ablB.jpg}{\linewidth}{5cm}
+  \caption{ablA (trained on our labels) versus ablB (m7's own labels, our loss)
+  on the same region. The sheet structure ablA recovers is absent from ablB---with
+  the loss held fixed, the difference is carried by the labels, not the objective.}
+  \label{fig:ablAB}
+\end{figure}
+
+\begin{figure*}[tb]
+  \centering
+  \figasset{ablA-signal.jpg}{\textwidth}{5cm}
+  \caption{The public m7 volume on PHerc1447 (left) and the non-thresholded
+  output of ablA (right). ablA recovers coherent sheets deep in a region where
+  the segmentation-derived baseline is degenerate---evidence that the training
+  labels, not the objective, supply the signal.}
+  \label{fig:ablAsignal}
+\end{figure*}
+
+Two caveats. First, ablA tends to \textbf{over-merge} sheets in places---the
+failure mode HercUNet (Part~\ref{part:refiner}) is built to address, shown later in
+Figure~\ref{fig:merges}. Second, these are \textbf{pure pseudo-labels}: no cleanup,
+no curation---the published corpus is exactly what the generator emits.
+
+That the labels can be \emph{cleaned at all} follows from how they are built.
+Because a window's sheets live in the 8-D embedding of \S\ref{sec:embedding}, a
+correction is a \emph{cluster} operation, not voxel painting: an over-merged sheet
+split by a cut, two fragments joined, a spurious cluster deleted, with the
+medial-mesh fit and confidence re-derived from the corrected clustering. The
+released tooling exposes exactly this---an interactive editor over the meshlet
+embedding---so progressively cleaner label sets can be extracted from the same
+corpus without re-running the pipeline.
+
+\section{Reproducibility}
+Generation is reproducible on two levels: every random draw (embedding init,
+negative sampling, augmentation) is keyed to a seed derived from the scroll and
+window coordinates, and the GPU reductions run in a deterministic mode, so
+borderline labels do not flip at density seams from accumulation noise. Two
+independent runs of a window reproduce every stored array exactly.
+
+\textbf{The reproducible unit is the window, not the coordinate draw.} Each
+window's master seed is
+$\mathrm{md5}(\code{run\_id}\,|\,\text{scroll}\,|\,\text{level}\,|\,z,y,x)$, so it
+is fully determined by \emph{which} window it is. The corpus was mined by many
+parallel workers each drawing a disjoint seeded coordinate stream; reproduction is
+per-window and content-addressed---regenerate the scroll + coordinates and you get
+the same result, to within the equivalence of the code revisions the run spanned
+(\emph{same method, same parameters}, not byte-identical). The full provenance is
+catalogued separately, with the command that regenerates an equivalent corpus.
+
+% =====================================================================
+\part{Iterative Surface Refinement (HercUNet)}
+\label{part:refiner}
+% =====================================================================
+
+We present the second stage: a learned refiner that turns the pseudo-labels of
+Part~\ref{part:labels} into a dense, self-correcting predictor. It is a UNet based
+on m7 generating a map $D(\mathrm{CT},\mathrm{prev})\to\mathrm{surface}$ applied
+\emph{iteratively}---its own output at one pass becomes the \code{prev} input of
+the next---so structure propagates one window at a time and incomplete predictions
+are repaired against the raw CT, not a fixed label. Three ideas carry the design.
+First, the network never has to remember where sheets are: a \textbf{carried
+orientation field}, read from the structure tensor of the CT at every step,
+supplies the geometric cue that separates touching wraps wherever the material
+still holds two orientations---a cue any prediction that fused them would have
+lost. Second, detection and \textbf{separation} are learned by different terms---a
+symmetric detection substrate that finds surface, and a \textbf{constrained-MALIS
+affinity objective} over per-sheet identity that grows a sheet along itself while
+cutting it from its neighbours---so completing a sheet and merging two are no
+longer the same gradient. Third, the iteration is \emph{taught}: a synthetic
+\code{prev} channel, composed each epoch from label variants then cut and
+fragmented, plus online DAgger conditioning on the model's \textbf{own} output,
+closes the train/inference gap.
+
+We are candid about the limit: completing and growing sheets works, but separating
+two wraps \emph{already} merged---where the CT may carry no distinguishing
+orientation---is not yet solved. We situate the work in learned tractography,
+taking one idea---that a network can \emph{track} a structure through the raw
+signal beyond the traces it was shown---to grow sheets into material the labels
+never reached. That the pseudo-labels carry signal even where they appear to fail
+is confirmed by the reverse experiment: \emph{removing} their noisy parts (dropping
+the mushy-looking windows, substituting a segmentation-derived teacher) measurably
+\textbf{degraded} the refiner. The uncurated, honestly-uncertain labels are the
+asset.
+
+\section{Setting: from pseudo-labels to a learned refiner}
+The first stage produces, per window and unsupervised, two rasterised fields---a
+thin surface \textbf{crest} and a per-voxel \textbf{sheet-instance identity}, each
+with honest confidence---correct where the geometry is clean, uncertain where it
+is not. But they are \emph{local} (decoded inside a 192-voxel window from its own
+material) and only as complete as the primitives that produced them. They are not
+a predictor: on a fresh volume they cannot be evaluated, do not fill the gaps a
+window's tracing left, and do not improve with use.
+
+The second stage distils them into a network that does all three. We take the
+community's surface backbone (m7) and give it a second job---\textbf{refine} a
+running surface estimate conditioned on the CT---trained so that applying it
+repeatedly contracts toward a cleaner, more complete surface than any single pass
+or window's pseudo-label contains. The refiner is an iteration-agnostic map
+\begin{equation}
+  D(\mathrm{CT},\,\mathrm{prev}) \to \mathrm{surface},
+\end{equation}
+where $\mathrm{prev}\in[0,1]$ is a surface-probability field: at inference the
+model's own previous-pass softmax, at training a decoded pseudo-label crest
+corrupted as in \S\ref{sec:teach}. Where $\mathrm{prev}\approx0$ (first pass, air,
+a missed region) it predicts from CT alone; where \code{prev} is a crest it refines
+it. The key invariant: \textbf{the target is always the clean base surface},
+whatever \code{prev} shows. The model never learns a fixed
+$\mathrm{prev}\to\mathrm{target}$ pairing---it learns to move \emph{any} state
+toward the truth.
+
+\section{Positioning: learning to track the sheets beyond the labels}
+The first stage's primitives are literally \textbf{tractography}: each arm is a
+streamline (an integral curve of a direction field, grown by fixed-step midpoint
+integration), differing from fibre tracking only in \emph{which} field is
+integrated (the sheet normal, not a diffusion ODF) and the constraints that keep
+it on the sheet. We build on learned tractography not for labels---the first stage
+supplies them---but because it has worked out how to make a network \emph{follow a
+structure through the raw signal} past the traces it was trained on: exactly what
+the refiner needs to grow a sheet into material the labels never reached.
+
+Poulin et al.~\cite{poulin2019}, reviewing ML for tractography, characterise
+learned tracking as \textbf{path-based} and \textbf{local-model-free}---stepping a
+model along a trajectory rather than thresholding per-voxel---and note it can make
+\textbf{non-local} decisions a local method cannot. That is what we want for
+sheets. The supervised realisation, Poulin et al.~\cite{poulin2017}'s \emph{Learn
+to Track} (recurrent nets predicting the next streamline direction), trains
+against \textbf{reference streamlines} and so only reproduces the tracks it was
+shown.
+
+Th\'eberge et al.~\cite{theberge2021}'s \emph{Track-to-Learn} is the idea we
+borrow. It casts tracking as reinforcement learning: an agent propagates a
+streamline from the local signal, driven by a \textbf{reward} rather than
+supervised targets, and so tracks from the signal itself, independently of any
+reference tracks---the demonstration that a network can extend a structure through
+the signal \textbf{further than its labels reach}.
+
+We bring this to sheet tracing. The refiner is given the first stage's
+pseudo-labels---it is not label-free---but is deliberately \textbf{not bounded by
+them}. The affinity and material-growth terms of \S\ref{sec:loss} and the
+iteration of \S\ref{sec:teach} teach it to \emph{track the sheet through the CT
+itself}: to complete a sheet across a gap and extend it into unlabelled material,
+exactly as a signal-driven tracker carries a streamline beyond its reference
+tracks. The labels say what a sheet \emph{is}; the CT says how far it \emph{goes}.
+
+\begin{figure*}[tb]
+  \centering
+  \figasset{grow-over-m7_PHerc0175A_z5568_y4224_x2304.jpg}{\textwidth}{4.5cm}
+  \caption{We fed the output of m7 to our model, which completes the gaps
+  coherently using the idea of learned tractography. From left to right: the CT
+  scan, the output of m7, one iteration of our model taking m7's output as its
+  \code{prev} input, and the difference between \code{prev} and our model's
+  output.}
+  \label{fig:growm7}
+\end{figure*}
+
+\section{The refiner as an iterated map}
+At inference the refiner runs as a small number of \textbf{double-buffered Jacobi
+passes}. Pass~0 gets $\mathrm{prev}=0$ everywhere and predicts from CT alone; each
+later pass reads the whole previous pass's surface-probability volume as its
+\code{prev} and writes a fresh one. Information propagates roughly one window per
+pass---a deliberately \emph{local} refinement, not a global solver---which is all
+the completion the problem needs: a sheet a cold pass detected only in patches is,
+pass by pass, joined along itself.
+
+Between passes the grid shifts by half a stride (\S\ref{sec:infer}) so the seams
+of one pass fall at the confident centres of the next and are healed---the
+\emph{spatial} counterpart of the self-conditioning taught at training
+(\S\ref{sec:dagger}), where the model meets a \code{prev} whose octants came from
+different neighbouring windows and must reconcile them. The network is a stock
+nnU-Net ResEnc backbone, warm-started from m7 (\S\ref{sec:affinity}), so a model
+good at \emph{detecting} surface is re-tasked to \emph{refine} it.
+
+\section{The carried orientation field}\label{sec:orient}
+A refiner conditioning on its own output risks a specific failure: once two
+touching wraps are fused in \code{prev}, nothing in a purely intensity-driven
+input tells the next pass they were ever two. The fix is to give the network, at
+every pass, the one cue that survives the fusion---the \textbf{local orientation
+of the material}---read from the CT, not from any prediction.
+
+We append to the $[\mathrm{CT},\mathrm{prev}]$ input \textbf{six orientation
+channels}: the entries of the unit-trace \textbf{structure tensor} of the CT,
+$[J_{zz},J_{yy},J_{xx},J_{zy},J_{zx},J_{yx}]$, from the same
+derivative-of-Gaussian-and-integrate operator as the first stage, normalised by
+trace so only the \emph{shape} of the orientation---not intensity---is carried. It
+is \textbf{recomputed inside the forward pass from the augmented CT}, never stored,
+so whatever augmentation the CT underwent the orientation is automatically
+consistent, and it is \textbf{sign-free} (the tensor is even under
+$\nhat\to-\nhat$). We read it from the CT because, \emph{where the material retains
+two orientations}, the CT keeps them even when a detector fused the wraps into one
+crest, whereas an orientation read off the prediction would inherit that fusion;
+the separating cue is thus still in the input though the prediction lost it.
+(Reading from the CT also lets the field transform correctly under reflections---the
+basis for the test-time mirror augmentation of \S\ref{sec:infer}.)
+
+This is where the method is weakest, facing \textbf{two failure modes}, neither
+solved. First, the cue is \textbf{not always there}: in the most compressed
+regions two wraps press close enough that the material has no locally
+distinguishable orientation---the structure tensor sees one coherent direction,
+as for a genuine sheet---and the input carries no separating signal; only
+\textbf{non-local} evidence (an adjacent window where the two \emph{do} separate,
+carried across passes) could recover it, and doing that reliably is still ahead of
+us. Second, even where the cue \emph{is} present, getting the model to \textbf{act}
+on it and pull an already-merged pair apart is the hardest thing we ask, and the
+current model does not do it reliably. The constrained-MALIS objective of
+\S\ref{sec:malis} and this orientation input target both. Growing and completing
+sheets through gaps works; \textbf{separating already-merged sheets is an open
+problem we are actively working on}, not a capability we report.
+
+\section{The affinity head and instance separation}\label{sec:affinity}
+The backbone is \textbf{m7}, a single-channel $[\mathrm{CT}]\to\mathrm{surface}$
+model and a strong \emph{detector}---which is why we build on it. Warm-starting
+copies its encoder and decoder verbatim and \textbf{stem-expands} its first
+convolution from one input channel to eight (CT weight on channel~0; \code{prev}
+and the six orientation channels start at zero), so the refiner begins predicting
+exactly what m7 predicted and departs from there.
+
+To the shared decoder we attach a second, full-resolution \textbf{affinity
+head}---a $1\times1\times1$ convolution off the last decoder feature map---so the
+network emits two things at once: the surface segmentation \code{seg}, and a
+field of per-voxel \textbf{affinities} $\mathrm{aff}\in[0,1]$, one channel per
+spatial offset, each predicting whether a voxel and its offset neighbour belong
+to the \emph{same sheet}. Detection and instance-separation read from the same
+features but are supervised by different losses (\S\ref{sec:loss}), so surface
+presence and sheet membership are decoupled.
+
+\section{The loss stack}\label{sec:loss}
+Three families act together: a detection substrate on \code{seg}, a topological
+separation objective on \code{aff}, and a data-driven growth term on \code{aff}.
+Only the first is inherited from the single-pass ablation; the other two make the
+refiner an \emph{instance} model, not a thicker detector.
+
+\subsection{Detection substrate: symmetric Focal--Tversky, separation, skeleton-recall}
+The detection loss is the same stack as the single-pass model, so the two differ
+only in machinery, not in the definition of surface:
+\begin{equation}
+  \resizebox{\columnwidth}{!}{$\displaystyle
+  \mathrm{DeepSup}\big(\mathrm{SkelRecall}\big(\mathrm{Separation}\big(\mathrm{DC\_CE}(\mathrm{CE}{+}\text{Focal--Tversky})\big)\big)\big)$},
+\end{equation}
+evaluated with \code{ignore} masked out. The core is nnU-Net's \code{DC\_and\_CE}
+with Dice replaced by a \textbf{Focal--Tversky} term,
+$\mathrm{TI}=\mathrm{TP}/(\mathrm{TP}+\alpha\,\mathrm{FP}+\beta\,\mathrm{FN})$,
+$\mathrm{loss}=(1-\mathrm{TI})^\gamma$. Crucially it is \textbf{symmetric}
+($\alpha=\beta=0.5$): a recall-tilted Tversky and the skeleton-recall term below
+would both push activations up and collapse the prediction into mush, so we make
+Tversky purely the \textbf{precision} term and leave recall and anti-merge to the
+dedicated terms. Recall comes from a \textbf{skeleton-recall} term (clDice~\cite{cldice}
+soft-skeleton recall,
+$\sum(P_{\text{surf}}\cdot\mathrm{skel}(\mathrm{GT}))/\sum\mathrm{skel}(\mathrm{GT})$,
+ignore-masked), rewarding coverage of the thin GT medial without penalising
+anything off it. Anti-merge comes from a \textbf{separation penalty}: the
+morphological closing of the surface minus the surface, restricted to background
+voxels, identifies the thin inter-sheet \textbf{gaps} and penalises predicted
+surface inside them. Because \code{ignore} and \code{surface} are excluded by
+construction, it never fires inside a region the label already marked uncertain.
+
+\subsection{Constrained MALIS on the affinity field}\label{sec:malis}
+The separation penalty is local. Long-range membership---that two crests a
+millimetre apart belong to the same wrap---is learned by a \textbf{constrained
+MALIS} objective (Turaga et al.~\cite{turaga2009}) in its two-pass form (Funke et
+al.~\cite{funke2018}), over the first stage's per-sheet identity.
+
+MALIS scores an affinity field by its effect on \textbf{segmentation topology}:
+the connectedness of two voxels is the \emph{maximin} edge---the weakest affinity
+on the strongest path between them. A \textbf{positive} pass considers within-sheet
+pairs and pushes their maximin edge up (growing and completing each sheet,
+long-range by construction); a \textbf{negative} pass fuses each GT sheet, finds
+the maximin edge \emph{between} sheets, and pushes it down (cutting the one weak
+link that would merge them). Maximin edges are found exactly with Kruskal over a
+union--find, so no external MALIS dependency is needed; the GT is the mesh-Voronoi
+instance id, background and \code{ignore} excluded. Affinities are predicted at
+short, mid and long offsets (nearest neighbours plus 3 and 9 along each axis),
+evaluated on a random sub-crop per step to bound cost. The weight is
+\textbf{ramped} from zero, so the network learns to \emph{detect} on the
+warm-started substrate before it learns to \emph{separate}.
+
+\subsection{CT-material growth and air-suppression}
+MALIS is supervised only where the sparse instance labels reach. To complete
+sheets through the large \textbf{unlabelled} stretches between windows---and forbid
+growth into air---a third term drives the affinity field from the CT with no
+labels. A material scaffold $m(x)=\sigma((\mathrm{CT}-\tau)/s)$ reads high on
+papyrus, low in air. An edge is asked to \textbf{grow} ($\mathrm{affinity}\to1$)
+with weight $m(u)\,m(v)\cdot\mathrm{along}$,
+$\mathrm{along}=1-\hat{\delta}^{\mathsf T}J\hat{\delta}$ high when the offset runs
+\emph{along} the tangent, so growth completes sheets \textbf{in-plane through
+material}, while across-normal growth is left to MALIS so stacked sheets are never
+bridged. An edge with either endpoint in air is asked toward \textbf{zero}
+($1-m(u)m(v)$), a hard no-grow through voids. Both weights are data-derived and
+detached; the term is ramped in. This lets the refiner extend a sheet across a gap
+the pseudo-label never covered without hallucinating in air---checked per-epoch
+with a validation cross-section overlaying prediction, label and material gate on
+the CT.
+
+\section{Teaching iteration: the synthetic \code{prev} channel}\label{sec:teach}
+The refiner is only useful if applying it repeatedly improves the result---a
+property of \emph{training}, not architecture. The danger is a train/inference
+mismatch: a model that only sees clean, label-derived \code{prev} never learns to
+repair the incomplete, slightly-wrong \code{prev} it feeds itself at inference.
+Two mechanisms close the gap, both under one discipline: whatever the \code{prev},
+the \textbf{target is the clean base surface}, so every corruption below is
+something the loss asks the model to fix.
+
+\subsection{Octant composition}
+Each window stores, besides its clean base crest, a set of \textbf{candidate}
+fields---merge and split \emph{augmentation variants}, each a valid decoded crest.
+Every epoch a transform composes \code{prev} afresh from these. With some
+probability the whole window is zeroed (the bootstrap / first-pass regime, teaching
+cold prediction from CT); otherwise it is split into $2\times2\times2$
+\textbf{octants} at a jittered centre, each filled from an \textbf{independently
+sampled} candidate (zero, clean base, or an augmentation). The result is a
+plausible-but-inconsistent \code{prev} disagreeing across a plus-shaped seam at the
+centre---exactly the inference geometry, where a half-shifted window's octants were
+written by different previous-pass windows. The model is thereby taught to trust
+the CT over an inconsistent prior and reconcile the seam. Crucially the composition
+only \emph{selects and stitches valid candidate fields}; it never invents geometry.
+
+\subsection{Fragmentation: masked-autoencoding on \code{prev}}
+A refiner trained only to denoise a mostly-complete \code{prev} will tidy its input
+but not \textbf{re-connect} what a previous pass left broken. To teach
+gap-bridging we apply structured dropout to \code{prev} \textbf{only}, leaving the
+target and loss mask untouched, so the clean label still supervises every cut voxel
+as surface and the loss penalises failing to re-fill it---that penalty \emph{is}
+the bridge-the-gap signal. Two modes alternate: \textbf{oriented slabs and boxes}
+sever a sheet into disconnected sections (within-window completion, both ends
+visible---interpolation); and a \textbf{half-space cut} removes all \code{prev} on
+one side of a random plane, leaving a sheet entering from a single edge and forcing
+\textbf{extrapolation} into unknown territory---the cross-window skill the
+half-shifted tiling demands. This is masked-autoencoding on the prior channel, and
+it converts an iteration that merely cleans into one that also grows.
+
+\subsection{Online DAgger: conditioning on the model's own output}\label{sec:dagger}
+Octant composition and fragmentation still start from \emph{label-derived} crests.
+The remaining mismatch---that at inference \code{prev} is the model's \textbf{own},
+differently-flawed output---is closed by online DAgger~\cite{dagger}. With some
+probability a step first runs a few \code{no\_grad} warm-up forwards, each feeding
+the model's own output back in as \code{prev} (the inference recurrence), then takes
+one graded forward on that self-generated \code{prev}. The warm-ups hold no
+activations, so the step costs little more than a single-pass run, and more of them
+teach repair at deeper iteration depths cheaply; there is no back-propagation
+through the recurrence. Because the warm-up's start still comes from the
+octant/fragment composition, the self-outputs to repair are diverse---cold,
+label-like, and cut---covering the full range of states a real iteration passes
+through.
+
+We keep split-teaching honest with one asymmetry: \textbf{split} variants, which
+pair a split \code{prev} with a single-sheet target and would teach \emph{merging},
+are dropped by default; base and \textbf{merge} variants, which teach separation,
+are kept. Our failure mode is over-merging, so the augmentation distribution is
+chosen not to reinforce it.
+
+\section{Blending m7 in the compressed regions}\label{sec:blend}
+Our labels are strongest where the material is well-formed; they weaken in the most
+\textbf{compressed} regions, where wraps press to contact and even the orientation
+cue is marginal, and there m7 is often the better teacher. We therefore
+\textbf{mine} a modest set of m7 pseudo-labels from compressed regions and blend
+them in, train-only, at a small fraction of the corpus.
+
+Because the refiner is warm-started from m7 (\S\ref{sec:affinity}), this blend is
+best read as a \textbf{rehearsal} signal against catastrophic forgetting, not new
+supervision. In the compressed regions the network could segment \emph{as m7} the
+day training began; a steady diet of m7 labels there reminds it---\emph{you were
+able to do this; do not forget how}---while every other window teaches our thinner,
+instance-aware crest. It does not hand the network a new skill so much as stop it
+\emph{unlearning} an old one exactly where our own labels fall silent.
+
+The recipe is conservative and is the source of truth shared with the cleanup of
+\S\ref{sec:signal}. From an m7 surface binary we compute m7's \textbf{own
+normal-coherence} (the structure tensor of the smoothed mask) and keep as positive
+\code{surface} only the coherence-gated crest ($\text{m7}\wedge\mathrm{coh}>\tau$);
+the incoherent remainder is marked \code{ignore}, the rest background. The kept
+label is m7's coherent \textbf{face} at native thickness---not a medial---a
+different geometric object from our thin \dgrad\ crest, and that difference is
+itself the labels-vs-loss variable the first stage isolates. These m7 cases carry
+\textbf{no instance identity} (MALIS is silent on them) and no candidate crests
+(their \code{prev} bootstraps to zero, training \textbf{cold} detection), and are
+tagged by source so training logs the two populations (\code{our} / \code{m7})
+separately. The blend is small by design---to cover the compressed regions our
+labels cannot, not to let a segmentation-derived teacher dominate.
+
+\begin{figure}[tb]
+  \centering
+  \figasset{m7-vs-hercunet-merges.jpg}{\linewidth}{5cm}
+  \caption{The mined m7 labels help \emph{a lot} with retaining separation in
+  semi-compressed regions. In a half-compressed region---where our own
+  pseudo-labels are thin and a refiner trained without the blend tends to
+  over-merge---HercUNet keeps the adjacent wraps apart (shown against m7). The
+  small, train-only m7 blend supplies the separation supervision there, exactly
+  where our own labels reach only thinly.}
+  \label{fig:merges}
+\end{figure}
+
+\section{The herculabels carry signal even where they appear to fail}\label{sec:signal}
+Because m7 is the stronger teacher in the most compressed regions
+(\S\ref{sec:blend}), the tempting next step is to let it correct us wholesale:
+discard the windows where our label looks mushy and, where m7 clearly beats us,
+\textbf{replace} our label with m7's coherent one. We built exactly that---a
+cleanup that, only where m7's advantage exceeded a margin, either \textbf{dropped}
+the case or \textbf{replaced} our surface with m7's coherence-gated label;
+competitive-or-better windows were left untouched.
+
+The result is the important negative finding of this work: the cleaned corpus
+trained a refiner \textbf{no better than the uncleaned one}, regressing to the
+ablation that drops uncertain-region supervision. The mushy-looking labels we
+removed were carrying signal. Two losses compounded: dropping the mushy windows removed
+exactly the hard, compressed, ambiguous material the refiner most needed, leaving
+the easy windows it could already do; and replacing our failures with m7 overwrote
+our rough-but-CT-grounded reading with a segmentation-derived answer that, by our
+thesis, cannot recover what the CT still carries. Only a small fraction was
+touched, and even that erased the gain (Figure~\ref{fig:cleanup}).
+
+The lesson does \textbf{not} contradict \S\ref{sec:blend}. m7 is valuable as
+\emph{additional} coverage where our labels are absent or thin, not as a
+\emph{substitute} where we already have them, however rough: the herculabels carry
+real signal in exactly the noisy places they appear to fail, and marking those
+regions uncertain and keeping them beats deleting or overwriting them. We
+therefore train on the \textbf{uncurated} corpus, keep the m7 blend as purely
+additive coverage, and never let cleanup drop or replace our own hard cases.
+
+\begin{figure*}[tb]
+  \centering
+  \figasset{cleaned-labels-signal-loss.jpg}{\textwidth}{5cm}
+  \caption{The cleaned labels were also carrying signal. A 2\,mm XY cross-section
+  of PHerc1447: \textbf{m7} (blue), and two refiners trained with the \emph{same}
+  recipe but different label sets --- \textbf{ours on the cleaned/curated corpus}
+  (yellow; mushy-looking windows dropped, failures m7-substituted) and
+  \textbf{HercUNet} on the full uncurated corpus (magenta). The cleaned-corpus
+  model loses the coherent sheet signal HercUNet recovers here: removing the
+  mushy-looking labels removed real signal (\S\ref{sec:signal}).}
+  \label{fig:cleanup}
+\end{figure*}
+
+\section{Inference: iterative passes and the seam-free blend}\label{sec:infer}
+Inference runs the refiner for a small number of passes over a region, streaming
+the CT through the shared data layer and writing each pass's surface probability
+as an OME-Zarr so the iterations are inspectable. \textbf{Within each pass},
+overlapping windows are merged by a Gaussian importance map---the same seam-free
+stitching the single-pass detector uses---so no within-pass grid artefact
+survives. \textbf{Between passes} the grid shifts by half the \emph{stride}, so
+each pass's window centres land on the previous pass's overlap-centres: the seams
+of one pass are re-predicted at the confident centres of the next and healed. This
+is the \textbf{iterate $\to$ blend $\to$ iterate} loop, at a compute cost set by
+the overlap. Each output tile is chunk-aligned and written exactly once, so a run
+is reproducible and splits across workers with no tile written twice.
+
+\section{Evaluation: why we report no single number}\label{sec:eval}
+We deliberately publish no Dice, VOI, or leaderboard figure. This is not an
+omission we intend to quietly patch---the reasons are structural, and stating them
+is more honest than a number we know would mislead.
+\begin{itemize}[nosep]
+  \item \textbf{Leakage.} m7 is trained on the full published label set (700+
+  Kaggle surface labels). Validating on those, or on anything mined from m7,
+  scores a model against data its teacher has already seen; there is no held-out
+  ground truth in our domain independent of m7.
+  \item \textbf{Dice measures label thickness, not detection.} Dice is dominated
+  by the \emph{thickness} of the reference---one voxel thicker moves the score
+  substantially, whether or not the sheet was found. Against labels of
+  uncontrolled thickness it reports label metrology, not surface correctness.
+  \item \textbf{Faces vs.\ medials---a category difference, not an error.} Every
+  label available to us annotates the \textbf{face} at native thickness; our
+  pseudo-labels annotate the \textbf{medial} crest, a few voxels inboard
+  (Figure~\ref{fig:facemed}). An overlap metric charges that constant offset as a
+  miss, when it is the correct centre of the same sheet.
+  \item \textbf{Human smoothness bias.} Our labels track the material where it
+  genuinely bends, pinches, and delaminates; human labels are known to
+  smooth---annotators draw flatter sheets than the papyrus is. Scoring against them
+  would penalise our labels \emph{for tracking the material more faithfully than a
+  human}.
+\end{itemize}
+
+\paragraph{The case for the medial.} We defend it directly: \emph{it is better to
+have a sheet detection whose face lives flat at a few voxels' offset than a
+detection that is flat at zero offset only in some regions and waves harshly
+everywhere.} A medial a consistent few voxels inboard is trivially recoverable
+(one dilation to either face) and, more importantly, \emph{coherent}: it does not
+wander. The alternative---a face-fit that is exact where the material is easy and
+buckles where it is hard---is what actually breaks downstream flattening and
+reading, because its error is \emph{unpredictable} rather than a constant,
+correctable offset.
+
+\paragraph{What we show instead.} In place of a scalar we show the prediction
+itself---across the iterative passes and on volumes m7's labels never covered
+(Figures~\ref{fig:banner}, \ref{fig:growm7} and~\ref{fig:0800})---and invite the
+reader to judge what matters: coherence, completion of broken sheets, and
+separation of touching wraps, properties a single overlap number against biased,
+differently-thick, leakage-prone labels cannot report.
+
+\paragraph{A note on generalisation---a hypothesis, not a result.} The refiner is
+trained on \textbf{4{,}000+ HercuLabels windows across 22 carbonised scrolls}, not
+the labelled neighbourhoods of a single corpus. On the standard argument that
+training breadth improves out-of-distribution behaviour, one would expect better
+cross-volume generalisation than a per-corpus detector, and the cross-scroll
+results are at least consistent with that. But with no independent held-out ground
+truth we cannot quantify it, so we offer it as a reasoned expectation, not a
+measured claim.
+
+\begin{figure*}[tb]
+  \centering
+  \figasset{PHerc0800-m7-vs-ours.jpg}{\textwidth}{5cm}
+  \caption{m7 (blue) versus our refiner (magenta) on a 1\,cm cross-section of
+  PHerc0800.}
+  \label{fig:0800}
+\end{figure*}
+
+% =====================================================================
+\begin{thebibliography}{9}
+
+\bibitem{poulin2019}
+P.~Poulin, D.~J\"orgens, P.-M.~Jodoin, and M.~Descoteaux.
+\newblock Tractography and machine learning: Current state and open challenges.
+\newblock \emph{Magnetic Resonance Imaging}, 64:37--48, 2019.
+
+\bibitem{poulin2017}
+P.~Poulin, M.-A.~C\^ot\'e, J.-C.~Houde, L.~Petit, P.~F.~Neher, K.~H.~Maier-Hein,
+  H.~Larochelle, and M.~Descoteaux.
+\newblock Learn to Track: Deep Learning for Tractography.
+\newblock In \emph{Medical Image Computing and Computer-Assisted Intervention
+  (MICCAI)}, 2017.
+
+\bibitem{theberge2021}
+A.~Th\'eberge, C.~Desrosiers, M.~Descoteaux, and P.-M.~Jodoin.
+\newblock Track-to-Learn: A general framework for tractography with deep
+  reinforcement learning.
+\newblock \emph{Medical Image Analysis}, 2021.
+
+\bibitem{turaga2009}
+S.~C.~Turaga, K.~L.~Briggman, M.~Helmstaedter, W.~Denk, and H.~S.~Seung.
+\newblock Maximin affinity learning of image segmentation.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)},
+  2009.
+
+\bibitem{funke2018}
+J.~Funke, F.~D.~Tschopp, W.~Grisaitis, A.~Sheridan, C.~Singh, S.~Saalfeld, and
+  S.~C.~Turaga.
+\newblock Large scale image segmentation with structured loss based deep learning
+  for connectome reconstruction.
+\newblock \emph{IEEE Transactions on Pattern Analysis and Machine Intelligence},
+  41(7):1669--1680, 2019.
+
+\bibitem{weickert}
+J.~Weickert.
+\newblock \emph{Anisotropic Diffusion in Image Processing}.
+\newblock Teubner, Stuttgart, 1998.
+
+\bibitem{vicreg}
+A.~Bardes, J.~Ponce, and Y.~LeCun.
+\newblock VICReg: Variance-Invariance-Covariance Regularization for
+  Self-Supervised Learning.
+\newblock In \emph{International Conference on Learning Representations (ICLR)},
+  2022.
+
+\bibitem{hdbscan}
+R.~J.~G.~B.~Campello, D.~Moulavi, and J.~Sander.
+\newblock Density-based clustering based on hierarchical density estimates.
+\newblock In \emph{Pacific-Asia Conference on Knowledge Discovery and Data Mining
+  (PAKDD)}, 2013.
+
+\bibitem{cldice}
+S.~Shit, J.~C.~Paetzold, A.~Sekuboyina, et al.
+\newblock clDice --- A Novel Topology-Preserving Loss Function for Tubular
+  Structure Segmentation.
+\newblock In \emph{IEEE/CVF Conference on Computer Vision and Pattern Recognition
+  (CVPR)}, 2021.
+
+\bibitem{dagger}
+S.~Ross, G.~J.~Gordon, and J.~A.~Bagnell.
+\newblock A reduction of imitation learning and structured prediction to no-regret
+  online learning.
+\newblock In \emph{International Conference on Artificial Intelligence and
+  Statistics (AISTATS)}, 2011.
+
+\end{thebibliography}
+
+\end{document}
