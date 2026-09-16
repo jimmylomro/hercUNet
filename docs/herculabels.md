@@ -58,7 +58,7 @@ pipenv run hercunet labels export combined.herculabels ./train_out
 
 ## Commands
 
-Three verbs operate over a `.herculabels` corpus (a directory; always editable — there is no "finalise"):
+These commands operate over a `.herculabels` corpus (a directory; always editable — there is no "finalise"):
 
 | Verb | Invocation | What it does |
 |---|---|---|
@@ -66,6 +66,7 @@ Three verbs operate over a `.herculabels` corpus (a directory; always editable �
 | **edit** | `edit <corpus.herculabels>` | Re-open an existing corpus in the viewer and correct its windows in place (implicitly interactive; no pipeline re-run). |
 | **merge** | `merge <out.herculabels> <in…>` | Union several corpora into a **new** one (fails if `out` exists; inputs untouched). This is how you extend a corpus — grind a fresh one and merge. |
 | **export** | `export <corpus.herculabels> <train_out> [--no-augment]` | Derive the training corpus (per-window `.npz`, **no meshlets**). Augmentations on by default; `--no-augment` for a base-only export. Non-destructive + re-runnable. |
+| **m7-mine** | `m7-mine <m7_corpus> [--scroll … \| --manifest …]` | Pre-extract an **m7 pseudo-label corpus** from compressed regions (the rehearsal signal) from the published m7 predictions. Consumed later by `train export-labels --m7-corpus`. |
 
 ### create — headless
 
@@ -161,6 +162,34 @@ Export never modifies the corpus, so you can edit and re-export freely.
 
 Both the viewer and `export` run **the same pipeline / augmentation code** as headless generation (the
 viewer via an observer hook), so any change to the label code is reflected everywhere.
+
+### m7-mine — pre-extract an m7 pseudo-label corpus
+
+In the most **compressed** regions our mesh pipeline weakens and the published **m7** surface detector is
+the better teacher (writeup Part II §8 — the *rehearsal* signal). `m7-mine` reads m7's **published surface
+predictions** + CT from the open-data bucket (no m7 inference of our own), gates them by m7's own normal
+coherence (`surface = m7 ∧ coherence > τ`, the rest `ignore`), and writes a standalone **m7 corpus** — a
+pre-extracted set of `{0, 1, 2}` label windows.
+
+```bash
+# Fresh scout: pick coherent compressed regions per scroll → write the m7 corpus
+pipenv run hercunet labels m7-mine ./m7_corpus --scroll PHerc1447,PHerc0800 --max-candidates 4
+
+# Reproduce an approved set exactly (no re-scout) from a scout manifest
+pipenv run hercunet labels m7-mine ./m7_corpus --manifest scout_manifest.json --max-candidates 4
+```
+
+It is deliberately a **labels-stage**, do-it-once step: the m7 corpus is a reusable artifact. The refiner's
+training chain then points at it — `hercunet train export-labels --corpus … --m7-corpus ./m7_corpus …`
+**copies** those cases into the training dataset alongside our own (no re-mining, no symlinks). `--max-candidates`
+(K, the prev/candidate channels) must match the value used by `train export-labels` / `train preprocess`.
+See [training.md](training.md) for the training chain.
+
+The mining lives in `hercunet/labels/m7mine.py` — the coherence recipe (`m7_coherence` / `label_from_window`,
+via the library's own `structure_tensor_frame_torch`), the deterministic manifest rebuild, and the fresh
+scout (fully automatic — the coherence judge selects the regions; the manifest is written for
+reproducibility). Windows are read through the data layer (`ZarrSegment`) on a thread pool so the anon-S3
+latency of many regions overlaps.
 
 ---
 
@@ -341,12 +370,12 @@ The generation knobs default to the validated corpus operating point; change the
 The published corpus is **4031 windows across 22 scrolls** (`run20260808`). Its full provenance — every
 window's coordinates and the exact extraction parameters — is in
 [`submission/writeup/corpus.md`](../submission/writeup/corpus.md), and the window list is the coordinate file
-[`submission/writeup/corpus_windows.txt`](../submission/writeup/corpus_windows.txt):
+[`submission/corpus/corpus_windows.txt`](../submission/corpus/corpus_windows.txt):
 
 ```bash
 # regenerate exactly the published windows (note --old-negatives), then derive the training bundles:
 pipenv run hercunet labels create scroll_corpus.herculabels \
-    --old-negatives --coords-file submission/writeup/corpus_windows.txt
+    --old-negatives --coords-file submission/corpus/corpus_windows.txt
 pipenv run hercunet labels export scroll_corpus.herculabels ./train_out
 
 # …or a fresh, equivalent draw from the same operating point:

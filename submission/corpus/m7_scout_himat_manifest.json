@@ -1,0 +1,2302 @@
+[
+ {
+  "scroll": "PHerc1447",
+  "m7": "vesuvius-challenge-open-data/PHerc1447/representations/predictions/surfaces/20250521151220-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1447/volumes/20250521151220-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   3456,
+   4608,
+   4224
+  ],
+  "center_l0": [
+   3552,
+   4704,
+   4320
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9998359349681323,
+  "tau": 0.88,
+  "mean_coh": 0.9977582097053528,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_000_PHerc1447.jpg"
+ },
+ {
+  "scroll": "PHerc1447",
+  "m7": "vesuvius-challenge-open-data/PHerc1447/representations/predictions/surfaces/20250521151220-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1447/volumes/20250521151220-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   5760,
+   3840,
+   3648
+  ],
+  "center_l0": [
+   5856,
+   3936,
+   3744
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9998302253898491,
+  "tau": 0.88,
+  "mean_coh": 0.9972770810127258,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_001_PHerc1447.jpg"
+ },
+ {
+  "scroll": "PHerc0125",
+  "m7": "vesuvius-challenge-open-data/PHerc0125/representations/predictions/surfaces/20250821151825-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0125/volumes/20250821151825-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   14016,
+   4800,
+   5952
+  ],
+  "center_l0": [
+   14112,
+   4896,
+   6048
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9997895838680175,
+  "tau": 0.88,
+  "mean_coh": 0.9967846274375916,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_002_PHerc0125.jpg"
+ },
+ {
+  "scroll": "PHerc0175A",
+  "m7": "vesuvius-challenge-open-data/PHerc0175A/representations/predictions/surfaces/20250521115057-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0175A/volumes/20250521115057-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   8640,
+   4416,
+   6720
+  ],
+  "center_l0": [
+   8736,
+   4512,
+   6816
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9997609758810464,
+  "tau": 0.88,
+  "mean_coh": 0.9965175986289978,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_003_PHerc0175A.jpg"
+ },
+ {
+  "scroll": "PHerc0175A",
+  "m7": "vesuvius-challenge-open-data/PHerc0175A/representations/predictions/surfaces/20250521115057-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0175A/volumes/20250521115057-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   5952,
+   4416,
+   5760
+  ],
+  "center_l0": [
+   6048,
+   4512,
+   5856
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9994921832080016,
+  "tau": 0.88,
+  "mean_coh": 0.9952349662780762,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_004_PHerc0175A.jpg"
+ },
+ {
+  "scroll": "PHerc0343",
+  "m7": "vesuvius-challenge-open-data/PHerc0343/representations/predictions/surfaces/20250521140437-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0343/volumes/20250521140437-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   8832,
+   6336,
+   4800
+  ],
+  "center_l0": [
+   8928,
+   6432,
+   4896
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9994827965546041,
+  "tau": 0.88,
+  "mean_coh": 0.9948312640190125,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_005_PHerc0343.jpg"
+ },
+ {
+  "scroll": "PHerc1447",
+  "m7": "vesuvius-challenge-open-data/PHerc1447/representations/predictions/surfaces/20250521151220-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1447/volumes/20250521151220-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   3456,
+   5184,
+   4416
+  ],
+  "center_l0": [
+   3552,
+   5280,
+   4512
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9994220545899001,
+  "tau": 0.88,
+  "mean_coh": 0.9967316389083862,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_006_PHerc1447.jpg"
+ },
+ {
+  "scroll": "PHerc0343",
+  "m7": "vesuvius-challenge-open-data/PHerc0343/representations/predictions/surfaces/20250521140437-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0343/volumes/20250521140437-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   4224,
+   6720,
+   5376
+  ],
+  "center_l0": [
+   4320,
+   6816,
+   5472
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9993575491164997,
+  "tau": 0.88,
+  "mean_coh": 0.9948615431785583,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_007_PHerc0343.jpg"
+ },
+ {
+  "scroll": "PHerc0483A",
+  "m7": "vesuvius-challenge-open-data/PHerc0483A/representations/predictions/surfaces/20250521140913-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0483A/volumes/20250521140913-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   2496,
+   4224,
+   3840
+  ],
+  "center_l0": [
+   2592,
+   4320,
+   3936
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9992762619319182,
+  "tau": 0.88,
+  "mean_coh": 0.9950301051139832,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_008_PHerc0483A.jpg"
+ },
+ {
+  "scroll": "PHerc0125",
+  "m7": "vesuvius-challenge-open-data/PHerc0125/representations/predictions/surfaces/20250821151825-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0125/volumes/20250821151825-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   19392,
+   3264,
+   4608
+  ],
+  "center_l0": [
+   19488,
+   3360,
+   4704
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9991370194618497,
+  "tau": 0.88,
+  "mean_coh": 0.9973822832107544,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_009_PHerc0125.jpg"
+ },
+ {
+  "scroll": "PHerc1447",
+  "m7": "vesuvius-challenge-open-data/PHerc1447/representations/predictions/surfaces/20250521151220-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1447/volumes/20250521151220-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   3456,
+   4992,
+   2112
+  ],
+  "center_l0": [
+   3552,
+   5088,
+   2208
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9987040430656459,
+  "tau": 0.88,
+  "mean_coh": 0.9960812926292419,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_010_PHerc1447.jpg"
+ },
+ {
+  "scroll": "PHerc0846B",
+  "m7": "vesuvius-challenge-open-data/PHerc0846B/representations/predictions/surfaces/20250804142305-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0846B/volumes/20250804142305-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   4800,
+   3840,
+   2880
+  ],
+  "center_l0": [
+   4896,
+   3936,
+   2976
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9985567645938012,
+  "tau": 0.88,
+  "mean_coh": 0.9940029978752136,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_011_PHerc0846B.jpg"
+ },
+ {
+  "scroll": "PHerc1218",
+  "m7": "vesuvius-challenge-open-data/PHerc1218/representations/predictions/surfaces/20250521120456-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1218/volumes/20250521120456-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   3264,
+   3648,
+   3072
+  ],
+  "center_l0": [
+   3360,
+   3744,
+   3168
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9984918563546863,
+  "tau": 0.88,
+  "mean_coh": 0.9936807155609131,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_012_PHerc1218.jpg"
+ },
+ {
+  "scroll": "PHerc0343",
+  "m7": "vesuvius-challenge-open-data/PHerc0343/representations/predictions/surfaces/20250521140437-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0343/volumes/20250521140437-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   16320,
+   5952,
+   3648
+  ],
+  "center_l0": [
+   16416,
+   6048,
+   3744
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9984719039098264,
+  "tau": 0.88,
+  "mean_coh": 0.9953605532646179,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_013_PHerc0343.jpg"
+ },
+ {
+  "scroll": "PHerc0175A",
+  "m7": "vesuvius-challenge-open-data/PHerc0175A/representations/predictions/surfaces/20250521115057-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0175A/volumes/20250521115057-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   10368,
+   6912,
+   5952
+  ],
+  "center_l0": [
+   10464,
+   7008,
+   6048
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9983995444218369,
+  "tau": 0.88,
+  "mean_coh": 0.995050847530365,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_014_PHerc0175A.jpg"
+ },
+ {
+  "scroll": "PHerc0175A",
+  "m7": "vesuvius-challenge-open-data/PHerc0175A/representations/predictions/surfaces/20250521115057-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0175A/volumes/20250521115057-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   4224,
+   3648,
+   3072
+  ],
+  "center_l0": [
+   4320,
+   3744,
+   3168
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9983667670487663,
+  "tau": 0.88,
+  "mean_coh": 0.9952000379562378,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_015_PHerc0175A.jpg"
+ },
+ {
+  "scroll": "PHerc0490A",
+  "m7": "vesuvius-challenge-open-data/PHerc0490A/representations/predictions/surfaces/20250521151210-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0490A/volumes/20250521151210-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   6144,
+   2688,
+   1536
+  ],
+  "center_l0": [
+   6240,
+   2784,
+   1632
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9983121109857992,
+  "tau": 0.88,
+  "mean_coh": 0.9944505095481873,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_016_PHerc0490A.jpg"
+ },
+ {
+  "scroll": "PHerc1447",
+  "m7": "vesuvius-challenge-open-data/PHerc1447/representations/predictions/surfaces/20250521151220-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1447/volumes/20250521151220-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   20544,
+   6336,
+   4032
+  ],
+  "center_l0": [
+   20640,
+   6432,
+   4128
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.998163893657472,
+  "tau": 0.88,
+  "mean_coh": 0.9953069090843201,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_017_PHerc1447.jpg"
+ },
+ {
+  "scroll": "PHerc0125",
+  "m7": "vesuvius-challenge-open-data/PHerc0125/representations/predictions/surfaces/20250821151825-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0125/volumes/20250821151825-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   13056,
+   3648,
+   4032
+  ],
+  "center_l0": [
+   13152,
+   3744,
+   4128
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9978779977225868,
+  "tau": 0.88,
+  "mean_coh": 0.9944934844970703,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_018_PHerc0125.jpg"
+ },
+ {
+  "scroll": "PHerc0125",
+  "m7": "vesuvius-challenge-open-data/PHerc0125/representations/predictions/surfaces/20250821151825-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0125/volumes/20250821151825-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   9408,
+   4416,
+   3840
+  ],
+  "center_l0": [
+   9504,
+   4512,
+   3936
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9978702877653063,
+  "tau": 0.88,
+  "mean_coh": 0.9935036301612854,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_019_PHerc0125.jpg"
+ },
+ {
+  "scroll": "PHerc0175A",
+  "m7": "vesuvius-challenge-open-data/PHerc0175A/representations/predictions/surfaces/20250521115057-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0175A/volumes/20250521115057-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   11136,
+   5760,
+   2880
+  ],
+  "center_l0": [
+   11232,
+   5856,
+   2976
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9977359942947056,
+  "tau": 0.88,
+  "mean_coh": 0.9941118359565735,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_020_PHerc0175A.jpg"
+ },
+ {
+  "scroll": "PHerc0800",
+  "m7": "vesuvius-challenge-open-data/PHerc0800/representations/predictions/surfaces/20250521135224-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0800/volumes/20250521135224-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   19968,
+   7104,
+   5184
+  ],
+  "center_l0": [
+   20064,
+   7200,
+   5280
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9977007347871747,
+  "tau": 0.88,
+  "mean_coh": 0.9958438277244568,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_021_PHerc0800.jpg"
+ },
+ {
+  "scroll": "PHerc0211",
+  "m7": "vesuvius-challenge-open-data/PHerc0211/representations/predictions/surfaces/20250821151803-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0211/volumes/20250821151803-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   5184,
+   4224,
+   2880
+  ],
+  "center_l0": [
+   5280,
+   4320,
+   2976
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9976153011602081,
+  "tau": 0.88,
+  "mean_coh": 0.9951162338256836,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_022_PHerc0211.jpg"
+ },
+ {
+  "scroll": "PHerc0826",
+  "m7": "vesuvius-challenge-open-data/PHerc0826/representations/predictions/surfaces/20250821151701-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0826/volumes/20250821151701-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   3456,
+   3648,
+   3456
+  ],
+  "center_l0": [
+   3552,
+   3744,
+   3552
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9976013117545316,
+  "tau": 0.88,
+  "mean_coh": 0.9935829639434814,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_023_PHerc0826.jpg"
+ },
+ {
+  "scroll": "PHerc0306B",
+  "m7": "vesuvius-challenge-open-data/PHerc0306B/representations/predictions/surfaces/20250521133212-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0306B/volumes/20250521133212-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   14016,
+   1728,
+   4800
+  ],
+  "center_l0": [
+   14112,
+   1824,
+   4896
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.997601114973075,
+  "tau": 0.88,
+  "mean_coh": 0.9950912594795227,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_024_PHerc0306B.jpg"
+ },
+ {
+  "scroll": "PHerc1545",
+  "m7": "vesuvius-challenge-open-data/PHerc1545/representations/predictions/surfaces/20250821151648-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1545/volumes/20250821151648-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   7296,
+   3264,
+   2496
+  ],
+  "center_l0": [
+   7392,
+   3360,
+   2592
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9974318309434789,
+  "tau": 0.88,
+  "mean_coh": 0.9934731721878052,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_025_PHerc1545.jpg"
+ },
+ {
+  "scroll": "PHerc0826",
+  "m7": "vesuvius-challenge-open-data/PHerc0826/representations/predictions/surfaces/20250821151701-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0826/volumes/20250821151701-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   12480,
+   4224,
+   3264
+  ],
+  "center_l0": [
+   12576,
+   4320,
+   3360
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9974071836235138,
+  "tau": 0.88,
+  "mean_coh": 0.992610514163971,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_026_PHerc0826.jpg"
+ },
+ {
+  "scroll": "PHerc1447",
+  "m7": "vesuvius-challenge-open-data/PHerc1447/representations/predictions/surfaces/20250521151220-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1447/volumes/20250521151220-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   8832,
+   2496,
+   2304
+  ],
+  "center_l0": [
+   8928,
+   2592,
+   2400
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9973391770862697,
+  "tau": 0.88,
+  "mean_coh": 0.9955901503562927,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_027_PHerc1447.jpg"
+ },
+ {
+  "scroll": "PHerc0175A",
+  "m7": "vesuvius-challenge-open-data/PHerc0175A/representations/predictions/surfaces/20250521115057-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0175A/volumes/20250521115057-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   4224,
+   7296,
+   3648
+  ],
+  "center_l0": [
+   4320,
+   7392,
+   3744
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9972660246336641,
+  "tau": 0.88,
+  "mean_coh": 0.9944415092468262,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_028_PHerc0175A.jpg"
+ },
+ {
+  "scroll": "PHerc1447",
+  "m7": "vesuvius-challenge-open-data/PHerc1447/representations/predictions/surfaces/20250521151220-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1447/volumes/20250521151220-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   5760,
+   4800,
+   4032
+  ],
+  "center_l0": [
+   5856,
+   4896,
+   4128
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9971730410232844,
+  "tau": 0.88,
+  "mean_coh": 0.995483934879303,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_029_PHerc1447.jpg"
+ },
+ {
+  "scroll": "PHerc0125",
+  "m7": "vesuvius-challenge-open-data/PHerc0125/representations/predictions/surfaces/20250821151825-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0125/volumes/20250821151825-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   11904,
+   3456,
+   4032
+  ],
+  "center_l0": [
+   12000,
+   3552,
+   4128
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9967911975774122,
+  "tau": 0.88,
+  "mean_coh": 0.9934473037719727,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_030_PHerc0125.jpg"
+ },
+ {
+  "scroll": "PHerc0211",
+  "m7": "vesuvius-challenge-open-data/PHerc0211/representations/predictions/surfaces/20250821151803-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0211/volumes/20250821151803-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   7680,
+   3264,
+   2688
+  ],
+  "center_l0": [
+   7776,
+   3360,
+   2784
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9967646689808038,
+  "tau": 0.88,
+  "mean_coh": 0.9908655285835266,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_031_PHerc0211.jpg"
+ },
+ {
+  "scroll": "PHerc0483A",
+  "m7": "vesuvius-challenge-open-data/PHerc0483A/representations/predictions/surfaces/20250521140913-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0483A/volumes/20250521140913-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   12288,
+   6912,
+   3264
+  ],
+  "center_l0": [
+   12384,
+   7008,
+   3360
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9964905938329883,
+  "tau": 0.88,
+  "mean_coh": 0.9918921589851379,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_032_PHerc0483A.jpg"
+ },
+ {
+  "scroll": "PHerc1447",
+  "m7": "vesuvius-challenge-open-data/PHerc1447/representations/predictions/surfaces/20250521151220-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1447/volumes/20250521151220-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   21888,
+   4224,
+   3072
+  ],
+  "center_l0": [
+   21984,
+   4320,
+   3168
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9964290200014168,
+  "tau": 0.88,
+  "mean_coh": 0.9954735636711121,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_033_PHerc1447.jpg"
+ },
+ {
+  "scroll": "PHerc1218",
+  "m7": "vesuvius-challenge-open-data/PHerc1218/representations/predictions/surfaces/20250521120456-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1218/volumes/20250521120456-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   16128,
+   3264,
+   2496
+  ],
+  "center_l0": [
+   16224,
+   3360,
+   2592
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9961167828714127,
+  "tau": 0.88,
+  "mean_coh": 0.9931104183197021,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_034_PHerc1218.jpg"
+ },
+ {
+  "scroll": "PHerc0826",
+  "m7": "vesuvius-challenge-open-data/PHerc0826/representations/predictions/surfaces/20250821151701-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0826/volumes/20250821151701-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   12480,
+   4608,
+   4224
+  ],
+  "center_l0": [
+   12576,
+   4704,
+   4320
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.996113901701491,
+  "tau": 0.88,
+  "mean_coh": 0.9944288730621338,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_035_PHerc0826.jpg"
+ },
+ {
+  "scroll": "PHerc0483A",
+  "m7": "vesuvius-challenge-open-data/PHerc0483A/representations/predictions/surfaces/20250521140913-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0483A/volumes/20250521140913-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   5184,
+   3456,
+   3840
+  ],
+  "center_l0": [
+   5280,
+   3552,
+   3936
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9959140395552913,
+  "tau": 0.88,
+  "mean_coh": 0.9913281202316284,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_036_PHerc0483A.jpg"
+ },
+ {
+  "scroll": "PHerc0211",
+  "m7": "vesuvius-challenge-open-data/PHerc0211/representations/predictions/surfaces/20250821151803-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0211/volumes/20250821151803-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   15552,
+   2496,
+   4608
+  ],
+  "center_l0": [
+   15648,
+   2592,
+   4704
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.995608711134602,
+  "tau": 0.88,
+  "mean_coh": 0.9908941984176636,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_037_PHerc0211.jpg"
+ },
+ {
+  "scroll": "PHerc0483B",
+  "m7": "vesuvius-challenge-open-data/PHerc0483B/representations/predictions/surfaces/20251124083638-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0483B/volumes/20251124083638-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   6144,
+   2880,
+   6336
+  ],
+  "center_l0": [
+   6240,
+   2976,
+   6432
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.995491863948064,
+  "tau": 0.88,
+  "mean_coh": 0.991377055644989,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_038_PHerc0483B.jpg"
+ },
+ {
+  "scroll": "PHerc0826",
+  "m7": "vesuvius-challenge-open-data/PHerc0826/representations/predictions/surfaces/20250821151701-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0826/volumes/20250821151701-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   3840,
+   2304,
+   4224
+  ],
+  "center_l0": [
+   3936,
+   2400,
+   4320
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9953497598759936,
+  "tau": 0.88,
+  "mean_coh": 0.9903804659843445,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_039_PHerc0826.jpg"
+ },
+ {
+  "scroll": "PHerc0846B",
+  "m7": "vesuvius-challenge-open-data/PHerc0846B/representations/predictions/surfaces/20250804142305-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0846B/volumes/20250804142305-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   8064,
+   3264,
+   4032
+  ],
+  "center_l0": [
+   8160,
+   3360,
+   4128
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9950661033269708,
+  "tau": 0.88,
+  "mean_coh": 0.9932032227516174,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_040_PHerc0846B.jpg"
+ },
+ {
+  "scroll": "PHerc0343",
+  "m7": "vesuvius-challenge-open-data/PHerc0343/representations/predictions/surfaces/20250521140437-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0343/volumes/20250521140437-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   16320,
+   4416,
+   1920
+  ],
+  "center_l0": [
+   16416,
+   4512,
+   2016
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9947268099482953,
+  "tau": 0.88,
+  "mean_coh": 0.994251012802124,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_041_PHerc0343.jpg"
+ },
+ {
+  "scroll": "PHerc1447",
+  "m7": "vesuvius-challenge-open-data/PHerc1447/representations/predictions/surfaces/20250521151220-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1447/volumes/20250521151220-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   21888,
+   4032,
+   4800
+  ],
+  "center_l0": [
+   21984,
+   4128,
+   4896
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.994557376905083,
+  "tau": 0.88,
+  "mean_coh": 0.9953476190567017,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_042_PHerc1447.jpg"
+ },
+ {
+  "scroll": "PHerc0800",
+  "m7": "vesuvius-challenge-open-data/PHerc0800/representations/predictions/surfaces/20250521135224-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0800/volumes/20250521135224-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   19968,
+   7296,
+   6336
+  ],
+  "center_l0": [
+   20064,
+   7392,
+   6432
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9944612619265751,
+  "tau": 0.88,
+  "mean_coh": 0.9930647611618042,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_043_PHerc0800.jpg"
+ },
+ {
+  "scroll": "PHerc0175A",
+  "m7": "vesuvius-challenge-open-data/PHerc0175A/representations/predictions/surfaces/20250521115057-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0175A/volumes/20250521115057-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   4992,
+   7296,
+   5568
+  ],
+  "center_l0": [
+   5088,
+   7392,
+   5664
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9930259315270332,
+  "tau": 0.88,
+  "mean_coh": 0.988932728767395,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_044_PHerc0175A.jpg"
+ },
+ {
+  "scroll": "PHerc1218",
+  "m7": "vesuvius-challenge-open-data/PHerc1218/representations/predictions/surfaces/20250521120456-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1218/volumes/20250521120456-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   9408,
+   3456,
+   4224
+  ],
+  "center_l0": [
+   9504,
+   3552,
+   4320
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9925210929067619,
+  "tau": 0.88,
+  "mean_coh": 0.9906784296035767,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_045_PHerc1218.jpg"
+ },
+ {
+  "scroll": "PHerc0490A",
+  "m7": "vesuvius-challenge-open-data/PHerc0490A/representations/predictions/surfaces/20250521151210-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0490A/volumes/20250521151210-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   6144,
+   2880,
+   3456
+  ],
+  "center_l0": [
+   6240,
+   2976,
+   3552
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9909850147667391,
+  "tau": 0.88,
+  "mean_coh": 0.9911148548126221,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_046_PHerc0490A.jpg"
+ },
+ {
+  "scroll": "PHerc0490B",
+  "m7": "vesuvius-challenge-open-data/PHerc0490B/representations/predictions/surfaces/20250521151215-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0490B/volumes/20250521151215-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   3456,
+   6336,
+   4224
+  ],
+  "center_l0": [
+   3552,
+   6432,
+   4320
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9903494936317127,
+  "tau": 0.88,
+  "mean_coh": 0.9908646941184998,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_047_PHerc0490B.jpg"
+ },
+ {
+  "scroll": "PHerc0490A",
+  "m7": "vesuvius-challenge-open-data/PHerc0490A/representations/predictions/surfaces/20250521151210-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0490A/volumes/20250521151210-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   8832,
+   6720,
+   6912
+  ],
+  "center_l0": [
+   8928,
+   6816,
+   7008
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9902483544065146,
+  "tau": 0.88,
+  "mean_coh": 0.990239679813385,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_048_PHerc0490A.jpg"
+ },
+ {
+  "scroll": "PHerc0125",
+  "m7": "vesuvius-challenge-open-data/PHerc0125/representations/predictions/surfaces/20250821151825-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0125/volumes/20250821151825-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   14016,
+   4224,
+   2304
+  ],
+  "center_l0": [
+   14112,
+   4320,
+   2400
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9898920080812257,
+  "tau": 0.88,
+  "mean_coh": 0.9892600774765015,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_049_PHerc0125.jpg"
+ },
+ {
+  "scroll": "PHerc0826",
+  "m7": "vesuvius-challenge-open-data/PHerc0826/representations/predictions/surfaces/20250821151701-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0826/volumes/20250821151701-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   13056,
+   4224,
+   3840
+  ],
+  "center_l0": [
+   13152,
+   4320,
+   3936
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9890938472002386,
+  "tau": 0.88,
+  "mean_coh": 0.9870225191116333,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_050_PHerc0826.jpg"
+ },
+ {
+  "scroll": "PHerc0125",
+  "m7": "vesuvius-challenge-open-data/PHerc0125/representations/predictions/surfaces/20250821151825-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0125/volumes/20250821151825-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   20352,
+   4416,
+   3264
+  ],
+  "center_l0": [
+   20448,
+   4512,
+   3360
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9879820845578269,
+  "tau": 0.88,
+  "mean_coh": 0.9870907068252563,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_051_PHerc0125.jpg"
+ },
+ {
+  "scroll": "PHerc0175A",
+  "m7": "vesuvius-challenge-open-data/PHerc0175A/representations/predictions/surfaces/20250521115057-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0175A/volumes/20250521115057-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   960,
+   6528,
+   7488
+  ],
+  "center_l0": [
+   1056,
+   6624,
+   7584
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9878216574482259,
+  "tau": 0.88,
+  "mean_coh": 0.9881818890571594,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_052_PHerc0175A.jpg"
+ },
+ {
+  "scroll": "PHerc0175A",
+  "m7": "vesuvius-challenge-open-data/PHerc0175A/representations/predictions/surfaces/20250521115057-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0175A/volumes/20250521115057-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   6720,
+   7296,
+   4992
+  ],
+  "center_l0": [
+   6816,
+   7392,
+   5088
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9874589909770579,
+  "tau": 0.88,
+  "mean_coh": 0.9881149530410767,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_053_PHerc0175A.jpg"
+ },
+ {
+  "scroll": "PHerc0800",
+  "m7": "vesuvius-challenge-open-data/PHerc0800/representations/predictions/surfaces/20250521135224-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0800/volumes/20250521135224-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   11328,
+   6912,
+   3456
+  ],
+  "center_l0": [
+   11424,
+   7008,
+   3552
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9869879228797893,
+  "tau": 0.88,
+  "mean_coh": 0.9865506887435913,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_054_PHerc0800.jpg"
+ },
+ {
+  "scroll": "PHerc0343",
+  "m7": "vesuvius-challenge-open-data/PHerc0343/representations/predictions/surfaces/20250521140437-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0343/volumes/20250521140437-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   15552,
+   1920,
+   3072
+  ],
+  "center_l0": [
+   15648,
+   2016,
+   3168
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9869407238875118,
+  "tau": 0.88,
+  "mean_coh": 0.9864432215690613,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_055_PHerc0343.jpg"
+ },
+ {
+  "scroll": "PHerc0813",
+  "m7": "vesuvius-challenge-open-data/PHerc0813/representations/predictions/surfaces/20250821151723-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0813/volumes/20250821151723-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   9792,
+   1920,
+   5376
+  ],
+  "center_l0": [
+   9888,
+   2016,
+   5472
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9869311528414505,
+  "tau": 0.88,
+  "mean_coh": 0.985561192035675,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_056_PHerc0813.jpg"
+ },
+ {
+  "scroll": "PHerc1447",
+  "m7": "vesuvius-challenge-open-data/PHerc1447/representations/predictions/surfaces/20250521151220-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1447/volumes/20250521151220-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   5760,
+   4224,
+   1920
+  ],
+  "center_l0": [
+   5856,
+   4320,
+   2016
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9867549552236352,
+  "tau": 0.88,
+  "mean_coh": 0.9909541606903076,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_057_PHerc1447.jpg"
+ },
+ {
+  "scroll": "PHerc0483A",
+  "m7": "vesuvius-challenge-open-data/PHerc0483A/representations/predictions/surfaces/20250521140913-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0483A/volumes/20250521140913-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   7488,
+   3456,
+   3456
+  ],
+  "center_l0": [
+   7584,
+   3552,
+   3552
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.984917252207318,
+  "tau": 0.88,
+  "mean_coh": 0.9857974052429199,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_058_PHerc0483A.jpg"
+ },
+ {
+  "scroll": "PHerc1218",
+  "m7": "vesuvius-challenge-open-data/PHerc1218/representations/predictions/surfaces/20250521120456-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1218/volumes/20250521120456-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   3264,
+   3648,
+   1920
+  ],
+  "center_l0": [
+   3360,
+   3744,
+   2016
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.984810502492335,
+  "tau": 0.88,
+  "mean_coh": 0.9870884418487549,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_059_PHerc1218.jpg"
+ },
+ {
+  "scroll": "PHerc1447",
+  "m7": "vesuvius-challenge-open-data/PHerc1447/representations/predictions/surfaces/20250521151220-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1447/volumes/20250521151220-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   22464,
+   4224,
+   4992
+  ],
+  "center_l0": [
+   22560,
+   4320,
+   5088
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9842076376523297,
+  "tau": 0.88,
+  "mean_coh": 0.9881560206413269,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_060_PHerc1447.jpg"
+ },
+ {
+  "scroll": "PHerc0175A",
+  "m7": "vesuvius-challenge-open-data/PHerc0175A/representations/predictions/surfaces/20250521115057-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0175A/volumes/20250521115057-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   6720,
+   7680,
+   3840
+  ],
+  "center_l0": [
+   6816,
+   7776,
+   3936
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9832927950211526,
+  "tau": 0.88,
+  "mean_coh": 0.9846343398094177,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_061_PHerc0175A.jpg"
+ },
+ {
+  "scroll": "PHerc0125",
+  "m7": "vesuvius-challenge-open-data/PHerc0125/representations/predictions/surfaces/20250821151825-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0125/volumes/20250821151825-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   16320,
+   5184,
+   3840
+  ],
+  "center_l0": [
+   16416,
+   5280,
+   3936
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.982742534523902,
+  "tau": 0.88,
+  "mean_coh": 0.9864212870597839,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_062_PHerc0125.jpg"
+ },
+ {
+  "scroll": "PHerc0483B",
+  "m7": "vesuvius-challenge-open-data/PHerc0483B/representations/predictions/surfaces/20251124083638-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0483B/volumes/20251124083638-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   3264,
+   5376,
+   2688
+  ],
+  "center_l0": [
+   3360,
+   5472,
+   2784
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9825833929641766,
+  "tau": 0.88,
+  "mean_coh": 0.9856995344161987,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_063_PHerc0483B.jpg"
+ },
+ {
+  "scroll": "PHerc0483A",
+  "m7": "vesuvius-challenge-open-data/PHerc0483A/representations/predictions/surfaces/20250521140913-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0483A/volumes/20250521140913-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   7296,
+   5376,
+   3264
+  ],
+  "center_l0": [
+   7392,
+   5472,
+   3360
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9823411154713295,
+  "tau": 0.88,
+  "mean_coh": 0.9840925335884094,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_064_PHerc0483A.jpg"
+ },
+ {
+  "scroll": "PHerc1218",
+  "m7": "vesuvius-challenge-open-data/PHerc1218/representations/predictions/surfaces/20250521120456-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1218/volumes/20250521120456-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   13824,
+   4800,
+   4224
+  ],
+  "center_l0": [
+   13920,
+   4896,
+   4320
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9811468410252489,
+  "tau": 0.88,
+  "mean_coh": 0.9864742755889893,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_065_PHerc1218.jpg"
+ },
+ {
+  "scroll": "PHerc0175A",
+  "m7": "vesuvius-challenge-open-data/PHerc0175A/representations/predictions/surfaces/20250521115057-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0175A/volumes/20250521115057-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   7296,
+   4224,
+   1920
+  ],
+  "center_l0": [
+   7392,
+   4320,
+   2016
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9805939738504843,
+  "tau": 0.88,
+  "mean_coh": 0.9855438470840454,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_066_PHerc0175A.jpg"
+ },
+ {
+  "scroll": "PHerc0800",
+  "m7": "vesuvius-challenge-open-data/PHerc0800/representations/predictions/surfaces/20250521135224-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0800/volumes/20250521135224-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   12096,
+   5952,
+   3072
+  ],
+  "center_l0": [
+   12192,
+   6048,
+   3168
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9805193746024138,
+  "tau": 0.88,
+  "mean_coh": 0.9876233339309692,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_067_PHerc0800.jpg"
+ },
+ {
+  "scroll": "PHerc0191",
+  "m7": "vesuvius-challenge-open-data/PHerc0191/representations/predictions/surfaces/20250821151635-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0191/volumes/20250821151635-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   15744,
+   3840,
+   6528
+  ],
+  "center_l0": [
+   15840,
+   3936,
+   6624
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9800013986228682,
+  "tau": 0.88,
+  "mean_coh": 0.984124481678009,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_068_PHerc0191.jpg"
+ },
+ {
+  "scroll": "PHerc0826",
+  "m7": "vesuvius-challenge-open-data/PHerc0826/representations/predictions/surfaces/20250821151701-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0826/volumes/20250821151701-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   4032,
+   3072,
+   4416
+  ],
+  "center_l0": [
+   4128,
+   3168,
+   4512
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9793923485645601,
+  "tau": 0.88,
+  "mean_coh": 0.9907438158988953,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_069_PHerc0826.jpg"
+ },
+ {
+  "scroll": "PHerc0268",
+  "m7": "vesuvius-challenge-open-data/PHerc0268/representations/predictions/surfaces/20251110183117-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0268/volumes/20251110183117-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   10176,
+   8832,
+   6144
+  ],
+  "center_l0": [
+   10272,
+   8928,
+   6240
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9788506301683101,
+  "tau": 0.88,
+  "mean_coh": 0.9859139919281006,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_070_PHerc0268.jpg"
+ },
+ {
+  "scroll": "PHerc0257",
+  "m7": "vesuvius-challenge-open-data/PHerc0257/representations/predictions/surfaces/20250821151750-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0257/volumes/20250821151750-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   10560,
+   2496,
+   3264
+  ],
+  "center_l0": [
+   10656,
+   2592,
+   3360
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9774578712889053,
+  "tau": 0.88,
+  "mean_coh": 0.9828484654426575,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_071_PHerc0257.jpg"
+ },
+ {
+  "scroll": "PHerc0800",
+  "m7": "vesuvius-challenge-open-data/PHerc0800/representations/predictions/surfaces/20250521135224-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0800/volumes/20250521135224-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   11712,
+   6912,
+   6336
+  ],
+  "center_l0": [
+   11808,
+   7008,
+   6432
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9766396101861956,
+  "tau": 0.88,
+  "mean_coh": 0.9828991293907166,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_072_PHerc0800.jpg"
+ },
+ {
+  "scroll": "PHerc0125",
+  "m7": "vesuvius-challenge-open-data/PHerc0125/representations/predictions/surfaces/20250821151825-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0125/volumes/20250821151825-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   14016,
+   4800,
+   5376
+  ],
+  "center_l0": [
+   14112,
+   4896,
+   5472
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9759444196112207,
+  "tau": 0.88,
+  "mean_coh": 0.9849755764007568,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_073_PHerc0125.jpg"
+ },
+ {
+  "scroll": "PHerc0306B",
+  "m7": "vesuvius-challenge-open-data/PHerc0306B/representations/predictions/surfaces/20250521133212-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0306B/volumes/20250521133212-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   7680,
+   3648,
+   6528
+  ],
+  "center_l0": [
+   7776,
+   3744,
+   6624
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9759188407550882,
+  "tau": 0.88,
+  "mean_coh": 0.9805084466934204,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_074_PHerc0306B.jpg"
+ },
+ {
+  "scroll": "PHerc1545",
+  "m7": "vesuvius-challenge-open-data/PHerc1545/representations/predictions/surfaces/20250821151648-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1545/volumes/20250821151648-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   12480,
+   2880,
+   1920
+  ],
+  "center_l0": [
+   12576,
+   2976,
+   2016
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9751446539059656,
+  "tau": 0.88,
+  "mean_coh": 0.9850568175315857,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_075_PHerc1545.jpg"
+ },
+ {
+  "scroll": "PHerc0191",
+  "m7": "vesuvius-challenge-open-data/PHerc0191/representations/predictions/surfaces/20250821151635-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0191/volumes/20250821151635-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   10560,
+   5376,
+   4992
+  ],
+  "center_l0": [
+   10656,
+   5472,
+   5088
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.974508392834083,
+  "tau": 0.88,
+  "mean_coh": 0.983719527721405,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_076_PHerc0191.jpg"
+ },
+ {
+  "scroll": "PHerc1545",
+  "m7": "vesuvius-challenge-open-data/PHerc1545/representations/predictions/surfaces/20250821151648-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1545/volumes/20250821151648-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   5760,
+   2496,
+   4992
+  ],
+  "center_l0": [
+   5856,
+   2592,
+   5088
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9737142983120639,
+  "tau": 0.88,
+  "mean_coh": 0.9827090501785278,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_077_PHerc1545.jpg"
+ },
+ {
+  "scroll": "PHerc0306B",
+  "m7": "vesuvius-challenge-open-data/PHerc0306B/representations/predictions/surfaces/20250521133212-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0306B/volumes/20250521133212-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   13056,
+   4224,
+   3840
+  ],
+  "center_l0": [
+   13152,
+   4320,
+   3936
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9724039805154638,
+  "tau": 0.88,
+  "mean_coh": 0.9805629253387451,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_078_PHerc0306B.jpg"
+ },
+ {
+  "scroll": "PHerc0125",
+  "m7": "vesuvius-challenge-open-data/PHerc0125/representations/predictions/surfaces/20250821151825-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0125/volumes/20250821151825-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   4224,
+   3840,
+   4224
+  ],
+  "center_l0": [
+   4320,
+   3936,
+   4320
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9719796994154721,
+  "tau": 0.88,
+  "mean_coh": 0.9876148700714111,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_079_PHerc0125.jpg"
+ },
+ {
+  "scroll": "PHerc1218",
+  "m7": "vesuvius-challenge-open-data/PHerc1218/representations/predictions/surfaces/20250521120456-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1218/volumes/20250521120456-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   4608,
+   4608,
+   2112
+  ],
+  "center_l0": [
+   4704,
+   4704,
+   2208
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9718972847247663,
+  "tau": 0.88,
+  "mean_coh": 0.9802829623222351,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_080_PHerc1218.jpg"
+ },
+ {
+  "scroll": "PHerc0306B",
+  "m7": "vesuvius-challenge-open-data/PHerc0306B/representations/predictions/surfaces/20250521133212-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0306B/volumes/20250521133212-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   7680,
+   4032,
+   2304
+  ],
+  "center_l0": [
+   7776,
+   4128,
+   2400
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9712929012207331,
+  "tau": 0.88,
+  "mean_coh": 0.9848105907440186,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_081_PHerc0306B.jpg"
+ },
+ {
+  "scroll": "PHerc0813",
+  "m7": "vesuvius-challenge-open-data/PHerc0813/representations/predictions/surfaces/20250821151723-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0813/volumes/20250821151723-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   8832,
+   2880,
+   4416
+  ],
+  "center_l0": [
+   8928,
+   2976,
+   4512
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.970592291311831,
+  "tau": 0.88,
+  "mean_coh": 0.981791079044342,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_082_PHerc0813.jpg"
+ },
+ {
+  "scroll": "PHerc0257",
+  "m7": "vesuvius-challenge-open-data/PHerc0257/representations/predictions/surfaces/20250821151750-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0257/volumes/20250821151750-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   10560,
+   2112,
+   4608
+  ],
+  "center_l0": [
+   10656,
+   2208,
+   4704
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9696278728415803,
+  "tau": 0.88,
+  "mean_coh": 0.9807343482971191,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_083_PHerc0257.jpg"
+ },
+ {
+  "scroll": "PHerc1545",
+  "m7": "vesuvius-challenge-open-data/PHerc1545/representations/predictions/surfaces/20250821151648-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1545/volumes/20250821151648-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   3648,
+   2112,
+   2688
+  ],
+  "center_l0": [
+   3744,
+   2208,
+   2784
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9678125167265362,
+  "tau": 0.88,
+  "mean_coh": 0.9786041378974915,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_084_PHerc1545.jpg"
+ },
+ {
+  "scroll": "PHerc0846B",
+  "m7": "vesuvius-challenge-open-data/PHerc0846B/representations/predictions/surfaces/20250804142305-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0846B/volumes/20250804142305-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   8064,
+   3264,
+   3456
+  ],
+  "center_l0": [
+   8160,
+   3360,
+   3552
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9665029405140982,
+  "tau": 0.88,
+  "mean_coh": 0.9800542593002319,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_085_PHerc0846B.jpg"
+ },
+ {
+  "scroll": "PHerc0257",
+  "m7": "vesuvius-challenge-open-data/PHerc0257/representations/predictions/surfaces/20250821151750-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0257/volumes/20250821151750-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   5376,
+   5952,
+   5568
+  ],
+  "center_l0": [
+   5472,
+   6048,
+   5664
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9663343908276284,
+  "tau": 0.88,
+  "mean_coh": 0.9809234738349915,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_086_PHerc0257.jpg"
+ },
+ {
+  "scroll": "PHerc0257",
+  "m7": "vesuvius-challenge-open-data/PHerc0257/representations/predictions/surfaces/20250821151750-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0257/volumes/20250821151750-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   10176,
+   1920,
+   3648
+  ],
+  "center_l0": [
+   10272,
+   2016,
+   3744
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9646331375276729,
+  "tau": 0.88,
+  "mean_coh": 0.9780076742172241,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_087_PHerc0257.jpg"
+ },
+ {
+  "scroll": "PHerc0175B",
+  "m7": "vesuvius-challenge-open-data/PHerc0175B/representations/predictions/surfaces/20250521125822-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0175B/volumes/20250521125822-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   3648,
+   2688,
+   7872
+  ],
+  "center_l0": [
+   3744,
+   2784,
+   7968
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9643026250388399,
+  "tau": 0.88,
+  "mean_coh": 0.9788137674331665,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_088_PHerc0175B.jpg"
+ },
+ {
+  "scroll": "PHerc0826",
+  "m7": "vesuvius-challenge-open-data/PHerc0826/representations/predictions/surfaces/20250821151701-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0826/volumes/20250821151701-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   16128,
+   2688,
+   2688
+  ],
+  "center_l0": [
+   16224,
+   2784,
+   2784
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9642900059321817,
+  "tau": 0.88,
+  "mean_coh": 0.9811424612998962,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_089_PHerc0826.jpg"
+ },
+ {
+  "scroll": "PHerc0483A",
+  "m7": "vesuvius-challenge-open-data/PHerc0483A/representations/predictions/surfaces/20250521140913-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0483A/volumes/20250521140913-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   11520,
+   6336,
+   6528
+  ],
+  "center_l0": [
+   11616,
+   6432,
+   6624
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9638526341013978,
+  "tau": 0.88,
+  "mean_coh": 0.9779852628707886,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_090_PHerc0483A.jpg"
+ },
+ {
+  "scroll": "PHerc1545",
+  "m7": "vesuvius-challenge-open-data/PHerc1545/representations/predictions/surfaces/20250821151648-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1545/volumes/20250821151648-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   15744,
+   4032,
+   4032
+  ],
+  "center_l0": [
+   15840,
+   4128,
+   4128
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9631539052543714,
+  "tau": 0.88,
+  "mean_coh": 0.9793795943260193,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_091_PHerc1545.jpg"
+ },
+ {
+  "scroll": "PHerc0211",
+  "m7": "vesuvius-challenge-open-data/PHerc0211/representations/predictions/surfaces/20250821151803-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0211/volumes/20250821151803-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   13632,
+   3456,
+   3264
+  ],
+  "center_l0": [
+   13728,
+   3552,
+   3360
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9625977160103554,
+  "tau": 0.88,
+  "mean_coh": 0.975462019443512,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_092_PHerc0211.jpg"
+ },
+ {
+  "scroll": "PHerc1218",
+  "m7": "vesuvius-challenge-open-data/PHerc1218/representations/predictions/surfaces/20250521120456-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc1218/volumes/20250521120456-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   11520,
+   3456,
+   4608
+  ],
+  "center_l0": [
+   11616,
+   3552,
+   4704
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9613275693132637,
+  "tau": 0.88,
+  "mean_coh": 0.9773820042610168,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_093_PHerc1218.jpg"
+ },
+ {
+  "scroll": "PHerc0125",
+  "m7": "vesuvius-challenge-open-data/PHerc0125/representations/predictions/surfaces/20250821151825-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0125/volumes/20250821151825-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   20352,
+   2688,
+   5376
+  ],
+  "center_l0": [
+   20448,
+   2784,
+   5472
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9608962642099289,
+  "tau": 0.88,
+  "mean_coh": 0.9806361198425293,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_094_PHerc0125.jpg"
+ },
+ {
+  "scroll": "PHerc0175A",
+  "m7": "vesuvius-challenge-open-data/PHerc0175A/representations/predictions/surfaces/20250521115057-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0175A/volumes/20250521115057-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   5568,
+   4224,
+   2304
+  ],
+  "center_l0": [
+   5664,
+   4320,
+   2400
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9583674827889583,
+  "tau": 0.88,
+  "mean_coh": 0.9768015146255493,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_095_PHerc0175A.jpg"
+ },
+ {
+  "scroll": "PHerc0483A",
+  "m7": "vesuvius-challenge-open-data/PHerc0483A/representations/predictions/surfaces/20250521140913-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0483A/volumes/20250521140913-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   10752,
+   4416,
+   6912
+  ],
+  "center_l0": [
+   10848,
+   4512,
+   7008
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9580361916780608,
+  "tau": 0.88,
+  "mean_coh": 0.9736970067024231,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_096_PHerc0483A.jpg"
+ },
+ {
+  "scroll": "PHerc0257",
+  "m7": "vesuvius-challenge-open-data/PHerc0257/representations/predictions/surfaces/20250821151750-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0257/volumes/20250821151750-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   10176,
+   3648,
+   3456
+  ],
+  "center_l0": [
+   10272,
+   3744,
+   3552
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9576990154652064,
+  "tau": 0.88,
+  "mean_coh": 0.9755609035491943,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_097_PHerc0257.jpg"
+ },
+ {
+  "scroll": "PHerc0343",
+  "m7": "vesuvius-challenge-open-data/PHerc0343/representations/predictions/surfaces/20250521140437-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0343/volumes/20250521140437-8.640um-1.2m-116keV-masked.zarr",
+  "origin_l0": [
+   12096,
+   4224,
+   960
+  ],
+  "center_l0": [
+   12192,
+   4320,
+   1056
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.957621532747598,
+  "tau": 0.88,
+  "mean_coh": 0.9755674600601196,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_098_PHerc0343.jpg"
+ },
+ {
+  "scroll": "PHerc0826",
+  "m7": "vesuvius-challenge-open-data/PHerc0826/representations/predictions/surfaces/20250821151701-surface-20260413222639-surface-m7-L0-th0.2.zarr",
+  "vol": "vesuvius-challenge-open-data/PHerc0826/volumes/20250821151701-9.362um-1.2m-113keV-masked.zarr",
+  "origin_l0": [
+   7488,
+   3264,
+   4224
+  ],
+  "center_l0": [
+   7584,
+   3360,
+   4320
+  ],
+  "size": 192,
+  "material": 0.9490740740740741,
+  "material_thr": 95,
+  "coh_score": 0.9565923532767767,
+  "tau": 0.88,
+  "mean_coh": 0.978256106376648,
+  "judge": "m7_normal_coherence>tau -> surface(1); rest -> ignore(2)",
+  "image": "region_099_PHerc0826.jpg"
+ }
+]

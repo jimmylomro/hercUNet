@@ -14,11 +14,30 @@ Stage 1 — pseudo-label corpora (``.herculabels``; see docs/herculabels.md):
     hercunet labels edit   <corpus.herculabels>
     hercunet labels merge  <out.herculabels> <in1.herculabels> <in2.herculabels> [...]
     hercunet labels export <corpus.herculabels> <train_out> [--no-augment]
+    hercunet labels m7-mine <m7_corpus> [--scroll s1,s5 | --manifest scout.json] [--max-candidates 4]
 
 ``create`` builds a new corpus (fails if it exists): ``--interactive`` opens the viewer and grinds windows
 open-endedly (no ``--count``); otherwise it generates ``--count`` windows headless. ``edit`` re-opens the
 corpus in the viewer for correction. ``merge`` unions several corpora into a new one (so you extend a corpus
 by creating a fresh one and merging). ``export`` derives the training corpus (augmentations on by default).
+``m7-mine`` pre-extracts an m7 pseudo-label corpus from compressed regions (consumed by
+``train export-labels --m7-corpus``).
+
+Stage 2 — refiner training chain (needs ``pip install -e ".[train]"``; see docs/stage2-port.md):
+
+    hercunet train export-labels --corpus <c> --out $nnUNet_raw/Dataset301_… [--m7-corpus <m7>] [--max-candidates 4]
+    hercunet train preprocess    --dataset 301 [--max-candidates 4] [--config 3d_fullres]
+    hercunet train export-owner  --dataset 301
+    hercunet train fit           --dataset 301 --pretrained <m7 ckpt> [--num-gpus N]
+    hercunet train chain         --corpus <c> [--m7-corpus <m7>] --out … --dataset 301 --pretrained <m7> [--from … --until …]
+
+This is the **HercUNet** (run301 / v0) recipe — the iterative AffinityMalis refiner. ``export-labels`` writes our
+gate-passing corpus as CT + K candidate/prev crests + ownersTr (MALIS instance GT), uncleaned, and with
+``--m7-corpus`` COPIES a pre-mined m7 corpus (from ``labels m7-mine``) in as ``m7_*`` cases — the rehearsal signal.
+``preprocess`` transplants m7's ResEncUNetL plans and patches them to 1+K channels; ``fit`` launches the trainer by
+importing the class and calling ``run_training()`` — no ``-tr`` discovery, no copy-paste into the nnunetv2 package
+(knobs via the ``CK_*`` env vars). ``chain`` runs every step in order (same code), resumable with ``--from`` /
+``--until`` / ``--skip``, over a pinned/unmodified ``nnunetv2==2.8.1``.
 """
 
 from __future__ import annotations
@@ -176,6 +195,246 @@ def _add_labels_export(subparsers: argparse._SubParsersAction) -> None:
     p.set_defaults(func=_labels_export)
 
 
+# ----------------------------------------------------------------------------- labels m7-mine --
+def _labels_m7mine(args: argparse.Namespace) -> None:
+    from .labels import m7mine
+    m7mine.mine(out=args.out, scroll=args.scroll, manifest=args.manifest,
+                max_candidates=args.max_candidates, tau=args.tau, workers=args.workers, images=args.images)
+
+
+def _add_labels_m7mine(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("m7-mine", help="mine m7 pseudo-labels from compressed regions into an m7 corpus",
+                       description="Scout coherent m7 crest in compressed regions (from the PUBLISHED m7 surface "
+                                   "predictions) and write a pre-extracted m7 corpus of {0,1,2} labels. Consumed by "
+                                   "`hercunet train export-labels --m7-corpus`. --manifest rebuilds an approved set.")
+    p.add_argument("out", metavar="M7_CORPUS", help="m7 corpus directory to write")
+    p.add_argument("--scroll", default=None, help="scroll id(s) to scout, e.g. s1,s5 (fresh scout)")
+    p.add_argument("--manifest", default=None, help="rebuild the approved regions from this scout manifest.json (no re-scout)")
+    p.add_argument("--max-candidates", type=int, default=4, help="K candidate slots (MUST match train export-labels)")
+    p.add_argument("--tau", type=float, default=None, help="m7 normal-coherence gate (default: the validated value)")
+    p.add_argument("--workers", type=int, default=8, help="parallel region readers (overlap anon-S3 latency)")
+    p.add_argument("--images", action="store_true",
+                   help="scout: also write the 3-panel QC render per approved region (raw m7 | coherence | "
+                        "grabbed-coherent) and record its filename in the manifest")
+    p.set_defaults(func=_labels_m7mine)
+
+
+# ============================================================================ train (stage 2) ==
+# `hercunet train <step>` — the refiner chain as separate, resumable steps over a pinned,
+# unmodified nnunetv2==2.8.1 (no fork, no clone, no trainer copy-paste). See docs/training.md.
+
+def _add_nnunet_path(p: argparse.ArgumentParser) -> None:
+    """Shared ``--nnunet-path`` flag: a dir holding nnUNet_raw/ nnUNet_preprocessed/ nnUNet_results/, applied
+    in-process so no env export is needed (env vars remain the fallback for split layouts)."""
+    p.add_argument("--nnunet-path", "--nnUNet-path", dest="nnunet_path", default=None, metavar="DIR",
+                   help="dir containing nnUNet_raw/ nnUNet_preprocessed/ nnUNet_results/ (sets the nnU-Net "
+                        "roots for this run; no env export needed). Omit to use the nnUNet_* env vars.")
+
+
+def _train_export_labels(args: argparse.Namespace) -> None:
+    from .train import dataset
+    dataset.export_labels(corpus=args.corpus, out=args.out, m7_corpus=args.m7_corpus,
+                          surface_tau=args.surface_tau, ignore_score=args.ignore_score,
+                          gate_score=args.gate_score, gate_count=args.gate_count,
+                          max_candidates=args.max_candidates, confidence_ignore=args.confidence_ignore,
+                          prefix=args.prefix, nshards=args.nshards, shard=args.shard)
+
+
+def _add_train_export_labels(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("export-labels", help="decode our corpus (+ append a pre-mined m7 corpus) into an nnU-Net dataset",
+                       description="Export our gate-passing ∇φ pseudo-labels into $nnUNet_raw/DatasetNNN as CT + K "
+                                   "candidate/prev crests + ownersTr (MALIS GT); with --m7-corpus, also COPY the "
+                                   "pre-mined m7 cases in (no symlinks).")
+    p.add_argument("--corpus", required=True, help="our source corpus (dir or .herculabels)")
+    p.add_argument("--out", required=True, metavar="DATASET_DIR", help="$nnUNet_raw/DatasetNNN_… to write")
+    p.add_argument("--m7-corpus", default=None, metavar="M7_CORPUS",
+                   help="a pre-mined m7 corpus (from `hercunet labels m7-mine`) — its cases are copied in as m7_*")
+    p.add_argument("--surface-tau", type=float, default=0.91, help="|∇φ| crest threshold (default 0.91 ≈ 2.6 vx)")
+    p.add_argument("--ignore-score", type=float, default=0.80, help="collapsed-sheet ignore cutoff")
+    p.add_argument("--gate-score", type=float, default=0.85, help="per-sheet gate score")
+    p.add_argument("--gate-count", type=int, default=2, help="min sheets passing the gate")
+    p.add_argument("--max-candidates", type=int, default=4, help="K candidate/prev channels (default 4)")
+    p.add_argument("--confidence-ignore", action=argparse.BooleanOptionalAction, default=False,
+                   help="apply the confidence ignore; HercUNet trains UNCLEANED, so default is --no-confidence-ignore")
+    p.add_argument("--prefix", default="our", help="case-name prefix (default 'our')")
+    p.add_argument("--nshards", type=int, default=1, help="shard the export across N workers")
+    p.add_argument("--shard", type=int, default=0, help="this worker's shard index")
+    p.set_defaults(func=_train_export_labels)
+
+
+def _train_preprocess(args: argparse.Namespace) -> None:
+    from .train.paths import set_nnunet_roots
+    set_nnunet_roots(args.nnunet_path, needs=("nnUNet_raw", "nnUNet_preprocessed"))
+    from .train.preprocess import preprocess_dataset
+    for i, ds in enumerate(args.dataset):
+        preprocess_dataset(ds, configuration=args.config, plans_id=args.plans_id,
+                           num_processes=args.np, max_candidates=args.max_candidates,
+                           setup_plans=(args.setup_plans and i == 0), m7_repo=args.m7_repo)
+
+
+def _add_train_preprocess(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("preprocess", help="fingerprint → transplant m7 plans → patch channels → preprocess",
+                       description="Wrap the stock nnU-Net funcs to preprocess in m7's ResEncUNetL geometry, "
+                                   "patched to 1+K input channels for the iterative refiner.")
+    p.add_argument("--dataset", required=True, type=int, nargs="+", metavar="ID",
+                   help="dataset id(s) to preprocess, e.g. 301")
+    p.add_argument("--max-candidates", type=int, default=4,
+                   help="K candidate/prev channels → plans patched to 1+K (0 = single-channel, no patch)")
+    p.add_argument("--config", default="3d_fullres", help="nnU-Net configuration (default 3d_fullres)")
+    p.add_argument("--plans-id", default="nnUNetResEncUNetLPlans", help="plans identifier to transplant")
+    p.add_argument("--np", type=int, default=8, help="worker processes (default 8)")
+    p.add_argument("--setup-plans", action=argparse.BooleanOptionalAction, default=True,
+                   help="seed Dataset100 from the m7 checkpoint first (on by default)")
+    p.add_argument("--m7-repo", default="scrollprize/surface_m7_nnunet", help="HF repo for the m7 plans source")
+    _add_nnunet_path(p)
+    p.set_defaults(func=_train_preprocess)
+
+
+def _train_export_owner(args: argparse.Namespace) -> None:
+    from .train.paths import set_nnunet_roots
+    set_nnunet_roots(args.nnunet_path, needs=("nnUNet_raw", "nnUNet_preprocessed"))
+    from .train import dataset
+    dataset.export_owner(dataset=args.dataset, out=args.out)
+
+
+def _add_train_export_owner(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("export-owner", help="write per-sheet owner-id MALIS sidecars",
+                       description="Write <case>_owner.b2nd (instance GT at preprocessed resolution) for MALIS.")
+    p.add_argument("--dataset", required=True, type=int, metavar="ID", help="preprocessed dataset id")
+    p.add_argument("--out", default=None, metavar="DIR", help="owner_b2nd output dir (default: alongside the dataset)")
+    _add_nnunet_path(p)
+    p.set_defaults(func=_train_export_owner)
+
+
+def _train_fit(args: argparse.Namespace) -> None:
+    from .train.paths import set_nnunet_roots
+    set_nnunet_roots(args.nnunet_path, needs=("nnUNet_preprocessed", "nnUNet_results"))
+    from .train.launch import fit
+    fit(args.trainer, args.dataset, configuration=args.config, fold=args.fold,
+        plans_identifier=args.plans_id, pretrained=args.pretrained, num_gpus=args.num_gpus,
+        device=args.device, continue_training=args.continue_,
+        recipe_path=args.recipe, epochs=args.epochs)
+
+
+def _add_train_fit(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("fit", help="train the refiner (direct instantiation; no -tr discovery)",
+                       description="Launch the HercUNet trainer by importing the class and calling run_training(). "
+                                   "Trainer/DAgger/MALIS knobs are read from the CK_* env vars, as in the run301 chain.")
+    p.add_argument("--trainer", default="hercunet",
+                   help="alias 'hercunet' (the AffinityMalis iterative-DAgger refiner) or an explicit module:ClassName")
+    p.add_argument("--dataset", required=True, help="preprocessed dataset id or DatasetNNN_… name")
+    p.add_argument("--config", default="3d_fullres", help="nnU-Net configuration (default 3d_fullres)")
+    p.add_argument("--fold", default=0, help="cross-val fold (int or 'all'; default 0)")
+    p.add_argument("--plans-id", default="nnUNetResEncUNetLPlans", help="plans identifier")
+    p.add_argument("--pretrained", default=None, metavar="CKPT", help="warm-start weights (m7 checkpoint_best.pth)")
+    p.add_argument("--num-gpus", type=int, default=1, help="DDP world size (>1 spawns workers)")
+    p.add_argument("--device", default="cuda", help="cuda | cpu (default cuda)")
+    p.add_argument("--continue", dest="continue_", action="store_true",
+                   help="resume from the last checkpoint instead of warm-starting")
+    p.add_argument("--recipe", default=None, metavar="FILE.yml",
+                   help="train with a YAML recipe file (copy hercunet/recipes/hercunet.yml and edit); omit for "
+                        "the exact run301 recipe")
+    p.add_argument("--epochs", type=int, default=None, metavar="N",
+                   help="override the training length (e.g. --epochs 1 for a smoke run); default is the recipe's")
+    _add_nnunet_path(p)
+    p.set_defaults(func=_train_fit)
+
+
+# ------------------------------------------------------------------------------- train chain --
+_CHAIN_STEPS = ("export-labels", "preprocess", "export-owner", "fit")
+
+
+def _selected_steps(args: argparse.Namespace) -> list[str]:
+    """The steps to run, honouring --from / --until / --skip (defaults to all, in order)."""
+    lo = _CHAIN_STEPS.index(args.from_) if args.from_ else 0
+    hi = _CHAIN_STEPS.index(args.until) if args.until else len(_CHAIN_STEPS) - 1
+    if lo > hi:
+        raise SystemExit(f"hercunet train chain: --from {args.from_} is after --until {args.until}")
+    skip = set(args.skip or ())
+    return [s for s in _CHAIN_STEPS[lo:hi + 1] if s not in skip]
+
+
+def _need(args: argparse.Namespace, *names: str) -> None:
+    missing = [f"--{n.replace('_', '-')}" for n in names if getattr(args, n) is None]
+    if missing:
+        raise SystemExit(f"hercunet train chain: this step needs {', '.join(missing)}")
+
+
+def _train_chain(args: argparse.Namespace) -> None:
+    from .train import dataset as ds
+    from .train.preprocess import preprocess_dataset
+    from .train.launch import fit as _fit
+
+    steps = _selected_steps(args)
+    # set the nnU-Net roots (--nnunet-path or env) for exactly the steps that touch them, before any nnU-Net call
+    needs = set()
+    if {"preprocess", "export-owner"} & set(steps):
+        needs |= {"nnUNet_raw", "nnUNet_preprocessed"}
+    if "fit" in steps:
+        needs |= {"nnUNet_preprocessed", "nnUNet_results"}
+    if needs:
+        from .train.paths import set_nnunet_roots
+        set_nnunet_roots(args.nnunet_path, needs=tuple(needs))
+    print(f"[chain] running: {' -> '.join(steps)}", flush=True)
+    for step in steps:
+        print(f"[chain] === {step} ===", flush=True)
+        if step == "export-labels":
+            _need(args, "corpus", "out")
+            ds.export_labels(corpus=args.corpus, out=args.out, m7_corpus=args.m7_corpus,
+                             surface_tau=args.surface_tau, ignore_score=args.ignore_score,
+                             gate_score=args.gate_score, gate_count=args.gate_count,
+                             max_candidates=args.max_candidates, confidence_ignore=False,
+                             prefix="our", nshards=1, shard=0)
+        elif step == "preprocess":
+            _need(args, "dataset")
+            preprocess_dataset(int(args.dataset), configuration=args.config, plans_id=args.plans_id,
+                               num_processes=args.np, max_candidates=args.max_candidates)
+        elif step == "export-owner":
+            _need(args, "dataset")
+            ds.export_owner(dataset=int(args.dataset), out=None)
+        elif step == "fit":
+            _need(args, "dataset", "trainer")
+            _fit(args.trainer, args.dataset, configuration=args.config, fold=args.fold,
+                 plans_identifier=args.plans_id, pretrained=args.pretrained,
+                 num_gpus=args.num_gpus, device=args.device,
+                 recipe_path=args.recipe, epochs=args.epochs)
+    print("[chain] done", flush=True)
+
+
+def _add_train_chain(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("chain", help="run the whole chain (export → … → fit) in order",
+                       description="Run every train step in sequence. Resume with --from / --until / --skip "
+                                   "(each step is the same code as its standalone subcommand).")
+    # step selection (resumability)
+    p.add_argument("--from", dest="from_", choices=_CHAIN_STEPS, default=None, help="start at this step")
+    p.add_argument("--until", choices=_CHAIN_STEPS, default=None, help="stop after this step")
+    p.add_argument("--skip", nargs="+", choices=_CHAIN_STEPS, default=None, help="skip these steps")
+    # dataset assembly
+    p.add_argument("--corpus", default=None, help="our source corpus (export-labels)")
+    p.add_argument("--out", default=None, metavar="DATASET_DIR", help="$nnUNet_raw/DatasetNNN_… (our + copied m7 cases)")
+    p.add_argument("--m7-corpus", default=None, metavar="M7_CORPUS",
+                   help="a pre-mined m7 corpus (from `hercunet labels m7-mine`) to copy in as m7_* cases")
+    p.add_argument("--max-candidates", type=int, default=4, help="K candidate/prev channels (export / preprocess)")
+    p.add_argument("--surface-tau", type=float, default=0.91, help="export |∇φ| crest threshold")
+    p.add_argument("--ignore-score", type=float, default=0.80, help="export collapsed-sheet ignore cutoff")
+    p.add_argument("--gate-score", type=float, default=0.85, help="export per-sheet gate score")
+    p.add_argument("--gate-count", type=int, default=2, help="export min sheets passing the gate")
+    # preprocess + fit
+    p.add_argument("--dataset", default=None, help="dataset id for preprocess / export-owner / fit")
+    p.add_argument("--config", default="3d_fullres", help="nnU-Net configuration")
+    p.add_argument("--plans-id", default="nnUNetResEncUNetLPlans", help="plans identifier")
+    p.add_argument("--np", type=int, default=8, help="preprocess worker processes")
+    p.add_argument("--trainer", default="hercunet", help="fit: alias 'hercunet' or module:ClassName")
+    p.add_argument("--pretrained", default=None, metavar="CKPT", help="fit: warm-start weights (m7 checkpoint_best.pth)")
+    p.add_argument("--fold", default=0, help="fit: cross-val fold")
+    p.add_argument("--num-gpus", type=int, default=1, help="fit: DDP world size")
+    p.add_argument("--device", default="cuda", help="fit: cuda | cpu")
+    p.add_argument("--recipe", default=None, metavar="FILE.yml", help="fit: YAML recipe file (else run301)")
+    p.add_argument("--epochs", type=int, default=None, metavar="N", help="fit: override training length")
+    _add_nnunet_path(p)
+    p.set_defaults(func=_train_chain)
+
+
 # --------------------------------------------------------------------------------- dispatch --
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -190,6 +449,15 @@ def build_parser() -> argparse.ArgumentParser:
     _add_labels_edit(labels_cmds)
     _add_labels_merge(labels_cmds)
     _add_labels_export(labels_cmds)
+    _add_labels_m7mine(labels_cmds)
+
+    train = groups.add_parser("train", help="refiner training chain (stage 2)")
+    train_cmds = train.add_subparsers(dest="command", metavar="<step>", required=True)
+    _add_train_export_labels(train_cmds)
+    _add_train_preprocess(train_cmds)
+    _add_train_export_owner(train_cmds)
+    _add_train_fit(train_cmds)
+    _add_train_chain(train_cmds)
 
     return parser
 

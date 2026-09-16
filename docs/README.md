@@ -41,7 +41,8 @@ pipenv install -e ".[viz]"     # + the interactive label viewer / editor (PySide
 | _(none)_ | data layer + stage-1 label gen | the default — everything runs |
 | `viz` | PySide6, pyqtgraph, PyOpenGL | the interactive viewer (`create --interactive`, `edit`) |
 | `accel` | obstore | a faster native (non-boto) S3 reader |
-| `full` | viz + accel | both |
+| `train` | nnunetv2==2.8.1 + huggingface_hub, acvl-utils, connected-components-3d, numba, blosc2 | stage-2 refiner training (`hercunet train …`) — pod-only |
+| `full` | viz + accel + train | everything |
 | `dev` | pytest | the test suite |
 
 ## GPU / CUDA
@@ -109,10 +110,26 @@ Build, edit, combine, and export `.herculabels` pseudo-label corpora:
 | `edit <corpus.herculabels>` | re-open a corpus in the viewer to correct its windows in place |
 | `merge <out.herculabels> <in…>` | union several corpora into a new one |
 | `export <corpus.herculabels> <train_out>` | derive the training corpus (base + augmentations; `--no-augment` for base only) |
+| `m7-mine <m7_corpus> …` | pre-extract an m7 pseudo-label corpus from compressed regions (the rehearsal signal; consumed by `train export-labels --m7-corpus`) |
 
 The full flag list, the interactive grinding viewer (navigation, overlays, split/merge/delete, undo,
 save + next), the outputs, and the `.herculabels` container format are in **[herculabels.md](herculabels.md)**.
-Stages 2 (refine) and 3 (infer) land as they are ported.
+
+### Stage 2 — training (`hercunet train …`)
+
+Train the iterative refiner over a pinned, unmodified `nnunetv2==2.8.1` (no fork, no clone, no
+trainer copy-paste; all in-process, no subprocess). The chain is separate, resumable steps:
+
+| Command | Purpose |
+|---|---|
+| `export-labels … [--m7-corpus M7]` | our gate-passing corpus → nnU-Net cases (CT + K candidate/prev crests + owners, uncleaned); copies a pre-mined m7 corpus in |
+| `preprocess --dataset NNN …` | fingerprint → transplant m7's ResEncUNetL plans → patch to 1+K channels → preprocess |
+| `export-owner --dataset NNN` | write the per-sheet owner-id MALIS sidecars |
+| `fit --dataset NNN …` | train the refiner by direct instantiation (single-GPU or DDP) |
+| `chain …` | run all of the above in order — resumable with `--from` / `--until` / `--skip` |
+
+Needs the `train` extra and the nnU-Net env roots. Full details, flags, and the design (why there is
+no copy-paste) are in **[training.md](training.md)**. Stage 3 (infer) lands as it is ported.
 
 ## Library — the data layer
 
@@ -126,7 +143,7 @@ reads, an on-disk cache, prefetch, material tiling), configured via `HERCUNET_*`
 |---|---|---|
 | **[data-layer.md](data-layer.md)** | The streaming data layer — backends, `ZarrSegment`, chunk-aligned parallel reads, the on-disk cache, prefetch (`iter_windows` / `VolumePrefetcher`), material tiling, configuration, performance notes. | ✅ available |
 | **[herculabels.md](herculabels.md)** | **Stage 1 usage** — the `create` / `edit` / `merge` / `export` CLI over `.herculabels` corpora, the interactive grinding viewer, and the corpus + export outputs (incl. the `meta.json` manifest). | ✅ available |
-| _refine.md_ | Stage 2 — the iterative HercUNet refiner (8-ch affinity/MALIS trainer, N-pass wrapper). | 🚧 planned |
+| **[training.md](training.md)** | **Stage 2 training** — the `hercunet train` chain (export → build → preprocess → export-owner → fit) over pinned `nnunetv2==2.8.1`, direct-instantiation launch (no copy-paste), DDP, and the design. | ✅ available |
 | _infer.md_ | Stage 3 — single-instance full-volume inference (tile+halo, OME-Zarr out). | 🚧 planned |
 
 The **methodology** for stage 1 (how the labels are derived — meshlets, slab, contrastive embedding,
@@ -139,4 +156,5 @@ provenance in [`../submission/writeup/corpus.md`](../submission/writeup/corpus.m
 1. **This page** — install, GPU/CUDA, and the CLI.
 2. **[data-layer.md](data-layer.md)** — everything reads voxels through it.
 3. **[herculabels.md](herculabels.md)** — running stage 1 and the viewer.
-4. _refine.md_, _infer.md_ — added as each stage lands.
+4. **[training.md](training.md)** — stage 2, training the refiner (`hercunet train`).
+5. _infer.md_ — added as stage 3 lands.
