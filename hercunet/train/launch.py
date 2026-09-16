@@ -83,6 +83,10 @@ def _train_one(trainer_cls, dataset, configuration, fold, plans_identifier, devi
                pretrained, continue_training, epochs=None):
     import torch
 
+    # The run301 recipe trains with torch.compile OFF (every research chain exported nnUNet_compile=0). This
+    # keeps state-dict keys plain (base.* with no _orig_mod. prefix) so the m7 warm-start and --continue resume
+    # both match — and matches the published run301 checkpoint's key format. Set before initialize() reads it.
+    os.environ.setdefault("nnUNet_compile", "0")
     trainer = build_trainer(trainer_cls, dataset, configuration, fold, plans_identifier, device,
                             continue_training)
     if epochs:                                          # training-length override (e.g. --epochs 1 for a smoke)

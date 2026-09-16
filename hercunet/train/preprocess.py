@@ -54,6 +54,14 @@ def patch_plans_prev_channels(plans_path: str, n_total: int, prev_norm: str = "N
         um = cfg.get("use_mask_for_norm")
         if um is not None and len(um) == 1:
             cfg["use_mask_for_norm"] = [bool(um[0])] + [False] * (n_total - 1)
+    # move_plans copies the SOURCE plans' per-channel intensity props (m7 = channel '0' only). nnU-Net's
+    # _normalize indexes foreground_intensity_properties_per_channel[str(c)] for EVERY channel — even the
+    # NoNormalization ones (which ignore the value) — so the keys must exist or preprocess raises KeyError.
+    # Copy channel '0''s props into the missing candidate slots (values are ignored by NoNormalization).
+    fip = plans.get("foreground_intensity_properties_per_channel")
+    if isinstance(fip, dict) and "0" in fip:
+        for k in range(1, n_total):
+            fip.setdefault(str(k), fip["0"])
     with open(plans_path, "w") as f:
         json.dump(plans, f, indent=4)
 
@@ -91,8 +99,9 @@ def preprocess_dataset(dataset_id: int, *, configuration: str = "3d_fullres",
     shutil.copyfile(os.path.join(raw_dir, "dataset.json"), os.path.join(pre_dir, "dataset.json"))
 
     print(f"[preprocess] {name}: preprocess {configuration}")
+    # nnU-Net expects num_processes as a list (one per configuration); a bare int trips list(int) internally.
     preprocess([dataset_id], plans_identifier=plans_id, configurations=(configuration,),
-               num_processes=num_processes)
+               num_processes=[num_processes])
     print(f"[preprocess] {name}: done")
 
 

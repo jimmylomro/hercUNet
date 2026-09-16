@@ -216,7 +216,9 @@ class nnUNetTrainer_AffinityMalis_IterDagger_500epochs(
 
         Matching is by parameter: try a direct key match, then the ``base.``-stripped m7 mapping; load on exact
         shape, stem-expand a ``[out,1,k,k,k]``→``[out,C,k,k,k]`` conv, else keep the fresh init. Reports the tally
-        so a wrong/garbage checkpoint (mostly "fresh") is obvious in the log."""
+        so a wrong/garbage checkpoint (mostly "fresh") is obvious in the log. Training runs with
+        ``nnUNet_compile=0`` (set by the launcher, as the run301 recipe did), so state-dict keys are plain
+        ``base.*`` with no ``torch.compile`` ``_orig_mod.`` prefix — and match the published run301 checkpoint."""
         sd = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         pre = sd.get("network_weights", sd)
         net = self.network.module if self.is_ddp else self.network
