@@ -30,11 +30,11 @@ Per-window content is **deterministic from `(run_id, scroll, coordinates)`** —
 > include `--old-negatives`.** The current `create` defaults to the newer slab-field negatives (§5.3);
 > without `--old-negatives` you get an *equivalent* corpus under the current method, **not** this one.
 
-**Regenerate these exact windows.** The full window set is provided as a coordinate file, [`corpus_windows.txt`](corpus_windows.txt) (one `SCROLL,Z,Y,X` per line — the same list tabulated below), which `create` consumes directly:
+**Regenerate these exact windows.** The full window set is provided as a coordinate file, [`corpus_windows.txt`](../corpus/corpus_windows.txt) (one `SCROLL,Z,Y,X` per line — the same list tabulated below), which `create` consumes directly:
 
 ```bash
 # regenerate exactly these 4031 windows (note --old-negatives), then derive the training bundles:
-hercunet labels create scroll_corpus.herculabels --old-negatives --coords-file corpus_windows.txt
+hercunet labels create scroll_corpus.herculabels --old-negatives --coords-file submission/corpus/corpus_windows.txt
 hercunet labels export  scroll_corpus.herculabels ./train_out
 ```
 
@@ -45,6 +45,26 @@ hercunet labels create scroll_corpus.herculabels --old-negatives --count 4031 --
 ```
 
 Because the original run spanned several code revisions, output is equivalent by construction — same method, same parameters — rather than byte-identical to any single commit.
+
+## m7 rehearsal corpus (mined)
+
+The stage-2 refiner trains on the ∇φ corpus above **plus** a smaller *rehearsal* corpus mined from the **published m7 surface detector**, to shore up detection in the **compressed** regions where our mesh pipeline is weakest (see [`hercunet.md`](hercunet.md) — the m7 blend). This is not m7 inference: it reads m7's already-published predictions from the open-data bucket and keeps only its coherent crest.
+
+**Recipe (one construction).** For each mined 192³ window, `surf = m7 & (m7_normal_coherence > 0.88)` → label `{1 surface where coherent m7, 2 ignore where incoherent m7, 0 background where ~m7}`. Coherence is m7's own normal-coherence (structure tensor on the smoothed m7 binary). MALIS is **off** on m7 (no per-sheet membership), so these cases carry no owner sidecar and train *cold* compressed-region detection. It is exactly the recipe used to clean the ∇φ corpus, so mined and cleaned m7 labels are identical.
+
+**Scouted set — 100 windows across 20 scrolls.** The scout scans each scroll's L5 for the real-papyrus compressed band (material fraction in [0.75, 0.95] of voxels > 95), takes the top windows per scroll by material, applies the coherence judge (keep if ≥ 40 % of m7 is coherent), and keeps the 100 highest-coherence windows overall. The judge is **fully deterministic — no seeds** (a pure function of the public S3 zarrs + the fixed constants + the coherence field), so the scout reproduces its manifest exactly.
+
+**Reproduce.** The full per-region record — m7/CT zarr paths, origin, tau, coherence score — is [`m7_scout_himat_manifest.json`](../corpus/m7_scout_himat_manifest.json) (a human window index is [`m7_windows.txt`](../corpus/m7_windows.txt)):
+
+```bash
+# byte-exact rebuild of the approved windows (reads the published m7 + CT from open-data S3):
+hercunet labels m7-mine ./m7_corpus --manifest submission/corpus/m7_scout_himat_manifest.json --max-candidates 4
+
+# …or re-scout from scratch (same recipe; --images also writes the 3-panel QC renders):
+hercunet labels m7-mine ./m7_corpus --scroll all --images --max-candidates 4
+```
+
+The training chain then folds the m7 corpus in alongside our cases with `hercunet train export-labels --m7-corpus ./m7_corpus …` (a copy, no symlinks; `--max-candidates` K must match). The m7 cases use the `m7` case prefix, so a run can keep them train-only and the trainer's per-source logging (`our` / `m7`) splits them.
 
 ## Windows by scroll (4031 total)
 

@@ -41,8 +41,21 @@ accel = ["obstore>=0.11"]     # native (non-boto) Rust object_store reader — b
 # the interactive Qt viewer (hercunet/viz) — NOT a core dep; label generation + the CLI image
 # montage never import it. Install with `pip install -e ".[viz]"` (or `.[full]`).
 viz = ["PySide6>=6.5", "pyqtgraph>=0.13", "PyOpenGL>=3.1"]
-full = ["PySide6>=6.5", "pyqtgraph>=0.13", "PyOpenGL>=3.1", "obstore>=0.11"]
 dev = ["pytest>=7.0"]
+# stage-2 refiner training (hercunet train). Heavy + pod-only; NOT pulled in by the viewer or
+# label side. nnU-Net is PINNED and UNMODIFIED (docs/stage2-port.md): trainers live in
+# hercunet, launched by direct instantiation — nothing is copied into the nnunetv2 package.
+train = [
+    "nnunetv2==2.8.1",
+    "huggingface_hub>=0.20",       # m7 checkpoint + plans source
+    "acvl-utils>=0.2",             # crop_and_pad_nd used by the iterative trainers
+    "connected-components-3d>=3.12",
+    "numba>=0.59",                 # JITs the constrained-MALIS union-find (numpy<=2.4; auto-fallback)
+    "blosc2>=2.5",                 # owner-id sidecar (<case>_owner.b2nd)
+    "pyyaml>=6",                   # loads the training recipe (hercunet/recipes/*.yml)
+]
+# everything: viewer + fast reader + training. Self-referential so it never drifts from the parts.
+full = ["hercunet[viz,accel,train]"]
 
 [project.urls]
 Repository = "https://github.com/jimmylomro/hercUNet"
@@ -52,6 +65,10 @@ hercunet = "hercunet.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["hercunet*"]
+
+[tool.setuptools.package-data]
+# ship the training recipe YAMLs (loaded by hercunet.training.recipe at run time)
+"hercunet.recipes" = ["*.yml"]
 
 [tool.pytest.ini_options]
 markers = ["network: hits the live Vesuvius S3 bucket (opt-in via HERCUNET_NET_TEST=1)"]

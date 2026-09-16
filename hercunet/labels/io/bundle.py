@@ -45,6 +45,15 @@ def downsample_conf(field, ds=4):
     return np.clip(np.rint(small * 255.0), 0, 255).astype(np.uint8)
 
 
+def upsample_conf(u8, shape, ds=4):
+    """Inverse of :func:`downsample_conf` — uint8 downsampled → float32 [Z,H,W] in [0,1] (trilinear zoom to
+    ``shape``). Used by ``hercunet train export-labels`` to re-inflate the stored confidence channels into the
+    per-voxel training weight."""
+    f = np.asarray(u8, np.float32) / 255.0
+    z = [shape[i] / f.shape[i] for i in range(3)]
+    return np.clip(ndi.zoom(f, z, order=1)[:shape[0], :shape[1], :shape[2]], 0.0, 1.0)
+
+
 def _pack_meshes(out, prefix, meshes):
     """Write ``meshes`` {c: {V,foot,nu,nv,width}} into ``out`` under ``prefix`` (e.g. "base"). Returns the
     per-mesh shape map {str(c): [nu, nv]} for the record meta."""
