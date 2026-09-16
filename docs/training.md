@@ -10,18 +10,40 @@ and runs over a **pinned, unmodified** nnU-Net.
 - **All library calls — no subprocess.** Every step calls nnU-Net functions in-process; nothing
   shells out to `nnUNetv2_*` commands.
 
-> ⚠️ **Pod-only + heavy.** Training needs a CUDA GPU, the preprocessed corpus, and the m7
-> checkpoint. Do it on a training box, not a laptop.
+> ⚠️ **Needs a CUDA GPU + is heavy.** Training runs on any machine with an NVIDIA GPU — a workstation or a
+> pod. The full model is large (patch 192 ResEncUNetL); a small GPU may not hold it, and epochs are
+> MALIS-CPU-bound (~minutes each), so a full run is a multi-hour/day job wherever you run it.
 
 ## Install
 
+Training needs an **NVIDIA GPU** — a local workstation or a pod, either works. Clone the repo and install the
+`train` extra:
+
 ```bash
-pip install -e ".[train]"      # adds nnunetv2==2.8.1 + huggingface_hub, acvl-utils, connected-components-3d, numba, blosc2
+pip install ".[train]"             # adds nnunetv2==2.8.1 + huggingface_hub, acvl-utils, cc3d, numba, blosc2, tifffile, pyyaml
 ```
 
 The `train` extra is **heavy and opt-in** — the data layer, the viewer, and stage-1 label
 generation never import it. Pin stays exact: the trainers reproduce nnU-Net's `train_step`
 internals, so the version matters (`2.8.1` is what the released models were trained on).
+
+> **Note — contributors:** add `-e` (`pip install -e ".[train]"`) for an *editable* install so your source
+> edits apply live. Plain users don't need it.
+
+> **Note — reuse an existing CUDA `torch`.** The `train` extra pulls a default `torch` wheel. If your machine
+> already has a working CUDA `torch` you want to keep — common on **GPU pods** or a curated local env — install
+> into a venv created with **`--system-site-packages`** so it inherits that torch instead of re-downloading a
+> possibly-mismatched build (this also sidesteps a PEP-668 "externally managed" system `pip`):
+> ```bash
+> python3 -m venv --system-site-packages .venv        # inherits the system CUDA torch
+> .venv/bin/pip install ".[train]"                    # installs nnunetv2 + the stack into the venv
+> ```
+> Then use `.venv/bin/hercunet …` (or activate the venv). Prefer this over `pipenv` when a good torch is already
+> installed, since `pipenv` would build a fresh env and re-fetch torch. `HF_HUB_DISABLE_PROGRESS_BARS=1` keeps HF
+> downloads out of your logs.
+
+> **Note — you set nothing for compile.** The launcher sets `nnUNet_compile=0` itself (the run301 recipe trains
+> compile-off, which also keeps checkpoint keys compatible with the published model for warm-start / resume).
 
 nnU-Net keeps its data under three roots — `nnUNet_raw`, `nnUNet_preprocessed`, `nnUNet_results`. You do
 **not** have to export them: every `hercunet train` step that touches them takes **`--nnunet-path <dir>`**, a
@@ -42,6 +64,48 @@ export nnUNet_raw=/path/nnUNet_raw
 export nnUNet_preprocessed=/path/nnUNet_preprocessed
 export nnUNet_results=/path/nnUNet_results
 ```
+
+## Getting the training data
+
+You need two corpora: **our ∇φ pseudo-label samples** (`.npz`) and the **m7 rehearsal corpus**. There are two
+ways to obtain them — download exactly what we trained on, or build your own from scratch.
+
+### Option A — download our published corpus (fastest, reproduces HercUNet v0)
+
+Everything is public on Hugging Face — **no token needed**:
+
+```bash
+hf download jimmylomro/hercunet-corpus --repo-type dataset --local-dir /workspace/corpus
+# /workspace/corpus/                    → 4031 sample_*.npz  (our stage-1 corpus)
+# /workspace/corpus/m7_corpus/          → the mined m7 rehearsal cases (nnU-Net tif)
+# /workspace/corpus/corpus_index/       → the window lists + m7 manifest
+```
+
+Then feed both into `export-labels` (Option A skips the two "build" commands below and goes straight to the
+chain):
+
+```
+--corpus /workspace/corpus   --m7-corpus /workspace/corpus/m7_corpus
+```
+
+### Option B — build the corpora yourself
+
+1. **Our ∇φ samples.** Generate (or download the window list) and export to sample bundles — see
+   [herculabels.md](herculabels.md):
+   ```bash
+   hercunet labels create scroll_corpus.herculabels --old-negatives --coords-file submission/corpus/corpus_windows.txt
+   hercunet labels export  scroll_corpus.herculabels /workspace/corpus      # → sample_*.npz
+   ```
+2. **The m7 rehearsal corpus.** Mine it from the *published* m7 predictions (reads open-data S3, no token):
+   ```bash
+   # deterministic rebuild from the shipped manifest (identical to ours; add --images for QC renders):
+   hercunet labels m7-mine /workspace/corpus/m7_corpus \
+       --manifest submission/corpus/m7_scout_himat_manifest.json --max-candidates 4
+   # …or scout fresh: hercunet labels m7-mine /workspace/corpus/m7_corpus --scroll all --images
+   ```
+
+Either way you end up with `/workspace/corpus` (`.npz`) + `/workspace/corpus/m7_corpus`, ready for the chain.
+`--max-candidates` (K) must be the same across `labels m7-mine`, `export-labels`, and `preprocess`.
 
 ## The chain
 
@@ -76,23 +140,27 @@ decode + emit).
 ### Run the whole thing
 
 ```bash
-# 0) once, in the labels stage: pre-extract the m7 rehearsal corpus
-hercunet labels m7-mine /path/m7_corpus --scroll s1,s5 --max-candidates 4
+# 0) get the data (Option A above): the corpus + m7_corpus, from Hugging Face, no token
+hf download jimmylomro/hercunet-corpus --repo-type dataset --local-dir /workspace/corpus
 
-# 1) the training chain (copies the m7 corpus in during export-labels).
+# 1) train from zero — the whole chain, m7 warm-start pulled from HF.
 #    --nnunet-path sets the three nnU-Net roots; --out is <that dir>/nnUNet_raw/DatasetNNN_…
 hercunet train chain \
   --nnunet-path /workspace/nnunet \
-  --corpus    /path/corpus \
-  --m7-corpus /path/m7_corpus \
+  --corpus    /workspace/corpus \
+  --m7-corpus /workspace/corpus/m7_corpus \
   --out       /workspace/nnunet/nnUNet_raw/Dataset301_AffMalisFull \
   --dataset 301 --max-candidates 4 \
   --pretrained-hf --num-gpus 4        # pulls the m7 warm-start from HuggingFace (or --pretrained <local .pth>)
+
+# 2) resume a run (same flags you trained with + --continue; picks the checkpoint from the run folder):
+hercunet train fit --dataset 301 --continue --nnunet-path /workspace/nnunet --num-gpus 4
 ```
 
 `export-labels` writes our cases and copies the m7 corpus's cases into the **same** `--out` dataset;
 `--max-candidates` (K, the prev/candidate channels) must be identical across `labels m7-mine`,
-`export-labels`, and `preprocess`.
+`export-labels`, and `preprocess`. The full from-zero chain and resume are both verified end-to-end on an
+L40S (warm-start loads m7 → `952 matched, 4 stem-expanded`; each epoch is MALIS-CPU-bound at ~7 min).
 
 `chain` calls each step's function in order — it is a thin orchestrator, not a copy of the step
 logic. It is **resumable**:

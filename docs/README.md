@@ -30,9 +30,27 @@ pipenv install                 # core: streaming data layer + stage-1 label gene
 pipenv install -e ".[viz]"     # + the interactive label viewer / editor (PySide6, pyqtgraph, PyOpenGL)
 ```
 
-`pipenv install` installs the package editable with its full runtime. The viewer is an **opt-in extra**
-(`[viz]`) — core label generation and the CLI never import it. Plain pip works too (`pip install -e .`,
-`pip install -e ".[viz]"`).
+`pipenv install` installs the package (editable, via the `Pipfile`) with its full runtime. The viewer is an
+**opt-in extra** (`[viz]`) — core label generation and the CLI never import it. Plain pip works too:
+`pip install .` (or `pip install ".[viz]"`); add `-e` only if you're editing the code.
+
+**Stage-2 training** (`hercunet train …`) needs an **NVIDIA GPU** — a local workstation or a pod. Clone the repo
+and install the `train` extra:
+
+```bash
+pip install ".[train]"             # contributors editing the code: add -e for an editable install
+```
+
+> **Note — reuse an existing CUDA `torch`.** The `train` extra pulls a default `torch` wheel. If your machine
+> already has a working CUDA `torch` you want to keep (common on GPU pods, or a curated local env), install into
+> a venv created with `--system-site-packages` so it is inherited rather than re-downloaded — this also
+> sidesteps a PEP-668 "externally managed" system `pip`:
+> ```bash
+> python3 -m venv --system-site-packages .venv && .venv/bin/pip install ".[train]"
+> ```
+
+See **[training.md](training.md)** for the full walk-through — install notes, getting the data (download vs
+build), and the train/resume commands.
 
 ### Extras
 
@@ -41,7 +59,7 @@ pipenv install -e ".[viz]"     # + the interactive label viewer / editor (PySide
 | _(none)_ | data layer + stage-1 label gen | the default — everything runs |
 | `viz` | PySide6, pyqtgraph, PyOpenGL | the interactive viewer (`create --interactive`, `edit`) |
 | `accel` | obstore | a faster native (non-boto) S3 reader |
-| `train` | nnunetv2==2.8.1 + huggingface_hub, acvl-utils, connected-components-3d, numba, blosc2 | stage-2 refiner training (`hercunet train …`) — pod-only |
+| `train` | nnunetv2==2.8.1 + huggingface_hub, acvl-utils, cc3d, numba, blosc2, tifffile, pyyaml | stage-2 refiner training (`hercunet train …`) — needs a CUDA GPU |
 | `full` | viz + accel + train | everything |
 | `dev` | pytest | the test suite |
 

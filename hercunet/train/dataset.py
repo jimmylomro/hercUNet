@@ -187,8 +187,6 @@ def _copy_m7_corpus(m7_corpus, out, K):
 
 
 # ============================================================================ export-owner (✅) ==
-# Preferred preprocessed config subdir (m7's ResEncUNetL plans, 3d_fullres). Auto-detected if absent.
-_PP_CONFIG = "nnUNetResEncUNetLPlans_3d_fullres"
 
 
 def export_owner(*, dataset, out=None):
@@ -370,16 +368,15 @@ def _dataset_dir(root, name):
 
 
 def _resolve_pp_config(pp_root):
-    """The preprocessed data config subdir (holds ``*.pkl`` + ``*_seg.b2nd``). Prefer the ResEncUNetL fullres;
-    else the single config subdir that actually has cases."""
-    preferred = os.path.join(pp_root, _PP_CONFIG)
-    if glob.glob(os.path.join(preferred, "*.pkl")):
-        return preferred
+    """The preprocessed data-config subdir under ``pp_root`` (the one holding ``*.pkl`` + ``*_seg.b2nd``).
+    Detected, not guessed: nnU-Net names it by the config's ``data_identifier`` (e.g. ``nnUNetPlans_3d_fullres``
+    when m7's plans are transplanted), which is NOT the plans id — so we find the single subdir that actually
+    has cases (``gt_segmentations`` has none). Exactly one config is preprocessed, so this is unambiguous."""
     hits = [d for d in sorted(glob.glob(os.path.join(pp_root, "*"))) if glob.glob(os.path.join(d, "*.pkl"))]
     if not hits:
         raise SystemExit(f"hercunet train export-owner: no preprocessed config with cases under {pp_root} "
                          f"(run preprocess first).")
     if len(hits) > 1:
-        raise SystemExit(f"hercunet train export-owner: multiple preprocessed configs under {pp_root} "
-                         f"({', '.join(os.path.basename(h) for h in hits)}); expected {_PP_CONFIG}.")
+        raise SystemExit(f"hercunet train export-owner: multiple preprocessed configs with cases under "
+                         f"{pp_root} ({', '.join(os.path.basename(h) for h in hits)}) — expected exactly one.")
     return hits[0]
