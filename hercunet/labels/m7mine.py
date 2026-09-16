@@ -73,7 +73,7 @@ def mine(*, out, scroll=None, manifest=None, max_candidates=4, tau=None, workers
     K = int(max_candidates)
     tau = COH_TAU if tau is None else float(tau)
     if manifest:
-        return _export_from_manifest(manifest, out, K, tau=tau, workers=workers)
+        return _export_from_manifest(manifest, out, K, tau=tau, workers=workers, images=images)
     if scroll:
         return _scout(out, _select_scrolls(scroll), K=K, tau=tau, workers=workers, images=images)
     raise SystemExit("hercunet labels m7-mine: provide --scroll (fresh scout) or --manifest (rebuild).")
@@ -143,11 +143,12 @@ def _https(path):
 
 
 # ---------------------------------------------------------------------------- rebuild (manifest) --
-def _export_from_manifest(manifest_path, out_dir, K, *, tau=COH_TAU, prefix="m7", workers=8):
+def _export_from_manifest(manifest_path, out_dir, K, *, tau=COH_TAU, prefix="m7", workers=8, images=False):
     """Rebuild the approved labels from a scout manifest → m7 cases in ``out_dir``. Reads each m7 + CT window
     through the data layer (``ZarrSegment.read_window``) on a THREAD POOL so anon-S3 latency of many windows
-    OVERLAPS (sequential reads on the throttled open-data bucket are ~1 region/40s — unworkable). Returns the
-    number of cases written."""
+    OVERLAPS (sequential reads on the throttled open-data bucket are ~1 region/40s — unworkable). ``images=True``
+    also writes a 3-panel QC render per case (into ``renders/``) from the in-memory window — no extra read.
+    Returns the number of cases written."""
     from concurrent.futures import ThreadPoolExecutor
     import threading
 
@@ -184,9 +185,15 @@ def _export_from_manifest(manifest_path, out_dir, K, *, tau=COH_TAU, prefix="m7"
                 cnt["skip"] += 1
             print(f"[m7-mine] SKIP {cid}: m7 empty ({int(m.sum())})", flush=True)
             return
-        lab, _coh, surf = label_from_window(m, t)
+        lab, coh, surf = label_from_window(m, t)
         ct_u8 = (np.clip(_norm_ct(ct), 0.0, 1.0) * 255.0).round().astype(np.uint8)
         _write_case(out_dir, cid, ct_u8, lab.astype(np.uint8), K)
+        if images:                                             # QC render from the in-memory window (no re-read)
+            zc = cube // 2
+            rr = {**r, "coh_score": float(surf.sum() / max(m.sum(), 1)),
+                  "center_l0": r.get("center_l0", [z0 + zc, y0 + zc, x0 + zc]),
+                  "material": float(r.get("material", 0.0))}
+            _render(os.path.join(out_dir, "renders"), cid, rr, ct_u8[zc], m[zc], surf[zc], coh[zc])
         with lock:
             cnt["done"] += 1
             if cnt["done"] == 1 or cnt["done"] % 10 == 0:
@@ -208,12 +215,13 @@ def _openz(fs, p):
     return zarr.open(s3fs.S3Map(p, s3=fs), mode="r")
 
 
-def _render(out_dir, idx, r, ctS, m2d, surf2d, coh2d):
-    """3-panel QC render (raw m7 red | m7-normal-coherence | grabbed-coherent green), identical to mine_prod5.
-    Returns the JPEG filename (also stored in the manifest's ``image`` field)."""
+def _render(out_dir, name, r, ctS, m2d, surf2d, coh2d):
+    """3-panel QC render (raw m7 red | m7-normal-coherence | grabbed-coherent green), the mine_prod5 QC.
+    Writes ``{out_dir}/{name}.jpg`` and returns that basename."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    os.makedirs(out_dir, exist_ok=True)
     g = np.clip(ctS / 255.0, 0, 1)
     raw = np.stack([g, g, g], -1)
     raw[m2d] = 0.55 * np.array([1, .15, .15]) + .45 * raw[m2d]
@@ -227,10 +235,10 @@ def _render(out_dir, idx, r, ctS, m2d, surf2d, coh2d):
     ax[2].set_title(f"grabbed coherent ({r['coh_score'] * 100:.0f}% of m7); rest ignore", fontsize=9)
     ax[2].axis("off")
     c = r["center_l0"]
-    fig.suptitle(f"#{idx:03d} {r['scroll']}  L0 z{c[0]} y{c[1]} x{c[2]}  papyrus {r['material']:.2f}  "
+    fig.suptitle(f"{name}  {r['scroll']}  L0 z{c[0]} y{c[1]} x{c[2]}  papyrus {r['material']:.2f}  "
                  f"coh {r['coh_score']:.2f}", fontsize=10)
     fig.tight_layout()
-    fn = f"region_{idx:03d}_{r['scroll']}.jpg"
+    fn = f"{name}.jpg"
     fig.savefig(os.path.join(out_dir, fn), dpi=140, bbox_inches="tight", pil_kwargs={"quality": 88})
     plt.close(fig)
     return fn
@@ -307,7 +315,8 @@ def _scout(out_dir, scrolls, *, K=4, tau=COH_TAU, workers=8, images=False, targe
     for i, r in enumerate(sel):                                # render (optional) + drop the transient slices
         rr = r.pop("_r", None)
         if images and rr is not None:
-            r["image"] = _render(out_dir, i, r, *rr)
+            fn = _render(os.path.join(out_dir, "renders"), f"region_{i:03d}_{r['scroll']}", r, *rr)
+            r["image"] = f"renders/{fn}"
     with open(os.path.join(out_dir, "manifest.json"), "w") as f:
         json.dump(sel, f, indent=1)
     print(f"[m7-mine] wrote manifest.json ({len(sel)} regions{', +renders' if images else ''}) -> {out_dir}",

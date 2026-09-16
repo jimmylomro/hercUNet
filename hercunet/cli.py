@@ -223,6 +223,9 @@ def _add_labels_m7mine(sub: argparse._SubParsersAction) -> None:
 # `hercunet train <step>` — the refiner chain as separate, resumable steps over a pinned,
 # unmodified nnunetv2==2.8.1 (no fork, no clone, no trainer copy-paste). See docs/training.md.
 
+_M7_HF_REPO = "scrollprize/surface_m7_nnunet"   # the published m7 model (matches train.preprocess.M7_REPO)
+
+
 def _add_nnunet_path(p: argparse.ArgumentParser) -> None:
     """Shared ``--nnunet-path`` flag: a dir holding nnUNet_raw/ nnUNet_preprocessed/ nnUNet_results/, applied
     in-process so no env export is needed (env vars remain the fallback for split layouts)."""
@@ -309,9 +312,10 @@ def _add_train_export_owner(sub: argparse._SubParsersAction) -> None:
 def _train_fit(args: argparse.Namespace) -> None:
     from .train.paths import set_nnunet_roots
     set_nnunet_roots(args.nnunet_path, needs=("nnUNet_preprocessed", "nnUNet_results"))
-    from .train.launch import fit
+    from .train.launch import fit, resolve_pretrained
+    pretrained = resolve_pretrained(args.pretrained, args.pretrained_hf, args.pretrained_hf_file)
     fit(args.trainer, args.dataset, configuration=args.config, fold=args.fold,
-        plans_identifier=args.plans_id, pretrained=args.pretrained, num_gpus=args.num_gpus,
+        plans_identifier=args.plans_id, pretrained=pretrained, num_gpus=args.num_gpus,
         device=args.device, continue_training=args.continue_,
         recipe_path=args.recipe, epochs=args.epochs)
 
@@ -326,7 +330,13 @@ def _add_train_fit(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--config", default="3d_fullres", help="nnU-Net configuration (default 3d_fullres)")
     p.add_argument("--fold", default=0, help="cross-val fold (int or 'all'; default 0)")
     p.add_argument("--plans-id", default="nnUNetResEncUNetLPlans", help="plans identifier")
-    p.add_argument("--pretrained", default=None, metavar="CKPT", help="warm-start weights (m7 checkpoint_best.pth)")
+    p.add_argument("--pretrained", default=None, metavar="CKPT", help="warm-start from a local .pth (e.g. the m7 checkpoint)")
+    p.add_argument("--pretrained-hf", "--pretrained-huggingface", dest="pretrained_hf", nargs="?",
+                   const=_M7_HF_REPO, default=None, metavar="REPO",
+                   help=f"warm-start from a HuggingFace repo (downloads the checkpoint); bare flag pulls the m7 "
+                        f"model ({_M7_HF_REPO})")
+    p.add_argument("--pretrained-hf-file", default=None, metavar="NAME",
+                   help="checkpoint filename within the HF repo (default: auto-resolve checkpoint_best/final.pth)")
     p.add_argument("--num-gpus", type=int, default=1, help="DDP world size (>1 spawns workers)")
     p.add_argument("--device", default="cuda", help="cuda | cpu (default cuda)")
     p.add_argument("--continue", dest="continue_", action="store_true",
@@ -363,7 +373,7 @@ def _need(args: argparse.Namespace, *names: str) -> None:
 def _train_chain(args: argparse.Namespace) -> None:
     from .train import dataset as ds
     from .train.preprocess import preprocess_dataset
-    from .train.launch import fit as _fit
+    from .train.launch import fit as _fit, resolve_pretrained
 
     steps = _selected_steps(args)
     # set the nnU-Net roots (--nnunet-path or env) for exactly the steps that touch them, before any nnU-Net call
@@ -394,8 +404,9 @@ def _train_chain(args: argparse.Namespace) -> None:
             ds.export_owner(dataset=int(args.dataset), out=None)
         elif step == "fit":
             _need(args, "dataset", "trainer")
+            pretrained = resolve_pretrained(args.pretrained, args.pretrained_hf, args.pretrained_hf_file)
             _fit(args.trainer, args.dataset, configuration=args.config, fold=args.fold,
-                 plans_identifier=args.plans_id, pretrained=args.pretrained,
+                 plans_identifier=args.plans_id, pretrained=pretrained,
                  num_gpus=args.num_gpus, device=args.device,
                  recipe_path=args.recipe, epochs=args.epochs)
     print("[chain] done", flush=True)
@@ -425,7 +436,11 @@ def _add_train_chain(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--plans-id", default="nnUNetResEncUNetLPlans", help="plans identifier")
     p.add_argument("--np", type=int, default=8, help="preprocess worker processes")
     p.add_argument("--trainer", default="hercunet", help="fit: alias 'hercunet' or module:ClassName")
-    p.add_argument("--pretrained", default=None, metavar="CKPT", help="fit: warm-start weights (m7 checkpoint_best.pth)")
+    p.add_argument("--pretrained", default=None, metavar="CKPT", help="fit: warm-start from a local .pth")
+    p.add_argument("--pretrained-hf", "--pretrained-huggingface", dest="pretrained_hf", nargs="?",
+                   const=_M7_HF_REPO, default=None, metavar="REPO",
+                   help=f"fit: warm-start from a HuggingFace repo (bare flag = the m7 model, {_M7_HF_REPO})")
+    p.add_argument("--pretrained-hf-file", default=None, metavar="NAME", help="fit: checkpoint filename in the HF repo")
     p.add_argument("--fold", default=0, help="fit: cross-val fold")
     p.add_argument("--num-gpus", type=int, default=1, help="fit: DDP world size")
     p.add_argument("--device", default="cuda", help="fit: cuda | cpu")

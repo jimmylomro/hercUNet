@@ -87,7 +87,7 @@ hercunet train chain \
   --m7-corpus /path/m7_corpus \
   --out       /workspace/nnunet/nnUNet_raw/Dataset301_AffMalisFull \
   --dataset 301 --max-candidates 4 \
-  --pretrained /path/m7/checkpoint_best.pth --num-gpus 4
+  --pretrained-hf --num-gpus 4        # pulls the m7 warm-start from HuggingFace (or --pretrained <local .pth>)
 ```
 
 `export-labels` writes our cases and copies the m7 corpus's cases into the **same** `--out` dataset;
@@ -129,7 +129,7 @@ patch), `--config` (default `3d_fullres`), `--plans-id`, `--np`, `--no-setup-pla
 ### `fit` — train the refiner
 
 ```bash
-hercunet train fit --dataset 301 --pretrained /path/m7/checkpoint_best.pth --num-gpus 4
+hercunet train fit --dataset 301 --pretrained-hf --num-gpus 4    # m7 warm-start from HuggingFace
 ```
 
 `fit` **imports the trainer class and calls `trainer.run_training()`** — it never uses nnU-Net's
@@ -138,12 +138,19 @@ hercunet train fit --dataset 301 --pretrained /path/m7/checkpoint_best.pth --num
 - `--trainer` — defaults to the alias `hercunet` (the AffinityMalis iterative-DAgger refiner); or
   an explicit `module:ClassName` (e.g. `hercunet.training.trainers.affinity_malis_iter_dagger:nnUNetTrainer_AffinityMalis_IterDagger_500epochs`).
 - `--dataset` (id or `DatasetNNN_…`), `--config`, `--fold`, `--plans-id`.
-- `--pretrained CKPT` — **warm-start** from a checkpoint. This is the single warm-start path (no env
+- `--pretrained CKPT` — **warm-start** from a **local** checkpoint. This is the single warm-start path (no env
   var): the trainer's `load_pretrained` inspects the checkpoint and does the right thing per parameter —
   an **m7-like** checkpoint (single-channel input stem) has its stem **expanded 1→8 channels** (channel 0 =
   m7's CT weights, the `prev` + orientation channels zero-init, so the first forward matches m7) and the
   affinity head initialises fresh; a **HercUNet-shaped** checkpoint loads directly. The log line reports
   `matched / stem-expanded / fresh` so a wrong checkpoint is obvious.
+- `--pretrained-hf [REPO]` (alias `--pretrained-huggingface`) — **warm-start by pulling the checkpoint from
+  HuggingFace** instead of a local path, so you don't have to download it yourself. The bare flag pulls the m7
+  model (`scrollprize/surface_m7_nnunet` — the same repo `preprocess` fetches plans from, so it's usually
+  already in the HF cache); pass a repo id to use another. The filename is auto-resolved
+  (`checkpoint_best.pth` → `checkpoint_final.pth` → any `.pth`); override with `--pretrained-hf-file NAME`.
+  The downloaded checkpoint feeds the same `load_pretrained` stem-expansion above. Use `--pretrained` **or**
+  `--pretrained-hf`, not both.
 - `--num-gpus` — `>1` runs DDP via `torch.multiprocessing.spawn` (nnU-Net's own mechanism; each
   worker re-imports the class and runs the same in-process path — no shell).
 - `--device` (`cuda`|`cpu`), `--continue` (**resume** from the last checkpoint — same-architecture load —
