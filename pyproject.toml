@@ -31,6 +31,7 @@ dependencies = [
     "Pillow>=9.0",            # fragment / ink-projection rasters
     "torch>=2.0",             # embedding training + GPU slab/frame compute (stage-1 label gen)
     "scipy>=1.9",             # KDTree / ndimage across the label pipeline
+    "tifffile>=2021.7",       # nnU-Net tif cases (labels m7-mine, train export-labels/export-owner)
     "scikit-learn>=1.1",      # HDBSCAN (probeom clustering)
     "hdbscan>=0.8.38",        # condensed-tree access for the probabilistic-EOM selection
     "matplotlib>=3.5",        # --visualise image montage

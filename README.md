@@ -2,6 +2,8 @@
 
 📄 **[Read the paper (v0) → `paper_v0.pdf`](submission/writeup/paper_v0.pdf)** — the full write-up of both stages (HercuLabels + HercUNet), frozen as the first submission version.
 
+🧠 **Model:** [`jimmylomro/hercunet-v0`](https://huggingface.co/jimmylomro/hercunet-v0) on 🤗 Hugging Face (warm-start / re-train with `hercunet train fit --pretrained-hf jimmylomro/hercunet-v0`) · 🗂️ **Training corpus:** [`jimmylomro/hercunet-corpus`](https://huggingface.co/datasets/jimmylomro/hercunet-corpus) — the 4031 stage-1 pseudo-label bundles + m7 rehearsal manifest we trained on.
+
 ![The iterative refiner across passes (magenta) versus the m7 baseline (blue), on a 2 mm cross-section of PHerc1447.](submission/images/banner-PHerc1447-m7-passes.jpg)
 
 **Cross-volume surface (sheet) detection for carbonised Herculaneum scrolls.**
