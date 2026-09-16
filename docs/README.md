@@ -18,8 +18,9 @@ generation and the viewer; the research **methodology** is under
   `Pipfile` pins **3.12** as the dev interpreter, so `pipenv install` wants a 3.12 Python; plain `pip install`
   works on any ≥ 3.9.
 - **[pipenv](https://pipenv.pypa.io)** — the repo ships a `Pipfile`; run everything through it (`pipenv run …`).
-- **An NVIDIA GPU + CUDA** for stage-1 label generation. The data layer, the CLI, and reading corpora work
-  CPU-only; label generation is GPU-only in practice — see [GPU / CUDA](#gpu--cuda).
+- **An NVIDIA GPU + CUDA** for the heavy compute — stage-1 label generation, stage-2 refiner **training**, and
+  inference. The data layer, the CLI, and reading/merging/exporting corpora work **CPU-only**; anything that
+  actually looks at voxels wants the GPU — see [GPU / CUDA](#gpu--cuda).
 
 ## Install
 
@@ -65,9 +66,10 @@ build), and the train/resume commands.
 
 ## GPU / CUDA
 
-Stage-1 label generation requires a **CUDA GPU** — it is refused on CPU by default (`--no-gpu` exists only
-for slow CPU testing). Everything else (the data layer, the CLI, reading/merging/exporting corpora) runs
-without a GPU.
+The compute-heavy stages need a **CUDA GPU**: stage-1 label generation (refused on CPU by default — `--no-gpu`
+exists only for slow CPU testing), stage-2 refiner **training**, and inference. Everything else — the data
+layer, the CLI, reading/merging/exporting corpora — runs without a GPU. The `torch` guidance below applies to
+all of them.
 
 `torch>=2.0` is left **unpinned** in `pyproject.toml` on purpose, so it works with whatever PyTorch / CUDA
 build you install — the CUDA version is chosen by *which wheel* you install, not by a version number:
