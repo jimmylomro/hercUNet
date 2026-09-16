@@ -451,6 +451,54 @@ def build_gradphi(meshes, shape, voxel_um, *, mode="slab", sigma_frac=0.65, widt
     return mag, lab3, nrm3, ovl
 
 
+def build_gradphi_edt(meshes, shape, voxel_um, *, sigma_vox=3.0, power=3.0, upsample=3,
+                      band_sigmas=3.0, min_mag=0.05, return_owner_full=False):
+    """FAST ∇φ decoder — **the training-label emitter** consumed by ``hercunet train export-labels``.
+
+    Same stored ``meshes`` as :func:`build_gradphi`, but ~10× faster (1–1.8 s vs 9–14 s), **CPU-only** (EDT +
+    numpy, NO KDTree, NO GPU → runs on dataloader workers without touching the training GPU), and cleaner:
+
+      • **Fixed σ** (``sigma_vox``, width-INDEPENDENT) → ``|∇φ|`` is a genuine phase gradient. The slab decoder
+        scaled σ with sheet width, so ``∫|∇φ|`` across a sheet grew with thickness (not a real dφ/dn) AND the
+        width-scaled ``reach`` dilated candidates to ~97% of the volume (the slowness). Here thickness lives on
+        its OWN channel (``width3``), not in ``|∇φ|``.
+      • **Non-crossing single owner** — a Euclidean distance transform assigns every voxel to its NEAREST medial
+        surface; the boundary between two sheets is the equidistant midplane. Guaranteed by construction (the
+        only failure mode is an incomplete surface rasterization → keep ``upsample`` dense enough to be hole-free).
+
+    Rasterize each sheet's dense medials → occupancy + owner (label/normal/half-width); ``distance_transform_edt``
+    gives, at every voxel, distance ``d`` to the nearest surface and that surface's coords (→ gather the owner).
+    ``|∇φ| = exp(-(d/σ)^power)`` inside ``d ≤ band_sigmas·σ``.
+
+    Returns ``(mag [Z,H,W] float32, lab3 [Z,H,W] int32 sheet-id/-1, nrm3 [3,Z,H,W] float16,
+    width3 [Z,H,W] float32 µm)``; with ``return_owner_full`` also the UNBOUNDED nearest-medial Voronoi id
+    ``owner_full [Z,H,W] int32`` (every voxel), used by the surface-label collapsed-sheet ignore. Intersection /
+    low-confidence is NOT recomputed here — it comes from the stored ``conf`` channels (σ-independent)."""
+    Z, H, W = shape
+    occ = np.zeros(shape, bool)
+    ownlab = np.full(shape, -1, np.int32)
+    ownnrm = np.zeros((3,) + shape, np.float32)
+    ownhw = np.zeros(shape, np.float32)
+    for c, m in meshes.items():
+        dm, dn, dhw, _ = _dense_medials(m, voxel_um, upsample)
+        vi = np.clip(np.round(dm).astype(int), 0, [Z - 1, H - 1, W - 1])
+        z, y, x = vi[:, 0], vi[:, 1], vi[:, 2]
+        occ[z, y, x] = True; ownlab[z, y, x] = int(c); ownhw[z, y, x] = dhw
+        dn = dn / (np.linalg.norm(dn, axis=1, keepdims=True) + 1e-9)
+        ownnrm[0, z, y, x] = dn[:, 0]; ownnrm[1, z, y, x] = dn[:, 1]; ownnrm[2, z, y, x] = dn[:, 2]
+    d, (iz, iy, ix) = ndi.distance_transform_edt(~occ, return_indices=True)
+    owner_full = ownlab[iz, iy, ix].astype(np.int32)                 # nearest medial for EVERY voxel (UNBOUNDED Voronoi)
+    on = (d <= band_sigmas * sigma_vox)
+    mag = np.where(on, np.exp(-(d / sigma_vox) ** power), 0.0).astype(np.float32)
+    on = on & (mag >= min_mag)
+    lab3 = np.where(on, owner_full, -1).astype(np.int32)             # band-limited owner (= owner_full inside the band)
+    width3 = np.where(on, ownhw[iz, iy, ix] * 2.0 * voxel_um, 0.0).astype(np.float32)
+    nrm3 = (ownnrm[:, iz, iy, ix] * on[None]).astype(np.float16)
+    if return_owner_full:
+        return mag, lab3, nrm3, width3, owner_full
+    return mag, lab3, nrm3, width3
+
+
 def intersection_confidence(overlap, lab3, *, smooth_px=6.0):
     """REGIONAL confidence from the sheet-INTERSECTION signal (mesh-derived): footprint-aware Gaussian-smooth the
     per-voxel ``overlap`` over the covered region and return ``conf = 1 − smoothed_overlap`` ∈ [0,1]. Low where
