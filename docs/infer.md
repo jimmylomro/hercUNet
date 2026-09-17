@@ -71,6 +71,28 @@ The published HercUNet v0 model is **public on Hugging Face** (no token):
 
 ---
 
+## Simplest run (local, nothing else needed)
+
+No local data, no S3, no config — pull the model from Hugging Face, stream a small PHerc1447 window straight from
+the open-data bucket, and write the result beside you:
+
+```bash
+# install (needs an NVIDIA GPU) — pick one:
+python -m venv .venv && . .venv/bin/activate && pip install ".[infer]"   # venv
+# or:  pipenv install ".[infer]"   → then prefix the command below with `pipenv run`
+
+hercunet infer single-instance \
+  --model-hf jimmylomro/hercunet-v0 \
+  --scroll PHerc1447 \
+  --region 10889:11401,2848:3360,3915:4427 \
+  --out ./infer-demo --passes 3
+```
+
+- **`--region`** is a ~5 mm cube (fast); drop it to run the whole scroll (see the storage warning above).
+- Writes **`./infer-demo_pass2.zarr`** — the last pass is the deliverable; open it in VC3D.
+- Uses **every visible GPU** automatically. Add **`--keep-buffers`** to keep all three passes and watch the
+  iteration improve pass-to-pass, or **`--s3-prefix s3://…`** to upload instead of keeping it local.
+
 ## The two commands
 
 Inference is split by *where it runs*, because that's the only thing that really differs. Both drive the **same

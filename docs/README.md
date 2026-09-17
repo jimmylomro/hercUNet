@@ -164,8 +164,18 @@ inference needs only the pinned `nnunetv2==2.8.1` (the `infer` extra), not the t
 | `multi-instance …` | many pods — run the same command per pod over a shared network volume, `--leader` on one |
 
 The model is public on Hugging Face: `--model-hf jimmylomro/hercunet-v0` (no token), or `--model <folder>` for a
-local run. Defaults reproduce HercUNet v0 (overlap 0.25, 4 passes, final pass = deliverable). Full walk-through,
-the smoke-test recipe, and all flags are in **[infer.md](infer.md)**.
+local run. Defaults reproduce HercUNet v0 (overlap 0.25, 4 passes, final pass = deliverable).
+
+**Simplest run** — nothing local, no S3 (pulls the model from HF, streams a ~5 mm PHerc1447 window, writes the
+result beside you):
+
+```bash
+hercunet infer single-instance --model-hf jimmylomro/hercunet-v0 --scroll PHerc1447 \
+  --region 10889:11401,2848:3360,3915:4427 --out ./infer-demo --passes 3
+# -> ./infer-demo_pass2.zarr  (open in VC3D). Uses every visible GPU; add --keep-buffers to compare passes.
+```
+
+Full walk-through, the smoke-test recipe, and all flags are in **[infer.md](infer.md)**.
 
 ## Library — the data layer
 
