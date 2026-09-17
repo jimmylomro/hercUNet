@@ -96,7 +96,7 @@ def _run(model_dir, gpus, multi, is_leader_node, jargs):
     try:
         for rank, gpu in enumerate(gpus):
             wargs = dict(jargs, model=model_dir, device="cuda", multi=True,
-                         leader=bool(is_leader_node and rank == 0))
+                         leader=bool(is_leader_node and rank == 0), rank=rank, gpu=gpu)
             argfile = os.path.join(tmp, f"worker_{rank}.json")
             with open(argfile, "w") as f:
                 json.dump(wargs, f)
