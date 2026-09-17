@@ -55,8 +55,20 @@ train = [
     "blosc2>=2.5",                 # owner-id sidecar (<case>_owner.b2nd)
     "pyyaml>=6",                   # loads the training recipe (hercunet/recipes/*.yml)
 ]
-# everything: viewer + fast reader + training. Self-referential so it never drifts from the parts.
-full = ["hercunet[viz,accel,train]"]
+# stage-3 full-volume inference (hercunet infer). Much lighter than [train]: the network is built stock from
+# plans.json and loaded from network_weights, so only nnU-Net (the pinned 2.8.1) + the HF model pull are needed —
+# no MALIS/owner/DAgger machinery. torch/zarr/scipy/numpy are already core deps. (s5cmd, a Go binary, is needed
+# only for --s3-prefix uploads; install it separately.)
+infer = [
+    "nnunetv2==2.8.1",             # get_network_from_plans + PlansManager (stock net build; no trainer import)
+    "huggingface_hub>=0.20",       # --model-hf snapshot download (public model, no token)
+    "s5cmd>=0.2",                  # S3 upload for --s3-prefix: bundles the s5cmd Go binary on PATH (platform wheels
+                                   # cover linux x86_64/aarch64/ppc64le+musl and macOS arm64 — no Go toolchain). Far
+                                   # faster than boto/s3fs for a zarr's 100k+ tiny objects (Go concurrency + cheap
+                                   # signing); only invoked when --s3-prefix is given.
+]
+# everything: viewer + fast reader + training + inference. Self-referential so it never drifts from the parts.
+full = ["hercunet[viz,accel,train,infer]"]
 
 [project.urls]
 Repository = "https://github.com/jimmylomro/hercUNet"

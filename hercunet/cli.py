@@ -450,6 +450,93 @@ def _add_train_chain(sub: argparse._SubParsersAction) -> None:
     p.set_defaults(func=_train_chain)
 
 
+# ------------------------------------------------------------------------------- infer (stage 3) --
+_MODEL_HF_REPO = "jimmylomro/hercunet-v0"
+
+
+def _add_infer_common(p: argparse.ArgumentParser) -> None:
+    # model source (exactly one of --model / --model-hf)
+    p.add_argument("--model", default=None, metavar="DIR",
+                   help="local nnU-Net model folder (plans.json + dataset.json + dataset_fingerprint.json + fold_0/)")
+    p.add_argument("--model-hf", "--model-huggingface", dest="model_hf", nargs="?",
+                   const=_MODEL_HF_REPO, default=None, metavar="REPO",
+                   help=f"download the model from a HuggingFace repo (public, no token); bare flag = HercUNet v0 "
+                        f"({_MODEL_HF_REPO})")
+    p.add_argument("--ckpt", default="checkpoint_best.pth", help="checkpoint filename within fold_0 (default best)")
+    # what to infer
+    p.add_argument("--scroll", required=True, help="scroll id / name (resolved against the data-layer catalog)")
+    p.add_argument("--out", required=True, metavar="PREFIX",
+                   help="output prefix — writes {PREFIX}_pass{p}.zarr (per-pass OME-Zarr surface-prob pyramids)")
+    p.add_argument("--region", default=None, metavar="z0:z1,y0:y1,x0:x1",
+                   help="restrict to a sub-cube — the WHOLE scroll is inferred if omitted; use for a small smoke test")
+    p.add_argument("--local-vol", default=None, dest="local_vol", metavar="PATH",
+                   help="read a locally-downloaded copy of the scroll's OME-Zarr (fast NVMe/tmpfs) instead of "
+                        "streaming from S3 — I/O-bound → GPU-bound; results are byte-identical. Only L0 is needed")
+    p.add_argument("--passes", type=int, default=4, help="Jacobi refinement passes (default 4; final pass = deliverable)")
+    p.add_argument("--overlap", type=float, default=0.25,
+                   help="window overlap for the Gaussian blend (default 0.25 = HercUNet v0); 0 = disjoint mode")
+    p.add_argument("--gpus", default="all", metavar="all|0,1,3",
+                   help="GPUs to use on THIS node (default all visible; one worker process per GPU)")
+    # model shape
+    p.add_argument("--plain", action="store_true",
+                   help="2-channel [CT, prev] model instead of the 8-channel affinity model (default: affinity)")
+    p.add_argument("--n-orient", type=int, default=6, dest="n_orient",
+                   help="orientation channels for the affinity model (default 6)")
+    # throughput / batching
+    p.add_argument("--batch", type=int, default=4, help="windows per forward batch (default 4)")
+    p.add_argument("--nb", type=int, default=4, help="windows per prefetch block/tile per axis (default 4)")
+    p.add_argument("--air", type=int, default=25, help="skip windows whose CT max < this (all-air; default 25)")
+    p.add_argument("--readahead", type=int, default=2, help="CT block-prefetch depth (blocks in flight; default 2)")
+    p.add_argument("--prefetch-workers", type=int, default=3, dest="prefetch_workers",
+                   help="CT block-prefetch threads (default 3)")
+    # output / resume
+    p.add_argument("--finalise", default="last", metavar="last|all|no|0,2,3",
+                   help="which passes get an OME-Zarr pyramid built (levels 1..N): 'last' (default, only the "
+                        "deliverable), 'all', 'no' (none — build later on a CPU box), or a pass-index list like "
+                        "'0,2,3' (negatives count from the end, so '-1' == last)")
+    p.add_argument("--s3-prefix", default=None, dest="s3_prefix", metavar="s3://…",
+                   help="upload finished passes to this S3 prefix with s5cmd (AWS creds in env). A write preflight "
+                        "runs before inference starts, so bad creds fail fast; uploads log throttled progress")
+    p.add_argument("--upload", default="last", metavar="last|all|no|0,2,3",
+                   help="which passes to upload to --s3-prefix (same grammar as --finalise): 'last' (default), "
+                        "'all', 'no', or a pass-index list like '0,2,3'. Ignored without --s3-prefix")
+    p.add_argument("--resume", action="store_true", help="skip passes already marked _complete")
+    p.add_argument("--keep-buffers", action="store_true", dest="keep_buffers",
+                   help="keep every pass buffer (default: prune to the last two)")
+    p.add_argument("--reclaim", action="store_true", help="re-queue blocks/tiles orphaned by a crashed worker")
+    p.add_argument("--claim-chunk", type=int, default=6, dest="claim_chunk",
+                   help="claim-queue chunk size per steal (default 6)")
+
+
+def _infer_single(args: argparse.Namespace) -> None:
+    from .infer.run import single_instance
+    single_instance(args)
+
+
+def _infer_multi(args: argparse.Namespace) -> None:
+    from .infer.run import multi_instance
+    multi_instance(args)
+
+
+def _add_infer_single(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("single-instance", help="run inference on ONE box, fanning across its local GPUs",
+                       description="Iterative Jacobi refinement on one machine. Uses all visible GPUs (one worker "
+                                   "process per GPU, --gpus to restrict); a single GPU runs in-process. One command.")
+    _add_infer_common(p)
+    p.set_defaults(func=_infer_single)
+
+
+def _add_infer_multi(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("multi-instance", help="run inference across MANY pods (shared network volume)",
+                       description="Iterative Jacobi refinement across pods. Run the SAME command on each pod with "
+                                   "--out on shared storage; pass --leader on exactly one pod. Each pod also fans "
+                                   "across its own local GPUs.")
+    _add_infer_common(p)
+    p.add_argument("--leader", action="store_true",
+                   help="THIS pod is the leader (creates each pass zarr, finalizes + uploads); pass on exactly one pod")
+    p.set_defaults(func=_infer_multi)
+
+
 # --------------------------------------------------------------------------------- dispatch --
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -473,6 +560,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_train_export_owner(train_cmds)
     _add_train_fit(train_cmds)
     _add_train_chain(train_cmds)
+
+    infer = groups.add_parser("infer", help="full-volume iterative inference (stage 3)")
+    infer_cmds = infer.add_subparsers(dest="command", metavar="<mode>", required=True)
+    _add_infer_single(infer_cmds)
+    _add_infer_multi(infer_cmds)
 
     return parser
 

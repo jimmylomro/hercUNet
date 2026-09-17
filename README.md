@@ -28,6 +28,28 @@ scroll volumes.
 The project is built as a three-stage pipeline over one shared data layer, **piece by piece**, each
 stage shipping with a visual tool that shows what it does.
 
+## ⚡ Try the refiner in one command
+
+No local data, no S3, no setup beyond the install — it pulls the model from Hugging Face, streams a small window
+of PHerc1447 straight from the open-data bucket, and writes the result beside you as an OME-Zarr you can open in
+VC3D:
+
+```bash
+# install (needs an NVIDIA GPU) — pick one:
+pipenv install ".[infer]" 
+# or: python -m venv .venv && . .venv/bin/activate && pip install ".[infer]"   # venv
+
+pipenv run hercunet infer single-instance \    # or drop `pipenv run` if you installed with venv
+  --model-hf jimmylomro/hercunet-v0 \
+  --scroll PHerc1447 \
+  --region 10889:11401,2848:3360,3915:4427 \
+  --out ./infer-demo --passes 3        # -> ./infer-demo_pass2.zarr (the deliverable)
+```
+
+That's a ~4.5 mm cube and it uses every visible GPU automatically. Add `--keep-buffers` to keep all three passes
+and watch the iteration improve, or `--s3-prefix s3://…` to upload instead of writing locally. Full guide:
+**[docs/infer.md](docs/infer.md)**.
+
 ## 📚 Documentation
 
 **Install, GPU/CUDA setup, and CLI usage are in the docs guide → [`docs/README.md`](docs/README.md).**
@@ -36,7 +58,8 @@ Start there. Each part of the project also has its own guide under [`docs/`](doc
 - **[Install & CLI](docs/README.md)** — requirements, `pipenv` install, CUDA build selection, the `hercunet` CLI. ✅
 - **[Data layer](docs/data-layer.md)** — streaming OME-Zarr reads, caching, prefetch, tiling, with a quickstart. ✅
 - **[Stage 1 — label generation](docs/herculabels.md)** — the `hercunet labels` CLI, the interactive grinding viewer, the `.herculabels` corpus format. ✅
-- **Stage 2 — HercUNet refiner** — training + iterative inference CLI. 🚧 coming soon (methodology: [`submission/writeup/hercunet.md`](submission/writeup/hercunet.md)).
+- **[Stage 2 — training the refiner](docs/training.md)** — the `hercunet train` chain over pinned `nnunetv2==2.8.1`. ✅
+- **[Stage 3 — inference](docs/infer.md)** — the `hercunet infer` iterative full-volume refiner (multi-GPU / multi-pod). ✅ (methodology: [`submission/writeup/hercunet.md`](submission/writeup/hercunet.md))
 
 The **methodology** research write-ups: stage-1 (how the labels are derived) is
 [`submission/writeup/herculabels.md`](submission/writeup/herculabels.md), and stage-2 (the iterative refiner) is
@@ -48,7 +71,8 @@ The **methodology** research write-ups: stage-1 (how the labels are derived) is
 |---|---|---|
 | **Data layer** — streaming multiscale OME-Zarr reads (chunk-cache + parallel prefetch + material tiling) | `hercunet.data` | ✅ implemented |
 | **Stage 1 — Pseudo-label generation** | `hercunet.labels` | ✅ implemented |
-| **Stage 2 — Iterative refiner (HercUNet)** | `hercunet.refine` / `hercunet.infer` | 🚧 coming soon |
+| **Stage 2 — Training the refiner (HercUNet)** | `hercunet.train` / `hercunet.training` | ✅ implemented |
+| **Stage 3 — Iterative full-volume inference** | `hercunet.infer` | ✅ implemented |
 
 ### Stage 1 - HercuLabels
 

@@ -61,7 +61,8 @@ build), and the train/resume commands.
 | `viz` | PySide6, pyqtgraph, PyOpenGL | the interactive viewer (`create --interactive`, `edit`) |
 | `accel` | obstore | a faster native (non-boto) S3 reader |
 | `train` | nnunetv2==2.8.1 + huggingface_hub, acvl-utils, cc3d, numba, blosc2, tifffile, pyyaml | stage-2 refiner training (`hercunet train …`) — needs a CUDA GPU |
-| `full` | viz + accel + train | everything |
+| `infer` | nnunetv2==2.8.1 + huggingface_hub + s5cmd | stage-3 full-volume inference (`hercunet infer …`) — needs a CUDA GPU |
+| `full` | viz + accel + train + infer | everything |
 | `dev` | pytest | the test suite |
 
 ## GPU / CUDA
@@ -149,7 +150,32 @@ trainer copy-paste; all in-process, no subprocess). The chain is separate, resum
 | `chain …` | run all of the above in order — resumable with `--from` / `--until` / `--skip` |
 
 Needs the `train` extra and the nnU-Net env roots. Full details, flags, and the design (why there is
-no copy-paste) are in **[training.md](training.md)**. Stage 3 (infer) lands as it is ported.
+no copy-paste) are in **[training.md](training.md)**.
+
+### Stage 3 — inference (`hercunet infer …`)
+
+Run the trained refiner over a whole scroll (or a sub-cube) as iterative Jacobi passes and write a per-pass
+surface-probability OME-Zarr. The network is built stock from `plans.json` and loaded from `network_weights`, so
+inference needs only the pinned `nnunetv2==2.8.1` (the `infer` extra), not the training code:
+
+| Command | Purpose |
+|---|---|
+| `single-instance …` | one box — fans across its local GPUs automatically (one worker per GPU); you run one command |
+| `multi-instance …` | many pods — run the same command per pod over a shared network volume, `--leader` on one |
+
+The model is public on Hugging Face: `--model-hf jimmylomro/hercunet-v0` (no token), or `--model <folder>` for a
+local run. Defaults reproduce HercUNet v0 (overlap 0.25, 4 passes, final pass = deliverable).
+
+**Simplest run** — nothing local, no S3 (pulls the model from HF, streams a ~5 mm PHerc1447 window, writes the
+result beside you):
+
+```bash
+hercunet infer single-instance --model-hf jimmylomro/hercunet-v0 --scroll PHerc1447 \
+  --region 10889:11401,2848:3360,3915:4427 --out ./infer-demo --passes 3
+# -> ./infer-demo_pass2.zarr  (open in VC3D). Uses every visible GPU; add --keep-buffers to compare passes.
+```
+
+Full walk-through, the smoke-test recipe, and all flags are in **[infer.md](infer.md)**.
 
 ## Library — the data layer
 
@@ -164,7 +190,7 @@ reads, an on-disk cache, prefetch, material tiling), configured via `HERCUNET_*`
 | **[data-layer.md](data-layer.md)** | The streaming data layer — backends, `ZarrSegment`, chunk-aligned parallel reads, the on-disk cache, prefetch (`iter_windows` / `VolumePrefetcher`), material tiling, configuration, performance notes. | ✅ available |
 | **[herculabels.md](herculabels.md)** | **Stage 1 usage** — the `create` / `edit` / `merge` / `export` CLI over `.herculabels` corpora, the interactive grinding viewer, and the corpus + export outputs (incl. the `meta.json` manifest). | ✅ available |
 | **[training.md](training.md)** | **Stage 2 training** — the `hercunet train` chain (export → build → preprocess → export-owner → fit) over pinned `nnunetv2==2.8.1`, direct-instantiation launch (no copy-paste), DDP, and the design. | ✅ available |
-| _infer.md_ | Stage 3 — single-instance full-volume inference (tile+halo, OME-Zarr out). | 🚧 planned |
+| **[infer.md](infer.md)** | **Stage 3 inference** — the `hercunet infer` single-instance (local multi-GPU) / multi-instance (pods) commands, iterative Jacobi refinement with the Gaussian blend, OME-Zarr output, and the small-cube smoke test. | ✅ available |
 
 The **methodology** for stage 1 (how the labels are derived — meshlets, slab, contrastive embedding,
 probeom, medial fit, confidence, and the ablation validating it) is the research write-up
@@ -177,4 +203,4 @@ provenance in [`../submission/writeup/corpus.md`](../submission/writeup/corpus.m
 2. **[data-layer.md](data-layer.md)** — everything reads voxels through it.
 3. **[herculabels.md](herculabels.md)** — running stage 1 and the viewer.
 4. **[training.md](training.md)** — stage 2, training the refiner (`hercunet train`).
-5. _infer.md_ — added as stage 3 lands.
+5. **[infer.md](infer.md)** — stage 3, full-volume inference (`hercunet infer`).
