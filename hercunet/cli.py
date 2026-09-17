@@ -475,6 +475,13 @@ def _add_infer_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--passes", type=int, default=4, help="Jacobi refinement passes (default 4; final pass = deliverable)")
     p.add_argument("--overlap", type=float, default=0.25,
                    help="window overlap for the Gaussian blend (default 0.25 = HercUNet v0); 0 = disjoint mode")
+    p.add_argument("--tta", default="none", metavar="none|all|mirror|rotate|z,y,x",
+                   help="test-time augmentation, applied per window (villa-style, averages logits): 'none' "
+                        "(default), 'all' (mirrors z,y,x + rotations), 'mirror', 'rotate', or a comma list incl. "
+                        "axes z,y,x (e.g. 'mirror,rotate' or 'z,y'). N variants → N× forwards on the chosen passes")
+    p.add_argument("--tta-passes", default="all", dest="tta_passes", metavar="all|last|no|2,3",
+                   help="which passes to apply --tta on (same grammar as --finalise): default 'all'; e.g. '2,3'. "
+                        "Ignored when --tta none")
     p.add_argument("--gpus", default="all", metavar="all|0,1,3",
                    help="GPUs to use on THIS node (default all visible; one worker process per GPU)")
     # model shape
