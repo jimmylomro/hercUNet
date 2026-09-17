@@ -167,6 +167,22 @@ for VC3D.
 
 ---
 
+## Test-time augmentation (`--tta`)
+
+Off by default. When on, each window is run under several flips/rotations, the results un-augmented, and the
+**logits averaged** (villa's `tta.py` scheme) — trading compute for a smoother, less orientation-biased prediction.
+It applies **per window**, independently. Two families, combinable:
+
+- **mirroring** — `torch.flip` over the chosen axes: `--tta mirror` (all of z,y,x → 8 variants) or a subset like
+  `--tta z,y`.
+- **rotation** — axis-swap transposes: `--tta rotate` (2 extra variants).
+- `--tta all` = both (10 variants); `--tta none` = off.
+
+`--tta-passes` picks which Jacobi passes get it (same `all`/`last`/`no`/index-list grammar as `--finalise`), e.g.
+`--tta all --tta-passes 2,3` to augment only the last two passes. **Cost:** N variants ⇒ **N× forwards** on each
+augmented pass, so `--tta all --tta-passes last` (10× on just the deliverable) is usually the sensible knob. The
+8-channel orientation stays correct automatically — it's recomputed in-forward from the already-flipped CT.
+
 ## Output
 
 Each pass writes `{out}_pass{p}.zarr` — a **VC3D-friendly OME-Zarr v2** surface-probability volume (uint8, level
@@ -197,6 +213,8 @@ interrupted multi-pass run continues from where it stopped without recomputing f
 | `--out PREFIX` | (required) | writes `{PREFIX}_pass{p}.zarr` |
 | `--passes N` | `4` | Jacobi passes; final pass = deliverable |
 | `--overlap f` | `0.25` | Gaussian-blend window overlap (HercUNet v0); `0` = disjoint raw-write mode |
+| `--tta none\|all\|mirror\|rotate\|z,y,x` | `none` | test-time augmentation per window (villa-style, logit average); N variants → N× forwards |
+| `--tta-passes all\|last\|no\|2,3` | `all` | which passes get TTA (same grammar as `--finalise`); ignored when `--tta none` |
 | `--region z0:z1,y0:y1,x0:x1` | **whole scroll** | restrict to a sub-cube (smoke tests); omit to infer the entire volume |
 | `--local-vol PATH` | — | read a local OME-Zarr copy instead of streaming S3 (I/O-bound → GPU-bound; byte-identical) |
 | `--gpus all\|0,1,3` | `all` | local GPUs to use (one worker process each) |
