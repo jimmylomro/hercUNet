@@ -99,6 +99,20 @@ def s3_to_https(s3_uri, region="eu-west-1"):
     return f"https://{bucket}.s3.{region}.amazonaws.com/{key.rstrip('/')}"
 
 
+def _s5cmd_bin():
+    """Locate the s5cmd binary. PATH first, then next to the running interpreter (``sys.executable``'s dir — the
+    venv's ``bin/`` where the s5cmd wheel installs its launcher). The fallback matters because calling a venv's
+    entry point directly (``/path/to/venv/bin/hercunet`` under nohup / systemd, no ``activate``) does NOT put the
+    venv bin on PATH, so a plain ``which`` would miss the s5cmd installed right beside us. Returns a path or None."""
+    import shutil
+    import sys
+    p = shutil.which("s5cmd")
+    if p:
+        return p
+    cand = os.path.join(os.path.dirname(sys.executable), "s5cmd")
+    return cand if os.path.exists(cand) else None
+
+
 def _count_files(local_dir):
     """Total number of files under ``local_dir`` — the upload-progress denominator (local FS metadata walk;
     a few seconds even for a ~470k-object L0)."""
@@ -116,7 +130,10 @@ def _s5cmd_stream(argv_tail, env, total=None, label="upload", poll=5.0):
     import json as _json
     import subprocess
     import time
-    proc = subprocess.Popen(["s5cmd", "--json", *argv_tail], env=env,
+    s5 = _s5cmd_bin()
+    if s5 is None:
+        raise RuntimeError("s5cmd not found — install the [infer] extra")
+    proc = subprocess.Popen([s5, "--json", *argv_tail], env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     done = 0
     errors = []                                                       # JSON events carrying an "error"
@@ -160,9 +177,8 @@ def upload_zarr_to_s3(local_dir, s3_uri, region="eu-west-1", workers=2048, incre
     ``incremental=False`` (default) → ``cp``: uploads the whole tree (first / L0 upload). ``incremental=True`` →
     ``sync``: diffs source vs dest and sends only the new files (the pyramid re-upload after L0 — so L0's ~470k
     objects are not re-sent)."""
-    import shutil
-    if shutil.which("s5cmd") is None:
-        raise RuntimeError("s5cmd not found on PATH — install the [infer] extra before using --s3-prefix")
+    if _s5cmd_bin() is None:
+        raise RuntimeError("s5cmd not found — install the [infer] extra before using --s3-prefix")
     env = os.environ.copy()
     env.setdefault("AWS_REGION", region)
     src = local_dir.rstrip("/") + "/"
@@ -182,10 +198,10 @@ def upload_pyramid_levels_to_s3(local_dir, s3_uri, region="eu-west-1", workers=2
     and rewrites the root ``.zattrs``, so we push exactly those paths and nothing else. Each ``cp`` overwrites,
     so it's idempotent / re-runnable. Raises on a missing level dir or any s5cmd failure (never silent)."""
     import glob
-    import shutil
     import subprocess
-    if shutil.which("s5cmd") is None:
-        raise RuntimeError("s5cmd not found on PATH — install it before uploading")
+    s5 = _s5cmd_bin()
+    if s5 is None:
+        raise RuntimeError("s5cmd not found — install the [infer] extra before uploading")
     env = os.environ.copy()
     env.setdefault("AWS_REGION", region)
     base = local_dir.rstrip("/")
@@ -199,9 +215,9 @@ def upload_pyramid_levels_to_s3(local_dir, s3_uri, region="eu-west-1", workers=2
         raise RuntimeError(f"missing {zattrs} — the multiscales metadata; VC3D needs it to see the pyramid")
     print(f"[upload] levels-only: cp levels {levels} + .zattrs -> {dst}/ (workers={workers})", flush=True)
     for lv in levels:                                                   # each level dir: recursive cp (incl .zarray)
-        subprocess.run(["s5cmd", "--log", "error", "--numworkers", str(workers),
+        subprocess.run([s5, "--log", "error", "--numworkers", str(workers),
                         "cp", f"{base}/{lv}/", f"{dst}/{lv}/"], check=True, env=env)
-    subprocess.run(["s5cmd", "--log", "error", "--numworkers", str(workers),        # the rewritten multiscales attrs
+    subprocess.run([s5, "--log", "error", "--numworkers", str(workers),             # the rewritten multiscales attrs
                     "cp", zattrs, f"{dst}/.zattrs"], check=True, env=env)            # (single file) — MANDATORY, last
     print(f"[upload] levels-only DONE: {len(levels)} levels + .zattrs on S3", flush=True)
 
@@ -211,11 +227,11 @@ def preflight_s3(s3_prefix, region="eu-west-1"):
     with a tiny s5cmd round-trip, so a multi-hour pass never completes only to hit a permission error on the
     upload. Raises SystemExit with actionable guidance on failure (missing s5cmd, bad creds, no PutObject). A
     delete failure is a WARNING only — the write is what uploads need; it just leaves a tiny test object behind."""
-    import shutil
     import subprocess
     import tempfile
-    if shutil.which("s5cmd") is None:
-        raise SystemExit("hercunet infer: --s3-prefix needs the s5cmd binary on PATH (install the [infer] extra), "
+    s5 = _s5cmd_bin()
+    if s5 is None:
+        raise SystemExit("hercunet infer: --s3-prefix needs the s5cmd binary (install the [infer] extra), "
                          "or drop --s3-prefix (results still save locally).")
     key = f"{s3_prefix.rstrip('/')}/.hercunet_write_test_{os.getpid()}"
     print(f"[preflight] checking S3 write access → {s3_prefix} …", flush=True)
@@ -225,7 +241,7 @@ def preflight_s3(s3_prefix, region="eu-west-1"):
         f.write("hercunet s3 write preflight\n")
         local = f.name
     try:
-        cp = subprocess.run(["s5cmd", "--log", "error", "cp", local, key],
+        cp = subprocess.run([s5, "--log", "error", "cp", local, key],
                             env=env, capture_output=True, text=True)
         if cp.returncode != 0:
             raise SystemExit(
@@ -233,7 +249,7 @@ def preflight_s3(s3_prefix, region="eu-west-1"):
                 f"bucket/prefix is wrong or unreachable.\ns5cmd: {cp.stderr.strip() or cp.stdout.strip()}\n"
                 f"Fix the creds/bucket (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION) or drop "
                 f"--s3-prefix (results still save locally, upload later).")
-        rm = subprocess.run(["s5cmd", "--log", "error", "rm", key],
+        rm = subprocess.run([s5, "--log", "error", "rm", key],
                             env=env, capture_output=True, text=True)
         if rm.returncode != 0:
             print(f"[preflight] WARNING: wrote OK but could not delete the test object {key} "
