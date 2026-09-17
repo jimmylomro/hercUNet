@@ -127,6 +127,7 @@ def _common_jargs(a, region):
         batch=a.batch, nb=a.nb, s3_prefix=a.s3_prefix, upload=a.upload, reclaim=a.reclaim, claim_chunk=a.claim_chunk,
         affinity=not a.plain, n_orient=a.n_orient, overlap=a.overlap,
         readahead=a.readahead, prefetch_workers=a.prefetch_workers, local_vol=a.local_vol,
+        tta=a.tta, tta_passes=a.tta_passes,
     )
 
 

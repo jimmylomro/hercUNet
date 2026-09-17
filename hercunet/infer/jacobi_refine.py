@@ -184,9 +184,94 @@ def pass_blend_tiles(shape, P, S, offset, region, T):
     return tiles
 
 
+# ----------------------------------------------------------------------------- forward + test-time augmentation
+# TTA is per WINDOW: each window's batch is augmented, forwarded, un-augmented, and its logits averaged before the
+# result is written (disjoint) or fed to the Gaussian blend. Two families, matching villa's tta.py — MIRRORING
+# (torch.flip over z/y/x, up to 8 3-D variants) and ROTATION (torch.transpose axis-swaps, 2 extra variants) — and
+# they combine (union of the two variant sets, deduping identity). The 8-ch orientation channels are recomputed
+# in-forward from the CT (:func:`_seg_logits`), so under any flip/transpose the orientation is derived from the
+# already-transformed CT and stays consistent — no manual channel handling.
+def _resolve_tta(spec):
+    """Parse ``--tta`` into a list of ``(flip_dims, transpose_pair)`` VARIANTS, identity first. Comma-separated
+    tokens: ``none``/``off``/``""`` → off (identity only, the default); ``all`` → every mirror (z,y,x) + rotations;
+    ``mirror`` → the 3 axis mirrors; ``rotate``/``rotation`` → the transpose variants; ``z``/``y``/``x`` → mirror
+    over that axis. Tokens combine (e.g. ``mirror,rotate`` == ``all``; ``z,rotate``). Union semantics — villa runs
+    mirroring and rotation as separate modes; we merge their variant SETS (not their product)."""
+    dim = {"z": -3, "y": -2, "x": -1}
+    toks = [t.strip() for t in str(spec).strip().lower().split(",") if t.strip()]
+    if not toks or set(toks) <= {"none", "no", "off"}:
+        return [((), None)]
+    axes, rotate = [], False
+    for t in toks:
+        if t == "all":
+            axes, rotate = ["z", "y", "x"], True
+        elif t in ("mirror", "mirrors"):
+            axes = [a for a in ("z", "y", "x")]
+        elif t in ("rotate", "rotation", "rot"):
+            rotate = True
+        elif t in dim:
+            if t not in axes:
+                axes.append(t)
+        else:
+            raise SystemExit(f"hercunet infer: --tta got token {t!r}; expected a comma list of "
+                             f"none|all|mirror|rotate or axes z,y,x (e.g. 'mirror,rotate' or 'z,y').")
+    from itertools import combinations
+    ds = [dim[a] for a in axes]
+    variants = [((), None)]                                          # identity always first
+    for r in range(1, len(ds) + 1):                                  # non-empty mirror combos (villa 'mirroring')
+        for c in combinations(ds, r):
+            variants.append((tuple(c), None))
+    if rotate:                                                       # villa 'rotation' = 2 transpose swaps
+        variants.append(((), (-3, -1)))
+        variants.append(((), (-3, -2)))
+    return variants
+
+
+def _seg_logits(net, xb2, affinity):
+    """One forward on a ``[B,2,P,P,P]`` ``[CT, prev]`` batch → seg logits ``[B,C,P,P,P]``. When ``affinity``, the 6
+    orientation channels are recomputed IN-FORWARD from THIS batch's CT and concatenated (8-ch), then the net's
+    base seg output is returned. Recomputing orientation here is what makes TTA correct: under a flipped/transposed
+    CT the structure-tensor orientation is derived from the already-transformed CT, so no manual channel handling."""
+    import torch
+    if affinity:
+        from ..training.affinity import ct_orientation
+        orient = ct_orientation(xb2[:, 0:1], sigma_grad=1.0, sigma_tensor=3.0)
+        xin = torch.cat([xb2, orient.to(xb2.dtype)], dim=1)
+    else:
+        xin = xb2
+    logits = net(xin)
+    if isinstance(logits, (list, tuple)):
+        logits = logits[0]                                            # AffinityHeadNet base -> seg tensor
+    return logits
+
+
+def _tta_seg_logits(net, xb2, affinity, variants):
+    """Seg logits with TTA: average the un-augmented logits over each ``(flips, transpose)`` in ``variants``
+    (villa-style — average raw LOGITS, no softmax first). A single ``[((), None)]`` means TTA off (one forward,
+    byte-identical to before). Each variant is applied (flip then transpose) to the input and its inverse
+    (transpose then flip — both are their own inverse) to the output."""
+    import torch
+    if len(variants) == 1:                                           # fast path: TTA off
+        return _seg_logits(net, xb2, affinity)
+    acc = None
+    for flips, tp in variants:
+        xa = xb2
+        if flips:
+            xa = torch.flip(xa, flips)
+        if tp:
+            xa = torch.transpose(xa, *tp).contiguous()
+        lg = _seg_logits(net, xa, affinity)
+        if tp:
+            lg = torch.transpose(lg, *tp)                            # undo transpose (self-inverse)
+        if flips:
+            lg = torch.flip(lg, flips)                               # undo flip (self-inverse)
+        acc = lg if acc is None else acc.add_(lg)
+    return acc.div_(len(variants))
+
+
 def run_pass(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, device,
              air=25, batch=4, nb=4, log_every=40, donedir=None, reclaim=False, claim_chunk=6, affinity=False,
-             readahead=2, prefetch_workers=3):
+             readahead=2, prefetch_workers=3, tta_variants=None):
     """One disjoint (raw-write) Jacobi pass — BLOCK-batched + prefetched (fp16). Reads CT in big blocks (``nb``*P
     per axis) through the prefetched :func:`iter_windows` (S3 I/O overlaps GPU), reads the matching ``prev`` block
     from the ``prev_arr`` zarr once per block (None on pass 0 → prev=0), runs the P^3 windows in each block in
@@ -199,8 +284,8 @@ def run_pass(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, device,
     caller runs the barrier + leader-finalize. ``donedir`` None → single instance (all blocks, in order)."""
     import torch
     from ..data import iter_windows
-    if affinity:
-        from ..training.affinity import ct_orientation             # 8-ch model: [CT, prev] + 6 orient channels
+    if not tta_variants:
+        tta_variants = [((), None)]                                 # no TTA (single identity forward)
     lo, hi, mean, std = ctnorm
     blocks, (ngz, ngy, ngx) = pass_blocks(cur_arr.shape, P, offset, region, nb)
     total_win = sum(len(b["wins"]) for b in blocks)
@@ -215,12 +300,7 @@ def run_pass(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, device,
             return
         xb = torch.from_numpy(np.stack(buf)).to(device, non_blocking=True)     # [B,2,P,P,P]
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
-            if affinity:                                                       # -> [B,8,P,P,P] with CT orientation
-                orient = ct_orientation(xb[:, 0:1], sigma_grad=1.0, sigma_tensor=3.0)
-                xb = torch.cat([xb, orient.to(xb.dtype)], dim=1)
-            logits = net(xb)
-            if isinstance(logits, (list, tuple)):
-                logits = logits[0]                                            # AffinityHeadNet base -> seg tensor
+            logits = _tta_seg_logits(net, xb, affinity, tta_variants)         # [B,C,P,P,P] (TTA-averaged if on)
             prob = torch.softmax(logits, 1)[:, 1]                             # [B,P,P,P]
         u8 = prob.mul_(255.0).round_().clamp_(0, 255).to(torch.uint8).cpu().numpy()
         for i, (z, y, x) in enumerate(meta):
@@ -278,15 +358,15 @@ def run_pass(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, device,
 
 def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T, device,
                    air=25, batch=4, log_every=20, donedir=None, reclaim=False, claim_chunk=6, affinity=False,
-                   readahead=2, prefetch_workers=3):
+                   readahead=2, prefetch_workers=3, tta_variants=None):
     """One OVERLAP-mode pass: like :func:`run_pass` (prefetched blocks, claim-queue, fp16) but each claim item is a
     disjoint OUTPUT TILE that runs every stride-S window covering it (halo) and merges them with the villa Gaussian
     blend in LOGIT space (accumulate ``(l1-l0)·g`` + ``g``, normalise, sigmoid), then writes only its owned region —
     so tiles never blend across each other and multi-instance stays race-free (same trick as full-volume infer)."""
     import torch
     from ..data import iter_windows
-    if affinity:
-        from ..training.affinity import ct_orientation
+    if not tta_variants:
+        tta_variants = [((), None)]                                          # no TTA
     lo, hi, mean, std = ctnorm
     gauss_t = torch.from_numpy(make_gaussian(P)).to(device)
     tiles = pass_blend_tiles(cur_arr.shape, P, S, offset, region, T)
@@ -323,12 +403,7 @@ def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T,
                 continue
             xb = torch.from_numpy(np.stack(arrs)).to(device, non_blocking=True)     # [B,2,P,P,P]
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
-                if affinity:
-                    orient = ct_orientation(xb[:, 0:1], sigma_grad=1.0, sigma_tensor=3.0)
-                    xb = torch.cat([xb, orient.to(xb.dtype)], dim=1)
-                logits = net(xb)
-                if isinstance(logits, (list, tuple)):
-                    logits = logits[0]
+                logits = _tta_seg_logits(net, xb, affinity, tta_variants)           # [B,C,P,P,P] (TTA-avg if on)
                 diff = (logits[:, 1] - logits[:, 0]).float()                        # [B,P,P,P] logit margin
             for bj, (z, y, x) in enumerate(keep):
                 iz0, iz1 = max(z, oz0), min(z + P, oz1)                             # window ∩ owned (absolute)
@@ -406,7 +481,8 @@ def _resolve_pass_spec(spec, passes, flag="--finalise"):
 def jacobi_refine(scroll, model, out_prefix, passes=3, ckpt="checkpoint_best.pth", device="cuda",
                   air=25, region=None, keep_buffers=False, finalise="last", resume=False, batch=4, nb=4,
                   s3_prefix=None, upload="last", multi=False, reclaim=False, claim_chunk=6, leader=False,
-                  affinity=True, n_orient=6, overlap=0.25, readahead=2, prefetch_workers=3, local_vol=None):
+                  affinity=True, n_orient=6, overlap=0.25, readahead=2, prefetch_workers=3, local_vol=None,
+                  tta="none", tta_passes="all"):
     """Run ``passes`` double-buffered Jacobi refinement passes over ``scroll`` and write per-pass surface-prob
     OME-Zarrs ``{out_prefix}_pass{p}.zarr``. Returns the final pass path.
 
@@ -416,7 +492,8 @@ def jacobi_refine(scroll, model, out_prefix, passes=3, ckpt="checkpoint_best.pth
     = only the deliverable; ``"all"``; ``"no"``; or an index list — see :func:`_resolve_pass_spec`); ``upload`` is
     inert without ``s3_prefix``. ``region``=(z0,z1,y0,y1,x0,x1) restricts computed tiles (buffer canvas stays
     full-volume) — use it for a small-cube smoke test. ``overlap`` > 0 → Gaussian-blend mode (default 0.25,
-    HercUNet v0); 0 → disjoint mode.
+    HercUNet v0); 0 → disjoint mode. ``tta`` (none/all/mirror/rotate/axes) applies per-window test-time
+    augmentation on the ``tta_passes`` passes, averaging logits over N variants (N× forwards there).
 
     ``multi`` → MULTI-INSTANCE. Run the identical worker on any number of processes sharing ``out_prefix`` storage
     (one per GPU on a box's local FS, or across pods on a network volume); extra workers can join mid-run. Within a
@@ -469,6 +546,12 @@ def jacobi_refine(scroll, model, out_prefix, passes=3, ckpt="checkpoint_best.pth
 
     finalise_set = _resolve_pass_spec(finalise, passes, "--finalise")   # which passes get an OME-Zarr pyramid
     upload_set = _resolve_pass_spec(upload, passes, "--upload") if s3_prefix else set()   # which passes upload to S3
+    tta_all = _resolve_tta(tta)                                          # TTA variant list (identity only if off)
+    tta_set = _resolve_pass_spec(tta_passes, passes, "--tta-passes") if len(tta_all) > 1 else set()  # passes w/ TTA
+    if len(tta_all) > 1:
+        print(f"[jacobi] TTA: {len(tta_all)} variants (--tta {tta}) on pass(es) "
+              f"{sorted(tta_set) if tta_set else 'none'} (--tta-passes {tta_passes}) — {len(tta_all)}x forwards there",
+              flush=True)
     print(f"[jacobi] finalise (build pyramid) for pass(es): "
           f"{sorted(finalise_set) if finalise_set else 'none'} (--finalise {finalise})", flush=True)
     if s3_prefix:
@@ -506,15 +589,16 @@ def jacobi_refine(scroll, model, out_prefix, passes=3, ckpt="checkpoint_best.pth
             CQ.wait_for_path(os.path.join(donedir, "_created"), f"pass {p} zarr creation")
             cur = zarr.open_group(cur_path, mode="r+")["0"]
 
+        pass_variants = tta_all if p in tta_set else [((), None)]   # TTA only on the selected passes
         if blend:
             run_pass_blend(net, ctnorm, vol, prev_arr, cur, region_full, offset, P, S, Tt, device, air=air,
                            batch=batch, donedir=(donedir if multi else None), reclaim=reclaim,
                            claim_chunk=claim_chunk, affinity=affinity,
-                           readahead=readahead, prefetch_workers=prefetch_workers)
+                           readahead=readahead, prefetch_workers=prefetch_workers, tta_variants=pass_variants)
         else:
             run_pass(net, ctnorm, vol, prev_arr, cur, region_full, offset, P, device, air=air, batch=batch, nb=nb,
                      donedir=(donedir if multi else None), reclaim=reclaim, claim_chunk=claim_chunk, affinity=affinity,
-                     readahead=readahead, prefetch_workers=prefetch_workers)
+                     readahead=readahead, prefetch_workers=prefetch_workers, tta_variants=pass_variants)
 
         # ---- pass p compute done. Multi: BARRIER (also the propagation guarantee — it polls until every L0 block
         # .done is VISIBLE, so L0 is readable cross-node by then). Write ``_complete`` (resume marker) at once — the
