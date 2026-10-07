@@ -15,6 +15,18 @@ import os
 import numpy as np
 
 
+def _hms(seconds):
+    """Compact human duration: ``45s``, ``12m03s``, ``1h04m``."""
+    s = int(round(max(0.0, seconds)))
+    h, rem = divmod(s, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h{m:02d}m"
+    if m:
+        return f"{m}m{s:02d}s"
+    return f"{s}s"
+
+
 def load_net(model_folder, ckpt_name="checkpoint_best.pth", device="cuda", deep_supervision=False,
              force_in_channels=None):
     """Build the stock network from plans.json + dataset.json and load the checkpoint weights.
@@ -467,7 +479,7 @@ def _s5cmd_presync_run(lines, anon=False, workers=256, poll=5.0):
         os.unlink(cmdf.name)
     except OSError:
         pass
-    print(f"[pre-sync] fetched {done} chunks, {miss} absent (air) of {total} in {time.time() - t0:.0f}s", flush=True)
+    print(f"[pre-sync] fetched {done} chunks, {miss} absent (air) of {total} in {_hms(time.time() - t0)}", flush=True)
 
 
 def presync_region(source, region, dst_dir, halo_chunks=2, anon=None):
@@ -550,7 +562,7 @@ def presync_region(source, region, dst_dir, halo_chunks=2, anon=None):
             except OSError:
                 n = 0
             print(f"[pre-sync] ~{n}/{len(lines)} chunks on disk ({100 * n // max(len(lines), 1)}%) "
-                  f"{int(_time.time() - t0)}s", flush=True)
+                  f"{_hms(_time.time() - t0)}", flush=True)
 
     watcher = threading.Thread(target=_watch, daemon=True)
     watcher.start()

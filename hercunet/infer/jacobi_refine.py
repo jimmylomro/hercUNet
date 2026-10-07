@@ -32,6 +32,20 @@ from . import nnunet_infer as NI
 from . import claim_queue as CQ
 
 
+def _hms(seconds):
+    """Compact human duration: ``45s``, ``12m03s``, ``1h04m`` (``??`` for inf/NaN)."""
+    if seconds is None or seconds != seconds or seconds == float("inf"):
+        return "??"
+    s = int(round(seconds))
+    h, rem = divmod(s, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h{m:02d}m"
+    if m:
+        return f"{m}m{s:02d}s"
+    return f"{s}s"
+
+
 # ----------------------------------------------------------------------------- multi-instance coordination
 # The generic elastic claim-queue (atomic .claim / .done, barrier, orphan reclaim) lives in ``claim_queue`` and is
 # shared with full-volume inference — nothing is copied here. Per-pass, each nb^3 prefetch BLOCK is one claim item
@@ -301,7 +315,7 @@ def _tta_seg_logits(net, xb2, affinity, variants):
 
 def run_pass(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, device,
              air=25, batch=4, nb=4, log_every=40, donedir=None, reclaim=False, claim_chunk=6, affinity=False,
-             readahead=2, prefetch_workers=3, tta_variants=None):
+             readahead=2, prefetch_workers=3, tta_variants=None, pass_idx=0, passes=1):
     """One disjoint (raw-write) Jacobi pass — BLOCK-batched + prefetched (fp16). Reads CT in big blocks (``nb``*P
     per axis) through the prefetched :func:`iter_windows` (S3 I/O overlaps GPU), reads the matching ``prev`` block
     from the ``prev_arr`` zarr once per block (None on pass 0 → prev=0), runs the P^3 windows in each block in
@@ -358,14 +372,14 @@ def run_pass(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, device,
 
     def rate():
         dt = time.time() - t0
-        return f"{done[0]} win {dt:.0f}s {done[0]/max(dt,1e-9):.1f} win/s"
+        return f"{done[0]} win · {_hms(dt)} · {done[0]/max(dt,1e-9):.1f} win/s"
 
     if donedir is None:                                                       # ---- single instance: all blocks
         reqs = [b["req"] for b in blocks]
         for bi, (req, blk, org) in enumerate(iter_windows(vol, reqs, readahead=readahead, workers=prefetch_workers)):
             process_block(np.asarray(blk), blocks[bi])
             if log_every and bi and bi % log_every == 0:
-                print(f"[pass] block {bi}/{len(blocks)} ({rate()})", flush=True)
+                print(f"[pass] P{pass_idx}/{passes - 1} block {bi}/{len(blocks)} ({rate()})", flush=True)
         flush()
     else:                                                                     # ---- multi instance: claim-queue
         ntot = len(blocks); nproc = 0
@@ -379,16 +393,21 @@ def run_pass(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, device,
                 nproc += 1
             gd = CQ.count_done(donedir)                                        # GLOBAL blocks done (all workers)
             grate = (gd - g0) / max(time.time() - tg0, 1e-9)                   # aggregate blocks/s (this worker's view)
-            eta = (ntot - gd) / grate / 60.0 if grate > 0 else float("inf")
-            print(f"[pass] worker {nproc}/{ntot} | GLOBAL {gd}/{ntot} ({100 * gd // ntot}%) "
-                  f"{grate * 60:.1f} blk/min ETA {eta:.0f}m | {rate()}", flush=True)
+            eta = (ntot - gd) / grate if grate > 0 else float("inf")            # seconds
+            full = ntot / grate if grate > 0 else float("inf")                  # whole-pass seconds at this rate
+            run_eta = eta + max(0, passes - 1 - pass_idx) * full                # + the passes still to come
+            pass_pct = 100 * gd // ntot
+            run_pct = int(100 * (pass_idx + gd / ntot) / max(passes, 1))        # overall, across all passes
+            print(f"[pass] P{pass_idx}/{passes - 1} | this worker: {nproc} blocks · {rate()} "
+                  f"| all workers: {gd}/{ntot} blocks · {grate * 60:.1f} blk/min "
+                  f"| pass ETA {_hms(eta)} ({pass_pct}%) · run ETA {_hms(run_eta)} ({run_pct}%)", flush=True)
     flush()
     print(f"[pass] DONE (this worker) {rate()}", flush=True)
 
 
 def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T, device,
                    air=25, batch=4, log_every=20, donedir=None, reclaim=False, claim_chunk=6, affinity=False,
-                   readahead=2, prefetch_workers=3, tta_variants=None, aff_arr=None):
+                   readahead=2, prefetch_workers=3, tta_variants=None, aff_arr=None, pass_idx=0, passes=1):
     """One OVERLAP-mode pass: like :func:`run_pass` (prefetched blocks, claim-queue, fp16) but each claim item is a
     disjoint OUTPUT TILE that runs every stride-S window covering it (halo) and merges them with the villa Gaussian
     blend in LOGIT space (accumulate ``(l1-l0)·g`` + ``g``, normalise, sigmoid), then writes only its owned region —
@@ -474,14 +493,14 @@ def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T,
 
     def rate():
         dt = time.time() - t0
-        return f"{done[0]} win {dt:.0f}s {done[0]/max(dt,1e-9):.1f} win/s"
+        return f"{done[0]} win · {_hms(dt)} · {done[0]/max(dt,1e-9):.1f} win/s"
 
     if donedir is None:                                                            # ---- single instance
         reqs = [t["req"] for t in tiles]
         for bi, (req, blk, org) in enumerate(iter_windows(vol, reqs, readahead=readahead, workers=prefetch_workers)):
             process_tile(np.asarray(blk), tiles[bi])
             if log_every and bi and bi % log_every == 0:
-                print(f"[pass-blend] tile {bi}/{len(tiles)} ({rate()})", flush=True)
+                print(f"[pass-blend] P{pass_idx}/{passes - 1} tile {bi}/{len(tiles)} ({rate()})", flush=True)
     else:                                                                          # ---- multi instance: claim-queue
         ntot = len(tiles); nproc = 0
         g0, tg0 = CQ.count_done(donedir), time.time()
@@ -493,9 +512,14 @@ def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T,
                 nproc += 1
             gd = CQ.count_done(donedir)
             grate = (gd - g0) / max(time.time() - tg0, 1e-9)
-            eta = (ntot - gd) / grate / 60.0 if grate > 0 else float("inf")
-            print(f"[pass-blend] worker {nproc}/{ntot} | GLOBAL {gd}/{ntot} ({100 * gd // ntot}%) "
-                  f"{grate * 60:.1f} tile/min ETA {eta:.0f}m | {rate()}", flush=True)
+            eta = (ntot - gd) / grate if grate > 0 else float("inf")            # seconds
+            full = ntot / grate if grate > 0 else float("inf")                  # whole-pass seconds at this rate
+            run_eta = eta + max(0, passes - 1 - pass_idx) * full                # + the passes still to come
+            pass_pct = 100 * gd // ntot
+            run_pct = int(100 * (pass_idx + gd / ntot) / max(passes, 1))        # overall, across all passes
+            print(f"[pass-blend] P{pass_idx}/{passes - 1} | this worker: {nproc} tiles · {rate()} "
+                  f"| all workers: {gd}/{ntot} tiles · {grate * 60:.1f} tile/min "
+                  f"| pass ETA {_hms(eta)} ({pass_pct}%) · run ETA {_hms(run_eta)} ({run_pct}%)", flush=True)
     print(f"[pass-blend] DONE (this worker) {rate()}", flush=True)
 
 
@@ -673,11 +697,12 @@ def jacobi_refine(source, model, out_prefix, passes=3, ckpt="checkpoint_best.pth
                            batch=batch, donedir=(donedir if multi else None), reclaim=reclaim,
                            claim_chunk=claim_chunk, affinity=affinity,
                            readahead=readahead, prefetch_workers=prefetch_workers, tta_variants=pass_variants,
-                           aff_arr=aff_arr)
+                           aff_arr=aff_arr, pass_idx=p, passes=passes)
         else:
             run_pass(net, ctnorm, vol, prev_arr, cur, region_full, offset, P, device, air=air, batch=batch, nb=nb,
                      donedir=(donedir if multi else None), reclaim=reclaim, claim_chunk=claim_chunk, affinity=affinity,
-                     readahead=readahead, prefetch_workers=prefetch_workers, tta_variants=pass_variants)
+                     readahead=readahead, prefetch_workers=prefetch_workers, tta_variants=pass_variants,
+                     pass_idx=p, passes=passes)
 
         # ---- pass p compute done. Multi: BARRIER (also the propagation guarantee — it polls until every L0 block
         # .done is VISIBLE, so L0 is readable cross-node by then). Write ``_complete`` (resume marker) at once — the
