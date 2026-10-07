@@ -41,14 +41,16 @@ pipenv install ".[infer]"
 
 pipenv run hercunet infer single-instance \    # or drop `pipenv run` if you installed with venv
   --model-hf jimmylomro/hercunet-v0 \
-  --scroll PHerc1447 \
+  PHerc1447 \                                   # positional SOURCE: a scroll id, or an s3://|https://|file:// .zarr URL
   --region 10889:11401,2848:3360,3915:4427 \
   --out ./infer-demo --passes 3        # -> ./infer-demo_pass2.zarr (the deliverable)
 ```
 
-That's a ~4.5 mm cube and it uses every visible GPU automatically. Add `--keep-buffers` to keep all three passes
-and watch the iteration improve, or `--s3-prefix s3://…` to upload instead of writing locally. Full guide:
-**[docs/infer.md](docs/infer.md)**.
+That's a ~4.5 mm cube and it uses every visible GPU automatically. The **SOURCE** is a single positional: a bare
+scroll id (catalog lookup), or a direct `s3://…zarr` / `https://…zarr` (streamed) / `file://…zarr` (read locally).
+To make a streamed run GPU-bound without downloading the whole volume, add `--pre-sync-source` (region-syncs the
+covering L0 chunks locally first). Add `--keep-buffers` to keep all three passes and watch the iteration improve,
+or `--s3-prefix s3://…` to upload instead of writing locally. Full guide: **[docs/infer.md](docs/infer.md)**.
 
 ## 📚 Documentation
 

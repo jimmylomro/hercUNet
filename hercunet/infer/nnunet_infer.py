@@ -167,6 +167,24 @@ def s3_to_https(s3_uri, region="eu-west-1"):
     return f"https://{bucket}.s3.{region}.amazonaws.com/{key.rstrip('/')}"
 
 
+def s3_uri_to_https(s3_uri):
+    """s3://bucket/key -> https://bucket.s3.amazonaws.com/key (region-less global endpoint; S3 redirects to the
+    bucket's region). Used to OPEN/stream an ``s3://`` source over plain HTTPS range reads."""
+    assert s3_uri.startswith("s3://"), s3_uri
+    bucket, _, key = s3_uri[len("s3://"):].partition("/")
+    return f"https://{bucket}.s3.amazonaws.com/{key.rstrip('/')}"
+
+
+def https_to_s3(url):
+    """Virtual-hosted S3 https URL -> s3://bucket/key (inverse of :func:`s3_uri_to_https`, for feeding s5cmd).
+    Handles ``bucket.s3.amazonaws.com``, ``bucket.s3.<region>.amazonaws.com`` and ``bucket.s3-<region>.…``."""
+    import re
+    m = re.match(r"https?://([^./]+)\.s3(?:[.-][a-z0-9-]+)?\.amazonaws\.com/(.+)", url)
+    if not m:
+        raise ValueError(f"not a virtual-hosted S3 https URL: {url}")
+    return f"s3://{m.group(1)}/{m.group(2).rstrip('/')}"
+
+
 def _s5cmd_bin():
     """Locate the s5cmd binary. PATH first, then next to the running interpreter (``sys.executable``'s dir — the
     venv's ``bin/`` where the s5cmd wheel installs its launcher). The fallback matters because calling a venv's
@@ -346,24 +364,164 @@ def _find_scroll(be, sid):
     raise KeyError(f"scroll {sid} not found")
 
 
-def open_scroll(name, local_vol=None):
-    """Open a scroll's full-resolution OME-Zarr through the hercunet data layer (chunk-cached, prefetch-ready).
-    Returns a volume exposing ``.meta.level_shapes`` / ``.meta.voxel_size_um`` and ``read_window(level, z0,z1,
-    y0,y1, x0,x1) -> (block, origin)`` — the read primitive :func:`hercunet.data.iter_windows` drives.
+def _source_kind(source):
+    """Classify an infer ``source`` positional → ``('local', path)`` | ``('http', url)`` | ``('scroll', id)``.
+    ``file://`` and local paths (existing, or ending ``.zarr``) are local; ``s3://`` and ``http(s)://`` are
+    remote (``s3://`` mapped to its https endpoint); anything else is treated as a data-layer scroll id."""
+    s = str(source)
+    if s.startswith("file://"):
+        return "local", s[len("file://"):]
+    if s.startswith("s3://"):
+        return "http", s3_uri_to_https(s)
+    if s.startswith(("http://", "https://")):
+        return "http", s
+    if os.path.exists(s) or s.rstrip("/").endswith(".zarr"):
+        return "local", s
+    return "scroll", s
 
-    ``local_vol`` (the ``--local-vol`` flag): path to a LOCALLY-downloaded copy of the scroll's OME-Zarr (fast
-    local NVMe / tmpfs). When given, open it directly and BYPASS the S3 backend — reads become local instead of a
-    throttled cross-region S3 pull, turning the run from I/O-bound into GPU-bound. Decompressed chunks are
-    byte-identical to S3's, so logits and the blend are byte-identical. ``parse_voxel_um`` recovers the voxel
-    resolution (name token, else OME metadata) so ``voxel_size_um`` / ``level_shapes`` match the S3 path exactly.
-    Only L0 need be downloaded."""
-    if local_vol:
+
+def source_label(source):
+    """A short volume name for VC3D metadata / per-pass naming: the zarr basename (minus ``.zarr``), or the
+    scroll id for the catalog form."""
+    s = str(source).rstrip("/")
+    if s.startswith("file://"):
+        s = s[len("file://"):]
+    base = s.split("/")[-1]
+    return base[:-5] if base.endswith(".zarr") else base
+
+
+def open_source(source):
+    """Open an inference CT ``source`` → a volume exposing ``.meta.level_shapes`` / ``.meta.voxel_size_um`` and
+    ``read_window(level, z0,z1,y0,y1, x0,x1) -> (block, origin)`` — the primitive :func:`hercunet.data.iter_windows`
+    drives.
+
+    ``source`` is the single positional argument of ``hercunet infer``:
+      * ``file:///path/x.zarr`` or a local path / ``*.zarr`` → opened **locally** (fast NVMe/tmpfs; GPU-bound);
+      * ``s3://bucket/key.zarr`` or ``https://…/x.zarr`` → opened for **streaming** HTTPS range reads (no bucket
+        listing);
+      * a bare scroll id (e.g. ``PHerc1447``) → resolved through the data-layer **catalog** (this lists the bucket;
+        the URL forms above skip that).
+    ``parse_voxel_um`` recovers the voxel size from the name token (else the OME metadata), so ``voxel_size_um`` /
+    ``level_shapes`` match regardless of source — a region-synced local copy keeps the source basename so its token
+    survives."""
+    kind, loc = _source_kind(source)
+    if kind in ("local", "http"):
         from ..data import ZarrSegment, parse_voxel_um
-        return ZarrSegment(local_vol, parse_voxel_um(local_vol))
+        return ZarrSegment(loc, parse_voxel_um(loc))
     from ..config import Config
     from ..data import get_backend
     be = get_backend(Config.from_env())
-    return be.open_scroll_volume(_find_scroll(be, name))
+    return be.open_scroll_volume(_find_scroll(be, loc))
+
+
+def _s5cmd_presync_run(lines, anon=False, workers=256, poll=5.0):
+    """Feed per-chunk ``cp`` commands to ``s5cmd --json … run`` (parallel), printing a throttled progress line and
+    a final summary — the same clean, continuous style as the upload logs. A missing object (404) means an all-air
+    chunk was never stored; that is EXPECTED (zarr serves it as ``fill_value`` at read time), so it is counted as
+    ``air-miss`` and never aborts. Needs the s5cmd binary (the ``[infer]`` extra installs it)."""
+    import json as _json
+    import subprocess
+    import time
+    s5 = _s5cmd_bin()
+    if s5 is None:
+        raise SystemExit("--pre-sync-source needs the s5cmd binary (install the [infer] extra).")
+    argv = [s5, "--json"] + (["--no-sign-request"] if anon else []) + ["--numworkers", str(workers), "run"]
+    proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    proc.stdin.write("\n".join(lines) + "\n")
+    proc.stdin.close()
+    total, done, miss = len(lines), 0, 0
+    t0 = last = time.time()
+    for line in proc.stdout:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = _json.loads(line)
+        except ValueError:
+            continue
+        if ev.get("error"):
+            miss += 1
+            continue
+        if ev.get("operation") == "cp":
+            done += 1
+        now = time.time()
+        if now - last >= poll:
+            seen = done + miss
+            print(f"[pre-sync] {seen}/{total} ({100 * seen // max(total, 1)}%) got={done} air-miss={miss} "
+                  f"{seen / max(now - t0, 1e-9):.0f}/s", flush=True)
+            last = now
+    proc.wait()
+    print(f"[pre-sync] fetched {done} chunks, {miss} absent (air) of {total} in {time.time() - t0:.0f}s", flush=True)
+
+
+def presync_region(source, region, dst_dir, halo_chunks=2, anon=None):
+    """Download ONLY the L0 chunks covering ``region`` (+ a ``halo_chunks`` halo for the patch overshoot past the
+    region edges) of a remote OME-Zarr to a local copy, and return the local ``.zarr`` path. This is what
+    ``--pre-sync-source`` does for an ``s3://`` / ``https://`` source: it turns a per-chunk S3-streaming run into a
+    GPU-bound local-read run without fetching the whole (hundreds-of-GB) volume. zarr serves any not-downloaded
+    (air) chunk as ``fill_value``, so a region-only copy is exact as long as only that region is computed.
+
+    ``region`` = ``(z0,z1,y0,y1,x0,x1)`` in L0 voxels, or ``None`` = the whole L0 (the full-volume case — big).
+    ``dst_dir`` = parent dir for the copy; the copy keeps the source zarr's **basename** so the voxel-size name
+    token survives (``parse_voxel_um``). ``anon`` forces ``--no-sign-request``; ``None`` = auto (anon for the public
+    open-data bucket, signed — env creds — otherwise)."""
+    import json as _json
+    import math
+    import requests
+
+    if source.startswith("s3://"):
+        s3_uri, https = source.rstrip("/"), s3_uri_to_https(source).rstrip("/")
+    elif source.startswith(("http://", "https://")):
+        https, s3_uri = source.rstrip("/"), https_to_s3(source).rstrip("/")
+    else:
+        raise SystemExit(f"--pre-sync-source: source must be s3:// or https://, got {source!r} "
+                         "(a file:// / local source is already local — nothing to sync).")
+    bucket = s3_uri[len("s3://"):].split("/", 1)[0]
+    if anon is None:
+        anon = (bucket == "vesuvius-challenge-open-data")
+
+    za = requests.get(f"{https}/.zattrs", timeout=30)
+    datasets = _json.loads(za.text)["multiscales"][0]["datasets"] if za.ok else [{"path": "0"}]
+    l0 = datasets[0]["path"]
+    zarray = _json.loads(requests.get(f"{https}/{l0}/.zarray", timeout=30).text)
+    cz, cy, cx = zarray["chunks"]
+    Dz, Dy, Dx = zarray["shape"]
+    sep = zarray.get("dimension_separator", ".")
+
+    name = s3_uri.split("/")[-1]                                       # keep the zarr basename (voxel token!)
+    dst = os.path.join(dst_dir, name)
+    os.makedirs(os.path.join(dst, l0), exist_ok=True)
+
+    def _getfile(rel):                                                # copy a small metadata file over HTTP
+        r = requests.get(f"{https}/{rel}", timeout=30)
+        if r.ok:
+            p = os.path.join(dst, rel)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "wb") as f:
+                f.write(r.content)
+    for rel in (".zattrs", ".zgroup"):
+        _getfile(rel)
+    for d in datasets:                                                # every level's metadata (only L0 gets chunks)
+        _getfile(f"{d['path']}/.zarray")
+        _getfile(f"{d['path']}/.zattrs")
+
+    def _rng(a, b, c, n):
+        n_ch = (n + c - 1) // c
+        return range(max(0, a // c - halo_chunks), min(n_ch - 1, (b - 1) // c + halo_chunks) + 1)
+    if region is None:
+        rz, ry, rx = (range((Dz + cz - 1) // cz), range((Dy + cy - 1) // cy), range((Dx + cx - 1) // cx))
+    else:
+        z0, z1, y0, y1, x0, x1 = region
+        rz, ry, rx = _rng(z0, z1, cz, Dz), _rng(y0, y1, cy, Dy), _rng(x0, x1, cx, Dx)
+    key = (lambda i, j, k: f"{i}/{j}/{k}") if sep == "/" else (lambda i, j, k: f"{i}{sep}{j}{sep}{k}")
+    lines = [f"cp {s3_uri}/{l0}/{key(i, j, k)} {os.path.join(dst, l0, key(i, j, k))}"
+             for i in rz for j in ry for k in rx]
+    gb = len(lines) * cz * cy * cx / 1e9                              # uint8 upper bound (air chunks won't exist)
+    print(f"[pre-sync] {len(lines)} L0 chunks (±{halo_chunks} halo, ≤~{gb:.1f} GB) "
+          f"{'[anon]' if anon else '[signed]'} {s3_uri} -> {dst}", flush=True)
+    _s5cmd_presync_run(lines, anon=anon)
+    return dst
 
 
 def create_surface_zarr(path, shape, chunk, voxel_um, scroll, name, overwrite=True):

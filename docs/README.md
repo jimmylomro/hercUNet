@@ -170,9 +170,10 @@ local run. Defaults reproduce HercUNet v0 (overlap 0.25, 4 passes, final pass = 
 result beside you):
 
 ```bash
-hercunet infer single-instance --model-hf jimmylomro/hercunet-v0 --scroll PHerc1447 \
+hercunet infer single-instance --model-hf jimmylomro/hercunet-v0 PHerc1447 \
   --region 10889:11401,2848:3360,3915:4427 --out ./infer-demo --passes 3
 # -> ./infer-demo_pass2.zarr  (open in VC3D). Uses every visible GPU; add --keep-buffers to compare passes.
+# SOURCE is positional: a scroll id, or an s3://|https://|file:// .zarr URL (add --pre-sync-source to localise an s3 run).
 ```
 
 Full walk-through, the smoke-test recipe, and all flags are in **[infer.md](infer.md)**.

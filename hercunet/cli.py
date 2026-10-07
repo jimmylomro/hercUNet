@@ -463,15 +463,22 @@ def _add_infer_common(p: argparse.ArgumentParser) -> None:
                    help=f"download the model from a HuggingFace repo (public, no token); bare flag = HercUNet v0 "
                         f"({_MODEL_HF_REPO})")
     p.add_argument("--ckpt", default="checkpoint_best.pth", help="checkpoint filename within fold_0 (default best)")
-    # what to infer
-    p.add_argument("--scroll", required=True, help="scroll id / name (resolved against the data-layer catalog)")
+    # what to infer — a SINGLE positional CT source
+    p.add_argument("source", metavar="SOURCE",
+                   help="CT OME-Zarr source (positional): 's3://bucket/x.zarr' or 'https://…/x.zarr' (streamed), "
+                        "'file:///abs/x.zarr' or a local path (read locally — the fast NVMe/tmpfs path), or a bare "
+                        "scroll id like 'PHerc1447' (resolved via the data-layer catalog; the URL forms skip that "
+                        "bucket listing)")
     p.add_argument("--out", required=True, metavar="PREFIX",
                    help="output prefix — writes {PREFIX}_pass{p}.zarr (per-pass OME-Zarr surface-prob pyramids)")
     p.add_argument("--region", default=None, metavar="z0:z1,y0:y1,x0:x1",
-                   help="restrict to a sub-cube — the WHOLE scroll is inferred if omitted; use for a small smoke test")
-    p.add_argument("--local-vol", default=None, dest="local_vol", metavar="PATH",
-                   help="read a locally-downloaded copy of the scroll's OME-Zarr (fast NVMe/tmpfs) instead of "
-                        "streaming from S3 — I/O-bound → GPU-bound; results are byte-identical. Only L0 is needed")
+                   help="restrict to a sub-cube — the WHOLE volume is inferred if omitted; use for a small smoke test")
+    p.add_argument("--pre-sync-source", dest="pre_sync_source", nargs="?", const="<auto>", default=None,
+                   metavar="DIR",
+                   help="for an s3://|https:// SOURCE: region-download only the covering L0 chunks locally (s5cmd) "
+                        "and read from there — streaming becomes GPU-bound, without fetching the whole volume. Bare "
+                        "flag syncs next to --out; pass a DIR to choose where (use a POD-LOCAL dir for multi-instance). "
+                        "Ignored for a file://|local source")
     p.add_argument("--passes", type=int, default=4, help="Jacobi refinement passes (default 4; final pass = deliverable)")
     p.add_argument("--overlap", type=float, default=0.25,
                    help="window overlap for the Gaussian blend (default 0.25 = HercUNet v0); 0 = disjoint mode")
@@ -514,7 +521,8 @@ def _add_infer_common(p: argparse.ArgumentParser) -> None:
                    help="also save the affinity-head output of the FINAL pass to {PREFIX}_pass{last}_aff.zarr "
                         "(4-D (n_aff,Z,Y,X) uint8, aff=v/255 = same-sheet prob per offset). Requires the affinity "
                         "model (not --plain) and overlap>0. The shipped surface path skips the head; this re-enables "
-                        "it on the deliverable pass for the band-refinement probe")
+                        "it on the deliverable pass for the band-refinement probe. With --s3-prefix it uploads "
+                        "alongside the final pass as pass{last}_aff.zarr")
     p.add_argument("--reclaim", action="store_true", help="re-queue blocks/tiles orphaned by a crashed worker")
     p.add_argument("--claim-chunk", type=int, default=6, dest="claim_chunk",
                    help="claim-queue chunk size per steal (default 6)")
