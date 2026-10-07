@@ -510,17 +510,39 @@ def _add_infer_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--resume", action="store_true", help="skip passes already marked _complete")
     p.add_argument("--keep-buffers", action="store_true", dest="keep_buffers",
                    help="keep every pass buffer (default: prune to the last two)")
+    p.add_argument("--keep-affinity", action="store_true", dest="keep_affinity",
+                   help="also save the affinity-head output of the FINAL pass to {PREFIX}_pass{last}_aff.zarr "
+                        "(4-D (n_aff,Z,Y,X) uint8, aff=v/255 = same-sheet prob per offset). Requires the affinity "
+                        "model (not --plain) and overlap>0. The shipped surface path skips the head; this re-enables "
+                        "it on the deliverable pass for the band-refinement probe")
     p.add_argument("--reclaim", action="store_true", help="re-queue blocks/tiles orphaned by a crashed worker")
     p.add_argument("--claim-chunk", type=int, default=6, dest="claim_chunk",
                    help="claim-queue chunk size per steal (default 6)")
 
 
+def _infer_preflight(args: argparse.Namespace) -> None:
+    """Cross-flag warnings before dispatch. TTA + --keep-affinity: a mirror/rotate variant permutes the affinity
+    offset channels (channel c = same-sheet-ness of the pair (u, u+δ_c)), so averaging augmented forwards would
+    scramble the field. The engine therefore captures affinity TTA-FREE (identity forward only) — we warn so the
+    user knows the saved affinity does NOT reflect the TTA'd surface. (We recommend not using TTA with HercUNet
+    anyway.)"""
+    import sys
+    tta_on = str(getattr(args, "tta", "none")).strip().lower() not in ("", "none", "no", "off")
+    if tta_on and getattr(args, "keep_affinity", False):
+        print("hercunet infer: WARNING — --tta is set with --keep-affinity. TTA flips/rotations permute the "
+              "affinity offset channels, so the affinity head is captured TTA-FREE (identity forward only) and will "
+              "NOT reflect the TTA'd surface. (HercUNet is not recommended with TTA regardless.)",
+              file=sys.stderr, flush=True)
+
+
 def _infer_single(args: argparse.Namespace) -> None:
+    _infer_preflight(args)
     from .infer.run import single_instance
     single_instance(args)
 
 
 def _infer_multi(args: argparse.Namespace) -> None:
+    _infer_preflight(args)
     from .infer.run import multi_instance
     multi_instance(args)
 

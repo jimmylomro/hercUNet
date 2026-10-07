@@ -78,6 +78,74 @@ def load_affinity_net(model_folder, ckpt_name="checkpoint_best.pth", device="cud
     return net, cfg, lm, pm, dataset_json, num_in
 
 
+def load_affinity_net_with_head(model_folder, ckpt_name="checkpoint_best.pth", device="cuda",
+                                configuration="3d_fullres", n_orient=6):
+    """Load the FULL ``AffinityHeadNet`` (base nnU-Net + the affinity head) so inference can emit BOTH the surface
+    ``seg`` and the per-voxel ``aff`` field — unlike :func:`load_affinity_net`, which drops the head. Used only when
+    ``hercunet infer --keep-affinity`` is set (to materialise the affinity for the band-refinement probe).
+
+    The head is a parallel 1×1×1 branch off the last decoder feature map, so ``seg = base(x)`` is byte-identical to
+    the head-less load — the surface deliverable is unchanged. ``n_aff`` (the number of affinity offsets, 9 for
+    HercUNet v0) is read from the checkpoint's ``aff_head.weight`` so it can never drift from the trained head.
+    Returns the same tuple as :func:`load_affinity_net` plus ``n_aff``."""
+    import torch
+    from nnunetv2.utilities.plans_handling.plans_handler import PlansManager
+    from nnunetv2.utilities.get_network_from_plans import get_network_from_plans
+    from ..training.affinity import AffinityHeadNet
+
+    plans = json.load(open(os.path.join(model_folder, "plans.json")))
+    dataset_json = json.load(open(os.path.join(model_folder, "dataset.json")))
+    pm = PlansManager(plans)
+    cfg = pm.get_configuration(configuration)
+    lm = pm.get_label_manager(dataset_json)
+    num_in = 2 + int(n_orient)
+    base = get_network_from_plans(
+        cfg.network_arch_class_name, cfg.network_arch_init_kwargs,
+        cfg.network_arch_init_kwargs_req_import, num_in, lm.num_segmentation_heads,
+        allow_init=True, deep_supervision=False)
+    ckpt = torch.load(os.path.join(model_folder, "fold_0", ckpt_name), map_location="cpu", weights_only=False)
+    sd = ckpt["network_weights"]
+    if "aff_head.weight" not in sd:
+        raise SystemExit("hercunet infer --keep-affinity: this checkpoint has no affinity head "
+                         "(aff_head.* missing) — it is not an AffinityMalis/HercUNet model.")
+    n_aff = int(sd["aff_head.weight"].shape[0])
+    net = AffinityHeadNet(base, n_aff=n_aff)
+    net.return_aff = True
+    missing, unexpected = net.load_state_dict(sd, strict=False)
+    assert not missing and not unexpected, f"affinity full-net mismatch: missing={missing[:4]} unexpected={unexpected[:4]}"
+    net.eval().to(device)
+    print(f"[load-affinity+head] AffinityHeadNet {num_in}ch, n_aff={n_aff}, ep={ckpt.get('current_epoch')}", flush=True)
+    return net, cfg, lm, pm, dataset_json, num_in, n_aff
+
+
+def create_affinity_zarr(path, n_aff, shape, chunk, voxel_um, offsets, pass_idx, overwrite=True):
+    """Create a 4-D ``(n_aff, Z, Y, X)`` uint8 zarr for the affinity field (``aff = v/255``; v=0 where no window
+    covered). Chunked ``(n_aff, chunk, chunk, chunk)`` so each blend tile (chunk-aligned, full-channel) writes
+    disjoint chunks — multi-instance stays race-free, same guarantee as the surface buffer. The offset table
+    (channel → ``(dz,dy,dx)`` and its µm span) and voxel size are recorded in the attrs so the band solve knows
+    exactly what each channel means. ``overwrite=False`` opens an existing one in place (resume/multi follower)."""
+    import zarr
+    if not overwrite and os.path.exists(os.path.join(path, "0")):
+        return zarr.open_group(path, mode="r+")["0"]
+    if os.path.exists(path):
+        import shutil
+        shutil.rmtree(path)
+    Dz, Dy, Dx = (int(s) for s in shape)
+    ch, C = int(chunk), int(n_aff)
+    root = zarr.open_group(path, mode="w")
+    arr = root.create_dataset("0", shape=(C, Dz, Dy, Dx), chunks=(C, ch, ch, ch), dtype="uint8", fill_value=0)
+    attrs = {
+        "content": "hercunet_affinity",
+        "encoding": "uint8; aff = v/255 = predicted same-sheet probability of the ordered pair (u, u+offset)",
+        "offsets": [[int(d) for d in o] for o in offsets],
+        "offsets_um": [[round(float(d) * float(voxel_um), 3) for d in o] for o in offsets],
+        "voxelsize": float(voxel_um), "pass": int(pass_idx), "n_aff": C,
+    }
+    root.attrs.update(attrs)
+    arr.attrs.update(attrs)
+    return root["0"]
+
+
 def ct_norm_params(model_folder, channel="0"):
     """CTNormalization params for a channel from the dataset fingerprint: (clip_lo, clip_hi, mean, std)."""
     fp = json.load(open(os.path.join(model_folder, "dataset_fingerprint.json")))
