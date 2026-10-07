@@ -666,9 +666,12 @@ def jacobi_refine(source, model, out_prefix, passes=3, ckpt="checkpoint_best.pth
 
         # open/create the pass zarr — single: this proc; multi: ONE elected leader creates, the rest attach r+.
         # (create_surface_zarr opens-in-place when it already exists, so a resume never clobbers L0.)
-        name = f"{label}-{tag}-p{p}"
+        # VC3D volume name/uuid come from the OUTPUT prefix (distinctive per run), NOT the source CT basename —
+        # a name that embeds the raw CT volume's name collides with the CT volume VC3D already has loaded, so the
+        # prediction won't show as a separate attachable volume.
+        vol_name = f"{tag}-p{p}"
         if not multi or leader:
-            cur = NI.create_surface_zarr(cur_path, shape, chunk, vx, label, name, overwrite=not resume)
+            cur = NI.create_surface_zarr(cur_path, shape, chunk, vx, tag, vol_name, overwrite=not resume)
             if multi:
                 open(os.path.join(donedir, "_created"), "w").close()   # signal followers the zarr is ready
         else:

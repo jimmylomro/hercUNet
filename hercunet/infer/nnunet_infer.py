@@ -593,8 +593,9 @@ def create_surface_zarr(path, shape, chunk, voxel_um, scroll, name, overwrite=Tr
         "axes": [{"name": a, "type": "space"} for a in ("z", "y", "x")],
         "datasets": [{"path": "0", "coordinateTransformations": [{"type": "scale", "scale": [1.0, 1.0, 1.0]}]}],
         "type": "local max"}]
+    uuid = str(name) if str(name).startswith(str(scroll)) else f"{scroll}-{name}"   # avoid doubling the prefix
     meta = {"height": Dy, "width": Dx, "slices": Dz, "min": 0.0, "max": 255.0,
-            "name": name, "type": "vol", "uuid": f"{scroll}-{name}", "voxelsize": float(voxel_um),
+            "name": name, "type": "vol", "uuid": uuid, "voxelsize": float(voxel_um),
             "format": "zarr"}
     with open(os.path.join(path, "meta.json"), "w") as f:
         json.dump(meta, f)
