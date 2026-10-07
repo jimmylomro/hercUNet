@@ -71,10 +71,41 @@ The published HercUNet v0 model is **public on Hugging Face** (no token):
 
 ---
 
+## The CT source (positional `SOURCE`)
+
+Inference takes the CT volume as a **single positional argument** — there is no `--scroll` flag and no implicit
+bucket listing unless you ask for one:
+
+| `SOURCE` | How it is read |
+|---|---|
+| `s3://bucket/key.zarr` | **streamed** over HTTPS range reads — no bucket listing |
+| `https://…/x.zarr` | **streamed** (already an endpoint) |
+| `file:///abs/x.zarr` or a local path / `*.zarr` | **read locally** (fast NVMe/tmpfs → GPU-bound) |
+| `PHerc1447` (a bare scroll id) | resolved through the data-layer **catalog** (this lists the open-data bucket to find the finest aligned volume; the URL forms above skip that) |
+
+**Remote → local, automatically — `--pre-sync-source`.** Streaming a scroll chunk-by-chunk from S3 is latency-bound
+and slow (a single slab can take hours). For an `s3://` / `https://` source, add **`--pre-sync-source`** and the run
+**region-downloads only the L0 chunks covering `--region`** (plus a small halo for the patch overshoot) to a local
+copy with `s5cmd`, then reads from there — turning the run GPU-bound **without fetching the whole (hundreds-of-GB)
+volume**. zarr serves any not-downloaded (air) chunk as its fill value, so a region-only copy is exact for the
+region you compute.
+
+- **Streaming is anonymous HTTPS** (the reader does not sign requests) — fine for the public open-data bucket; a
+  streamed run prints a **warning** recommending `--pre-sync-source`, because per-chunk reads are latency-bound and
+  usually dominate runtime. (A private bucket cannot be streamed; localise it with `--pre-sync-source`, which uses
+  your AWS creds.)
+- Bare `--pre-sync-source` syncs next to `--out`; `--pre-sync-source /mnt/nvme/ct` chooses the dir (the copy keeps
+  the source zarr's basename so its voxel-size name token survives).
+- The public open-data bucket is fetched **anonymously**; a private bucket uses your AWS env creds.
+- It is **ignored** for a `file://` / local source (already local), and needs `s5cmd` (bundled in the `[infer]`
+  extra). With no `--region` it syncs the **whole** L0.
+- For **multi-instance** across pods, pass an explicit **pod-local** dir so each pod syncs its own copy — do not
+  point it at the shared `--out` volume.
+
 ## Simplest run (local, nothing else needed)
 
 No local data, no S3, no config — pull the model from Hugging Face, stream a small PHerc1447 window straight from
-the open-data bucket, and write the result beside you:
+the open-data bucket (the `PHerc1447` catalog form), and write the result beside you:
 
 ```bash
 # install (needs an NVIDIA GPU) — pick one:
@@ -83,12 +114,14 @@ python -m venv .venv && . .venv/bin/activate && pip install ".[infer]"   # venv
 
 hercunet infer single-instance \
   --model-hf jimmylomro/hercunet-v0 \
-  --scroll PHerc1447 \
+  PHerc1447 \
   --region 10889:11401,2848:3360,3915:4427 \
   --out ./infer-demo --passes 3
 ```
 
-- **`--region`** is a ~5 mm cube (fast); drop it to run the whole scroll (see the storage warning above).
+- **`SOURCE`** here is the bare scroll id `PHerc1447`; for a fast slab prefer the direct zarr URL + `--pre-sync-source`
+  (see above and the full-scroll section).
+- **`--region`** is a ~5 mm cube (fast); drop it to run the whole volume (see the storage warning above).
 - Writes **`./infer-demo_pass2.zarr`** — the last pass is the deliverable; open it in VC3D.
 - Uses **every visible GPU** automatically. Add **`--keep-buffers`** to keep all three passes and watch the
   iteration improve pass-to-pass, or **`--s3-prefix s3://…`** to upload instead of keeping it local.
@@ -106,13 +139,17 @@ the local filesystem. You run **one command**; you don't launch a process per GP
 ```bash
 hercunet infer single-instance \
   --model-hf jimmylomro/hercunet-v0 \
-  --scroll PHerc1447 \
+  s3://vesuvius-challenge-open-data/PHerc1447/volumes/20250521151220-8.640um-1.2m-116keV-masked.zarr \
+  --pre-sync-source \             # region-download the L0 chunks locally first → GPU-bound (not S3-bound)
+  --region 5300:5600,2820:5508,1920:4448 \
   --out /workspace/preds/1447_run301 \
   --passes 4                      # → /workspace/preds/1447_run301_pass{0..3}.zarr
 ```
 
 - `--gpus all` (default) uses every visible GPU; `--gpus 0,1` restricts. With a single GPU it runs in-process
   (no claim-queue overhead).
+- The `SOURCE` here is the direct S3 zarr URL (no bucket listing); `--pre-sync-source` makes the slab read from a
+  local copy. Drop `--pre-sync-source` to stream (slow), or pass `PHerc1447` to let the catalog pick the volume.
 
 ### `hercunet infer multi-instance` — many pods
 
@@ -124,16 +161,19 @@ leader (it creates each pass's zarr, builds the pyramid, uploads).
 ```bash
 # on the LEADER pod:
 hercunet infer multi-instance --leader --model-hf jimmylomro/hercunet-v0 \
-  --scroll PHerc1447 --out /mnt/shared/preds/1447_run301 --passes 4 --s3-prefix s3://…/1447
+  s3://vesuvius-challenge-open-data/PHerc1447/volumes/20250521151220-8.640um-1.2m-116keV-masked.zarr \
+  --out /mnt/shared/preds/1447_run301 --passes 4 --s3-prefix s3://…/1447
 
 # on every FOLLOWER pod (same command, no --leader):
 hercunet infer multi-instance          --model-hf jimmylomro/hercunet-v0 \
-  --scroll PHerc1447 --out /mnt/shared/preds/1447_run301 --passes 4
+  s3://vesuvius-challenge-open-data/PHerc1447/volumes/20250521151220-8.640um-1.2m-116keV-masked.zarr \
+  --out /mnt/shared/preds/1447_run301 --passes 4
 ```
 
 Workers steal work dynamically (a faster GPU does more); a hard barrier between passes guarantees pass *p* is
 fully written before pass *p+1* reads it. `--reclaim` re-queues work orphaned by a crashed worker. Extra pods can
-join mid-run.
+join mid-run. The `SOURCE` is positional (same on every pod); to go local, give each pod a **pod-local**
+`--pre-sync-source /local/dir` (each pod syncs its own copy — never the shared `--out` volume).
 
 ---
 
@@ -144,7 +184,7 @@ computed). Good for a first check on a fresh pod:
 
 ```bash
 hercunet infer single-instance --model-hf jimmylomro/hercunet-v0 \
-  --scroll PHerc1447 --region 6000:6384,3000:3384,3000:3384 \
+  PHerc1447 --region 6000:6384,3000:3384,3000:3384 \
   --out /workspace/preds/smoke --passes 2 --keep-buffers --finalise all
 ```
 
@@ -207,16 +247,16 @@ interrupted multi-pass run continues from where it stopped without recomputing f
 
 | Flag | Default | Meaning |
 |---|---|---|
+| `SOURCE` (positional) | (required) | CT OME-Zarr: `s3://…zarr` / `https://…zarr` (streamed), `file://…zarr` or a local path (read locally), or a bare scroll id (catalog lookup) |
 | `--model-hf [REPO]` | `jimmylomro/hercunet-v0` | download the model from HF (public); bare flag = HercUNet v0 |
 | `--model DIR` | — | use a local model folder instead |
-| `--scroll` | (required) | scroll id / name (resolved against the data-layer catalog) |
 | `--out PREFIX` | (required) | writes `{PREFIX}_pass{p}.zarr` |
+| `--pre-sync-source [DIR]` | — | for an `s3://`/`https://` SOURCE: region-download the covering L0 chunks locally (s5cmd) and read from there (→ GPU-bound). Bare = sync next to `--out`; `DIR` = choose where. Ignored for a local source |
 | `--passes N` | `4` | Jacobi passes; final pass = deliverable |
 | `--overlap f` | `0.25` | Gaussian-blend window overlap (HercUNet v0); `0` = disjoint raw-write mode |
 | `--tta none\|all\|mirror\|rotate\|z,y,x` | `none` | test-time augmentation per window (villa-style, logit average); N variants → N× forwards |
 | `--tta-passes all\|last\|no\|2,3` | `all` | which passes get TTA (same grammar as `--finalise`); ignored when `--tta none` |
-| `--region z0:z1,y0:y1,x0:x1` | **whole scroll** | restrict to a sub-cube (smoke tests); omit to infer the entire volume |
-| `--local-vol PATH` | — | read a local OME-Zarr copy instead of streaming S3 (I/O-bound → GPU-bound; byte-identical) |
+| `--region z0:z1,y0:y1,x0:x1` | **whole volume** | restrict to a sub-cube (smoke tests); omit to infer the entire volume |
 | `--gpus all\|0,1,3` | `all` | local GPUs to use (one worker process each) |
 | `--leader` | (multi only) | this pod creates/finalises/uploads — exactly one pod |
 | `--plain` | off | 2-channel `[CT, prev]` model instead of the 8-channel affinity model |
@@ -227,8 +267,11 @@ interrupted multi-pass run continues from where it stopped without recomputing f
 | `--finalise last\|all\|no\|0,2,3` | `last` | which passes get an OME-Zarr pyramid (default: only the last/deliverable) |
 | `--resume` | off | skip passes already `_complete` |
 | `--keep-buffers` | off | keep every pass buffer (default prunes to the last two) — ⚠️ `passes ×` a ~500 GB buffer |
+| `--keep-affinity` | off | also save (and, with `--s3-prefix`, upload) the affinity head of the final pass as `{PREFIX}_pass{last}_aff.zarr` (4-D `(n_aff,Z,Y,X)` uint8); needs the affinity model + `overlap>0` |
 | `--reclaim` | off | re-queue work orphaned by a crashed worker |
 
-**Local volume shortcut:** pass `--local-vol /path/to/scroll.zarr` to read a locally-downloaded copy of the scroll
-instead of streaming from S3 — turns an I/O-bound run into a GPU-bound one (decompressed chunks are byte-identical,
-so results match the S3 path exactly). Only L0 need be downloaded.
+**Going local (fast):** the old `--local-vol` flag is gone — pass the local copy **as the positional `SOURCE`**
+(`file:///path/x.zarr` or just the path). To localise an `s3://` run without pre-downloading by hand, add
+`--pre-sync-source`: it region-downloads the covering L0 chunks with `s5cmd` and reads from the copy (decompressed
+chunks are byte-identical, so results match the streamed path exactly). Only L0 is fetched, and only the chunks the
+`--region` touches. See **[The CT source](#the-ct-source-positional-source)** above.

@@ -530,12 +530,12 @@ def _resolve_pass_spec(spec, passes, flag="--finalise"):
     return out
 
 
-def jacobi_refine(scroll, model, out_prefix, passes=3, ckpt="checkpoint_best.pth", device="cuda",
+def jacobi_refine(source, model, out_prefix, passes=3, ckpt="checkpoint_best.pth", device="cuda",
                   air=25, region=None, keep_buffers=False, finalise="last", resume=False, batch=4, nb=4,
                   s3_prefix=None, upload="last", multi=False, reclaim=False, claim_chunk=6, leader=False,
-                  affinity=True, n_orient=6, overlap=0.25, readahead=2, prefetch_workers=3, local_vol=None,
+                  affinity=True, n_orient=6, overlap=0.25, readahead=2, prefetch_workers=3,
                   tta="none", tta_passes="all", keep_affinity=False):
-    """Run ``passes`` double-buffered Jacobi refinement passes over ``scroll`` and write per-pass surface-prob
+    """Run ``passes`` double-buffered Jacobi refinement passes over ``source`` and write per-pass surface-prob
     OME-Zarrs ``{out_prefix}_pass{p}.zarr``. Returns the final pass path.
 
     pass 0: aligned grid, prev = 0 (bootstrap). pass p>0: grid shifted (all axes) on odd p, reads pass p-1.
@@ -584,11 +584,12 @@ def jacobi_refine(scroll, model, out_prefix, passes=3, ckpt="checkpoint_best.pth
         print(f"[jacobi] OVERLAP mode: stride S={S} (overlap {1 - S / P:.2f}), tile T={Tt}, "
               f"inter-pass shift {S // 2} (centres land on prev overlap-centres)", flush=True)
     ctnorm = NI.ct_norm_params(model)
-    vol = NI.open_scroll(scroll, local_vol=local_vol)
+    vol = NI.open_source(source)
+    label = NI.source_label(source)
     shape = tuple(int(v) for v in vol.meta.level_shapes[0])
     vx = float(vol.meta.voxel_size_um)
     region_full = tuple(region) if region else (0, shape[0], 0, shape[1], 0, shape[2])
-    print(f"[jacobi] {scroll} L0={shape} P={P} chunk={chunk} passes={passes} region={region_full} batch={batch} nb={nb}",
+    print(f"[jacobi] {label} L0={shape} P={P} chunk={chunk} passes={passes} region={region_full} batch={batch} nb={nb}",
           flush=True)
 
     # ---- STORAGE WARNING: each pass writes a full-resolution uint8 surface-prob buffer. For a whole scroll that
@@ -641,9 +642,9 @@ def jacobi_refine(scroll, model, out_prefix, passes=3, ckpt="checkpoint_best.pth
 
         # open/create the pass zarr — single: this proc; multi: ONE elected leader creates, the rest attach r+.
         # (create_surface_zarr opens-in-place when it already exists, so a resume never clobbers L0.)
-        name = f"{scroll}-{tag}-p{p}"
+        name = f"{label}-{tag}-p{p}"
         if not multi or leader:
-            cur = NI.create_surface_zarr(cur_path, shape, chunk, vx, scroll, name, overwrite=not resume)
+            cur = NI.create_surface_zarr(cur_path, shape, chunk, vx, label, name, overwrite=not resume)
             if multi:
                 open(os.path.join(donedir, "_created"), "w").close()   # signal followers the zarr is ready
         else:
@@ -705,6 +706,19 @@ def jacobi_refine(scroll, model, out_prefix, passes=3, ckpt="checkpoint_best.pth
                     print(f"[jacobi] pass {pp} finalise FAILED: {e}", flush=True)
                 else:
                     _up("pyramid")                                     # re-upload: sync adds only levels 1-5 + attrs
+
+            # --keep-affinity: ship the 4-D affinity zarr alongside the deliverable (whole-tree cp; no pyramid — it
+            # is a 4-D analysis field, not a VC3D volume). ``uri`` is truthy only when this pass is in --upload, so
+            # this gates on the same s3_prefix + upload_set; it exists only on the final pass.
+            if keep_affinity and uri and pp == passes - 1:
+                aff_lp = f"{out_prefix}_pass{pp}_aff.zarr"
+                aff_uri = f"{s3_prefix.rstrip('/')}/pass{pp}_aff.zarr"
+                if os.path.isdir(aff_lp):
+                    try:
+                        NI.upload_zarr_to_s3(aff_lp, aff_uri, incremental=False)   # same throttled streaming logs
+                        print(f"[jacobi] PASS {pp} AFFINITY ON S3 — {NI.s3_to_https(aff_uri)}", flush=True)
+                    except Exception as e:
+                        print(f"[jacobi] pass {pp} affinity upload FAILED: {e}", flush=True)
 
         if multi:
             nbk = (len(pass_blend_tiles(shape, P, S, offset, region_full, Tt)) if blend

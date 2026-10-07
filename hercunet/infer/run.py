@@ -119,14 +119,38 @@ def _run(model_dir, gpus, multi, is_leader_node, jargs):
     print(f"[infer] all {len(gpus)} workers finished", flush=True)
 
 
-def _common_jargs(a, region):
-    """The jacobi_refine kwargs shared by both modes, read off the parsed CLI args ``a``."""
+def _maybe_presync(a, region):
+    """Resolve the final CT source. With ``--pre-sync-source`` on an ``s3://`` / ``https://`` source, region-download
+    only the covering L0 chunks to a local copy (s5cmd) and return that local path, so the engine reads locally
+    (GPU-bound). A ``file://`` / local source is already local — nothing to sync. The default sync dir sits next to
+    ``--out``; for multi-instance across pods pass an explicit POD-LOCAL dir so pods don't race on one copy."""
+    src = a.source
+    remote = src.startswith(("s3://", "http://", "https://"))
+    if a.pre_sync_source is None:
+        if remote:
+            print("[infer] WARNING: streaming the CT directly from a remote store. Per-chunk HTTPS reads are "
+                  "latency-bound and typically dominate runtime — a single slab can take hours. For a fast, "
+                  "GPU-bound run, re-invoke with --pre-sync-source to region-download the CT locally first.",
+                  flush=True)
+        return src
+    if not remote:
+        print(f"[infer] --pre-sync-source ignored: source {src!r} is already local", flush=True)
+        return src
+    from .nnunet_infer import presync_region
+    dst_dir = (a.pre_sync_source if a.pre_sync_source != "<auto>"
+               else os.path.join(os.path.dirname(os.path.abspath(a.out)) or ".", "_ctsync"))
+    return presync_region(src, region, dst_dir)
+
+
+def _common_jargs(a, region, source):
+    """The jacobi_refine kwargs shared by both modes, read off the parsed CLI args ``a`` (``source`` already
+    resolved by :func:`_maybe_presync`)."""
     return dict(
-        scroll=a.scroll, out_prefix=a.out, passes=a.passes, ckpt=a.ckpt, air=a.air,
+        source=source, out_prefix=a.out, passes=a.passes, ckpt=a.ckpt, air=a.air,
         region=region, keep_buffers=a.keep_buffers, finalise=a.finalise, resume=a.resume,
         batch=a.batch, nb=a.nb, s3_prefix=a.s3_prefix, upload=a.upload, reclaim=a.reclaim, claim_chunk=a.claim_chunk,
         affinity=not a.plain, n_orient=a.n_orient, overlap=a.overlap,
-        readahead=a.readahead, prefetch_workers=a.prefetch_workers, local_vol=a.local_vol,
+        readahead=a.readahead, prefetch_workers=a.prefetch_workers,
         tta=a.tta, tta_passes=a.tta_passes, keep_affinity=a.keep_affinity,
     )
 
@@ -137,8 +161,9 @@ def single_instance(a):
     model_dir = resolve_model(a.model, a.model_hf)
     gpus = resolve_gpus(a.gpus)
     region = parse_region(a.region)
-    print(f"[infer] single-instance: {len(gpus)} GPU(s) {gpus}, model={model_dir}", flush=True)
-    _run(model_dir, gpus, multi=(len(gpus) > 1), is_leader_node=True, jargs=_common_jargs(a, region))
+    source = _maybe_presync(a, region)
+    print(f"[infer] single-instance: {len(gpus)} GPU(s) {gpus}, model={model_dir}, source={source}", flush=True)
+    _run(model_dir, gpus, multi=(len(gpus) > 1), is_leader_node=True, jargs=_common_jargs(a, region, source))
 
 
 def multi_instance(a):
@@ -147,6 +172,7 @@ def multi_instance(a):
     model_dir = resolve_model(a.model, a.model_hf)
     gpus = resolve_gpus(a.gpus)
     region = parse_region(a.region)
-    print(f"[infer] multi-instance: {len(gpus)} local GPU(s) {gpus}, leader-node={a.leader}, model={model_dir}",
-          flush=True)
-    _run(model_dir, gpus, multi=True, is_leader_node=a.leader, jargs=_common_jargs(a, region))
+    source = _maybe_presync(a, region)
+    print(f"[infer] multi-instance: {len(gpus)} local GPU(s) {gpus}, leader-node={a.leader}, model={model_dir}, "
+          f"source={source}", flush=True)
+    _run(model_dir, gpus, multi=True, is_leader_node=a.leader, jargs=_common_jargs(a, region, source))
