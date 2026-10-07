@@ -284,10 +284,16 @@ class ZarrSegment(SegmentVolume):
                 # Retries exhausted on a 403/404: zero-fill THIS read but do NOT cache it, so a genuinely
                 # air chunk stays cheap yet a transient throttle re-fetches next time (never poisons the cache).
                 return sp, np.full((az1 - az0, ay1 - ay0, ax1 - ax0), fill, dtype=arr.dtype)
-            try:
-                cache.put(self.source_id, key, ch)                  # cache real data only
-            except Exception:
-                pass
+            # Do NOT cache an all-``fill`` chunk. On S3 a missing chunk raises 403/404 (handled above), but a LOCAL
+            # zarr serves a missing chunk as ``fill`` with NO error — so an incomplete/earlier read would otherwise
+            # cache those zeros as "real" data and poison every later read of this source_id even after the chunk is
+            # present (e.g. a region pre-sync that ran after a partial one). Air chunks are cheap to re-serve as fill,
+            # so skipping the cache for them costs nothing and keeps the cache honest.
+            if not (ch.size and ch.min() == fill and ch.max() == fill):
+                try:
+                    cache.put(self.source_id, key, ch)              # cache real (non-fill) data only
+                except Exception:
+                    pass
             return sp, ch
 
         for sp, ch in _read_pool().map(fetch, spans):

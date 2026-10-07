@@ -421,15 +421,26 @@ def _s5cmd_presync_run(lines, anon=False, workers=256, poll=5.0):
     ``air-miss`` and never aborts. Needs the s5cmd binary (the ``[infer]`` extra installs it)."""
     import json as _json
     import subprocess
+    import tempfile
     import time
     s5 = _s5cmd_bin()
     if s5 is None:
         raise SystemExit("--pre-sync-source needs the s5cmd binary (install the [infer] extra).")
-    argv = [s5, "--json"] + (["--no-sign-request"] if anon else []) + ["--numworkers", str(workers), "run"]
-    proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    # Pass the command list as a FILE, not via stdin: piping tens of thousands of commands into stdin while
+    # concurrently draining stdout deadlocks once both OS pipe buffers fill (s5cmd blocks writing JSON, we block
+    # writing commands). ``s5cmd run <file>`` avoids the stdin pipe entirely.
+    cmdf = tempfile.NamedTemporaryFile("w", suffix=".s5cmds", delete=False)
+    cmdf.write("\n".join(lines) + "\n")
+    cmdf.close()
+    argv = [s5, "--json"] + (["--no-sign-request"] if anon else []) + ["--numworkers", str(workers), "run", cmdf.name]
+    # Strip AWS_REGION so s5cmd AUTO-DETECTS the SOURCE bucket's region: it may differ from the OUTPUT bucket's
+    # (e.g. the open-data bucket is us-east-1 while results upload to an eu-west-1 bucket), and a forced wrong
+    # region fails every read with a 301 BucketRegionError. The upload/preflight paths set their own region.
+    env = os.environ.copy()
+    env.pop("AWS_REGION", None)
+    env.pop("AWS_DEFAULT_REGION", None)
+    proc = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, bufsize=1)
-    proc.stdin.write("\n".join(lines) + "\n")
-    proc.stdin.close()
     total, done, miss = len(lines), 0, 0
     t0 = last = time.time()
     for line in proc.stdout:
@@ -452,6 +463,10 @@ def _s5cmd_presync_run(lines, anon=False, workers=256, poll=5.0):
                   f"{seen / max(now - t0, 1e-9):.0f}/s", flush=True)
             last = now
     proc.wait()
+    try:
+        os.unlink(cmdf.name)
+    except OSError:
+        pass
     print(f"[pre-sync] fetched {done} chunks, {miss} absent (air) of {total} in {time.time() - t0:.0f}s", flush=True)
 
 
@@ -520,7 +535,29 @@ def presync_region(source, region, dst_dir, halo_chunks=2, anon=None):
     gb = len(lines) * cz * cy * cx / 1e9                              # uint8 upper bound (air chunks won't exist)
     print(f"[pre-sync] {len(lines)} L0 chunks (±{halo_chunks} halo, ≤~{gb:.1f} GB) "
           f"{'[anon]' if anon else '[signed]'} {s3_uri} -> {dst}", flush=True)
-    _s5cmd_presync_run(lines, anon=anon)
+    # Disk-based progress watcher: s5cmd buffers its --json stream for large runs, so the event-driven counter in
+    # _s5cmd_presync_run can stay silent for minutes; this ticks off the files actually on disk, independently.
+    import threading
+    import time as _time
+    l0dir = os.path.join(dst, l0)
+    stop = threading.Event()
+    t0 = _time.time()
+
+    def _watch():
+        while not stop.wait(10.0):
+            try:
+                n = sum(len(fs) for _, _, fs in os.walk(l0dir))
+            except OSError:
+                n = 0
+            print(f"[pre-sync] ~{n}/{len(lines)} chunks on disk ({100 * n // max(len(lines), 1)}%) "
+                  f"{int(_time.time() - t0)}s", flush=True)
+
+    watcher = threading.Thread(target=_watch, daemon=True)
+    watcher.start()
+    try:
+        _s5cmd_presync_run(lines, anon=anon)
+    finally:
+        stop.set()
     return dst
 
 
