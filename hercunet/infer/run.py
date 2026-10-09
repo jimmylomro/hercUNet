@@ -139,14 +139,14 @@ def _maybe_presync(a, region):
     from .nnunet_infer import presync_region
     dst_dir = (a.pre_sync_source if a.pre_sync_source != "<auto>"
                else os.path.join(os.path.dirname(os.path.abspath(a.out)) or ".", "_ctsync"))
-    return presync_region(src, region, dst_dir)
+    return presync_region(src, region, dst_dir, level=int(getattr(a, "level", 0)))
 
 
 def _common_jargs(a, region, source):
     """The jacobi_refine kwargs shared by both modes, read off the parsed CLI args ``a`` (``source`` already
     resolved by :func:`_maybe_presync`)."""
     return dict(
-        source=source, out_prefix=a.out, passes=a.passes, ckpt=a.ckpt, air=a.air,
+        source=source, out_prefix=a.out, passes=a.passes, ckpt=a.ckpt, air=a.air, level=int(getattr(a, "level", 0)),
         region=region, keep_buffers=a.keep_buffers, finalise=a.finalise, resume=a.resume,
         batch=a.batch, nb=a.nb, s3_prefix=a.s3_prefix, upload=a.upload, reclaim=a.reclaim, claim_chunk=a.claim_chunk,
         affinity=not a.plain, n_orient=a.n_orient, overlap=a.overlap,

@@ -482,14 +482,16 @@ def _s5cmd_presync_run(lines, anon=False, workers=256, poll=5.0):
     print(f"[pre-sync] fetched {done} chunks, {miss} absent (air) of {total} in {_hms(time.time() - t0)}", flush=True)
 
 
-def presync_region(source, region, dst_dir, halo_chunks=2, anon=None):
-    """Download ONLY the L0 chunks covering ``region`` (+ a ``halo_chunks`` halo for the patch overshoot past the
-    region edges) of a remote OME-Zarr to a local copy, and return the local ``.zarr`` path. This is what
-    ``--pre-sync-source`` does for an ``s3://`` / ``https://`` source: it turns a per-chunk S3-streaming run into a
-    GPU-bound local-read run without fetching the whole (hundreds-of-GB) volume. zarr serves any not-downloaded
-    (air) chunk as ``fill_value``, so a region-only copy is exact as long as only that region is computed.
+def presync_region(source, region, dst_dir, halo_chunks=2, anon=None, level=0):
+    """Download ONLY the chunks covering ``region`` at pyramid ``level`` (+ a ``halo_chunks`` halo for the patch
+    overshoot past the region edges) of a remote OME-Zarr to a local copy, and return the local ``.zarr`` path. This
+    is what ``--pre-sync-source`` does for an ``s3://`` / ``https://`` source: it turns a per-chunk S3-streaming run
+    into a GPU-bound local-read run without fetching the whole (hundreds-of-GB) volume. zarr serves any
+    not-downloaded (air) chunk as ``fill_value``, so a region-only copy is exact as long as only that region is
+    computed. Only ``level``'s chunks are fetched (every level's metadata is copied so the store stays a valid
+    multiscale); the engine reads that same ``level``, so this matches ``--level``.
 
-    ``region`` = ``(z0,z1,y0,y1,x0,x1)`` in L0 voxels, or ``None`` = the whole L0 (the full-volume case — big).
+    ``region`` = ``(z0,z1,y0,y1,x0,x1)`` in ``level``'s voxels, or ``None`` = the whole level (the full-volume case).
     ``dst_dir`` = parent dir for the copy; the copy keeps the source zarr's **basename** so the voxel-size name
     token survives (``parse_voxel_um``). ``anon`` forces ``--no-sign-request``; ``None`` = auto (anon for the public
     open-data bucket, signed — env creds — otherwise)."""
@@ -510,7 +512,10 @@ def presync_region(source, region, dst_dir, halo_chunks=2, anon=None):
 
     za = requests.get(f"{https}/.zattrs", timeout=30)
     datasets = _json.loads(za.text)["multiscales"][0]["datasets"] if za.ok else [{"path": "0"}]
-    l0 = datasets[0]["path"]
+    level = int(level)
+    if not (0 <= level < len(datasets)):
+        raise SystemExit(f"--pre-sync-source --level {level}: source has levels 0..{len(datasets) - 1} only.")
+    l0 = datasets[level]["path"]                                       # the level we fetch chunks for (== --level)
     zarray = _json.loads(requests.get(f"{https}/{l0}/.zarray", timeout=30).text)
     cz, cy, cx = zarray["chunks"]
     Dz, Dy, Dx = zarray["shape"]
@@ -545,7 +550,7 @@ def presync_region(source, region, dst_dir, halo_chunks=2, anon=None):
     lines = [f"cp {s3_uri}/{l0}/{key(i, j, k)} {os.path.join(dst, l0, key(i, j, k))}"
              for i in rz for j in ry for k in rx]
     gb = len(lines) * cz * cy * cx / 1e9                              # uint8 upper bound (air chunks won't exist)
-    print(f"[pre-sync] {len(lines)} L0 chunks (±{halo_chunks} halo, ≤~{gb:.1f} GB) "
+    print(f"[pre-sync] {len(lines)} level-{level} chunks (path {l0!r}, ±{halo_chunks} halo, ≤~{gb:.1f} GB) "
           f"{'[anon]' if anon else '[signed]'} {s3_uri} -> {dst}", flush=True)
     # Disk-based progress watcher: s5cmd buffers its --json stream for large runs, so the event-driven counter in
     # _s5cmd_presync_run can stay silent for minutes; this ticks off the files actually on disk, independently.
