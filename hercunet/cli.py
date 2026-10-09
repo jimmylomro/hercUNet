@@ -526,7 +526,10 @@ def _add_infer_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--upload", default="last", metavar="last|all|no|0,2,3",
                    help="which passes to upload to --s3-prefix (same grammar as --finalise): 'last' (default), "
                         "'all', 'no', or a pass-index list like '0,2,3'. Ignored without --s3-prefix")
-    p.add_argument("--resume", action="store_true", help="skip passes already marked _complete")
+    p.add_argument("--resume", action="store_true",
+                   help="continue an interrupted run: skip passes already marked _complete, and re-queue tiles "
+                        "orphaned by killed workers (a stale .claim with no .done) so they aren't skipped. (A fresh "
+                        "worker joining a LIVE multi-instance job omits --resume, so it won't disturb others' claims.)")
     p.add_argument("--keep-buffers", action="store_true", dest="keep_buffers",
                    help="keep every pass buffer (default: prune to the last two)")
     p.add_argument("--keep-affinity", action="store_true", dest="keep_affinity",
@@ -535,7 +538,6 @@ def _add_infer_common(p: argparse.ArgumentParser) -> None:
                         "model (not --plain) and overlap>0. The shipped surface path skips the head; this re-enables "
                         "it on the deliverable pass for the band-refinement probe. With --s3-prefix it uploads "
                         "alongside the final pass as pass{last}_aff.zarr")
-    p.add_argument("--reclaim", action="store_true", help="re-queue blocks/tiles orphaned by a crashed worker")
     p.add_argument("--claim-chunk", type=int, default=6, dest="claim_chunk",
                    help="claim-queue chunk size per steal (default 6)")
 
