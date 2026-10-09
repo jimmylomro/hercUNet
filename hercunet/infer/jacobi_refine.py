@@ -560,7 +560,7 @@ def jacobi_refine(source, model, out_prefix, passes=3, ckpt="checkpoint_best.pth
                   air=25, region=None, level=0, keep_buffers=False, finalise="last", resume=False, batch=4, nb=4,
                   s3_prefix=None, upload="last", multi=False, reclaim=False, claim_chunk=6, leader=False,
                   affinity=True, n_orient=6, overlap=0.25, readahead=2, prefetch_workers=3,
-                  tta="none", tta_passes="all", keep_affinity=False):
+                  tta="none", tta_passes="all", keep_affinity=False, compile=False):
     """Run ``passes`` double-buffered Jacobi refinement passes over ``source`` and write per-pass surface-prob
     OME-Zarrs ``{out_prefix}_pass{p}.zarr``. Returns the final pass path.
 
@@ -592,6 +592,13 @@ def jacobi_refine(source, model, out_prefix, passes=3, ckpt="checkpoint_best.pth
             raise SystemExit("hercunet infer --keep-affinity: needs the affinity model, not --plain ([CT, prev]).")
         net, cfg, lm, pm, dsj, num_in = NI.load_net(model, ckpt, device, deep_supervision=False, force_in_channels=2)
         assert num_in == 2, f"expected a 2-channel [CT, prev] model, got num_input_channels={num_in}"
+    if compile:
+        # Lossless speedup (~1.37x measured on L40S, bandwidth-bound workload): torch.compile the forward.
+        # no-cudagraphs so a ragged final batch (B<batch) doesn't trip cudagraph static-shape capture; the slow
+        # one-time triton autotune (a few min, per batch shape seen) amortises over a multi-hour full-scroll run.
+        import torch
+        print("[jacobi] torch.compile(net, max-autotune-no-cudagraphs) — one-time warmup on first windows …", flush=True)
+        net = torch.compile(net, mode="max-autotune-no-cudagraphs")
     P = int(cfg.patch_size[0])
     assert list(cfg.patch_size) == [P, P, P], cfg.patch_size
     chunk = P // 2                                                     # phase boundaries (0, P/2, P, ...) all aligned

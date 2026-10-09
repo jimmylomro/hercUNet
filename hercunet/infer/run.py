@@ -152,6 +152,7 @@ def _common_jargs(a, region, source):
         affinity=not a.plain, n_orient=a.n_orient, overlap=a.overlap,
         readahead=a.readahead, prefetch_workers=a.prefetch_workers,
         tta=a.tta, tta_passes=a.tta_passes, keep_affinity=a.keep_affinity,
+        compile=getattr(a, "compile", False),
     )
 
 

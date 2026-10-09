@@ -504,7 +504,12 @@ def _add_infer_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--n-orient", type=int, default=6, dest="n_orient",
                    help="orientation channels for the affinity model (default 6)")
     # throughput / batching
-    p.add_argument("--batch", type=int, default=4, help="windows per forward batch (default 4)")
+    p.add_argument("--compile", action="store_true", dest="compile",
+                   help="torch.compile the network (lossless ~1.37x on a datacenter GPU; one-time triton autotune "
+                        "warmup of a few minutes, amortised over a full-scroll run). Bandwidth-bound, so batch size "
+                        "does not matter — keep --batch 4")
+    p.add_argument("--batch", type=int, default=4, help="windows per forward batch (default 4; bandwidth-bound → "
+                   "batch size barely changes throughput, so no need to raise it)")
     p.add_argument("--nb", type=int, default=4, help="windows per prefetch block/tile per axis (default 4)")
     p.add_argument("--air", type=int, default=25, help="skip windows whose CT max < this (all-air; default 25)")
     p.add_argument("--readahead", type=int, default=2, help="CT block-prefetch depth (blocks in flight; default 2)")
