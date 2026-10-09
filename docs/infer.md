@@ -283,6 +283,9 @@ interrupted multi-pass run continues from where it stopped without recomputing f
 | `--leader` | (multi only) | this pod creates/finalises/uploads — exactly one pod |
 | `--plain` | off | 2-channel `[CT, prev]` model instead of the 8-channel affinity model |
 | `--batch` / `--nb` | `4` / `4` | forward batch size / windows-per-block per axis |
+| `--prefetch-workers N` | `3` | threads that assemble upcoming batches (CT normalise + prev-gather + stack) and read CT blocks **while the GPU runs the current one** — overlaps CPU/IO with compute so the cards don't stall between tiles. Raise on many-core boxes; `8` is a good start |
+| `--readahead N` | `2` | how many batches/blocks to keep assembled in flight (queue depth). Deeper absorbs IO jitter at the cost of RAM; pair with `--prefetch-workers` (e.g. `6`) |
+| `--compile` | off | `torch.compile` the network (lossless, ~1.3–1.4× on real GPUs). May stall on first-run autotuning on some arches; keep `--batch 4` |
 | `--air` | `25` | skip windows whose CT max is below this (all-air) |
 | `--s3-prefix s3://…` | — | upload finished passes with s5cmd (AWS creds in env; write-preflighted; throttled progress logs) |
 | `--upload last\|all\|no\|0,2,3` | `last` | which passes upload to `--s3-prefix` (same grammar as `--finalise`); inert without `--s3-prefix` |
@@ -297,3 +300,11 @@ interrupted multi-pass run continues from where it stopped without recomputing f
 `--pre-sync-source`: it region-downloads the covering L0 chunks with `s5cmd` and reads from the copy (decompressed
 chunks are byte-identical, so results match the streamed path exactly). Only L0 is fetched, and only the chunks the
 `--region` touches. See **[The CT source](#the-ct-source-positional-source)** above.
+
+**Keeping the GPUs fed.** Each pass assembles its batches (CT normalise + prev-pass gather + stack) and reads the
+CT/prev slabs on a small thread pool that runs *ahead* of the GPU, so compute overlaps the CPU/IO instead of
+stalling on it between tiles. If `nvidia-smi` shows utilisation sawtoothing 100%→0% — typically on a many-core box
+where the defaults (`--prefetch-workers 3 --readahead 2`) can't keep the queue full — raise them; `--prefetch-workers 8
+--readahead 6` is a good fat-box setting (measured +~26% on pass 0 and more on later passes, where the dense
+prev-slab read is also hidden). Within a batch the work is memory-bandwidth-bound, so `--batch` barely changes
+throughput — leave it at `4`. These knobs only reorder work: results are byte-identical.
