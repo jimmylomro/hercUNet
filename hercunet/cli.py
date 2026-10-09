@@ -472,7 +472,14 @@ def _add_infer_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--out", required=True, metavar="PREFIX",
                    help="output prefix — writes {PREFIX}_pass{p}.zarr (per-pass OME-Zarr surface-prob pyramids)")
     p.add_argument("--region", default=None, metavar="z0:z1,y0:y1,x0:x1",
-                   help="restrict to a sub-cube — the WHOLE volume is inferred if omitted; use for a small smoke test")
+                   help="restrict to a sub-cube — the WHOLE volume is inferred if omitted; use for a small smoke "
+                        "test. Coordinates are in the WORKING level's voxels (see --level; = L0 voxels at the "
+                        "default --level 0)")
+    p.add_argument("--level", type=int, default=0, metavar="L",
+                   help="OME-Zarr pyramid level to run on (default 0 = full res). The model was trained at the "
+                        "NATIVE-COARSE ~7.5-9.5 µm band, so for a finer rescan (e.g. a 2.4 µm scroll) pick the level "
+                        "nearest ~8.6 µm — usually --level 2 (2.4 µm -> 9.6 µm). A BIG warning prints if the chosen "
+                        "level's voxel size falls outside ~[7.5, 10] µm (the model will be unreliable there)")
     p.add_argument("--pre-sync-source", dest="pre_sync_source", nargs="?", const="<auto>", default=None,
                    metavar="DIR",
                    help="for an s3://|https:// SOURCE: region-download only the covering L0 chunks locally (s5cmd) "

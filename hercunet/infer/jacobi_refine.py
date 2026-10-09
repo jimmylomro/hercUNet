@@ -112,9 +112,10 @@ def _window_grid(dim, P, offset, r0, r1):
     return sorted({int(min(max(offset + k * P, 0), dim - P)) for k in range(kmin, kmax + 1)})
 
 
-def pass_blocks(shape, P, offset, region, nb):
+def pass_blocks(shape, P, offset, region, nb, level=0):
     """The deterministic list of prefetch blocks for a pass (same on every worker → shared block ids). Each block
-    = up to ``nb`` window-starts per axis; ``req`` is its CT read box, ``wins`` its stride-P window origins."""
+    = up to ``nb`` window-starts per axis; ``req`` is its CT read box (``level``-prefixed for ``read_window``), its
+    ``wins`` the stride-P window origins. ``shape``/``region`` are in ``level``'s voxel grid."""
     Zf, Yf, Xf = (int(s) for s in shape)
     rz0, rz1, ry0, ry1, rx0, rx1 = region
     gz = _window_grid(Zf, P, offset, rz0, rz1)
@@ -126,7 +127,7 @@ def pass_blocks(shape, P, offset, region, nb):
         for yg in grp(gy):
             for xg in grp(gx):
                 blocks.append(dict(
-                    req=(0, zg[0], zg[-1] + P, yg[0], yg[-1] + P, xg[0], xg[-1] + P),
+                    req=(level, zg[0], zg[-1] + P, yg[0], yg[-1] + P, xg[0], xg[-1] + P),
                     origin=(zg[0], yg[0], xg[0]),
                     wins=[(z, y, x) for z in zg for y in yg for x in xg]))
     return blocks, (len(gz), len(gy), len(gx))
@@ -162,10 +163,11 @@ def _overlap_grid(dim, P, S, offset):
     return sorted({int(min(max(offset + k * S, 0), dim - P)) for k in range(kmin, kmax + 1)})
 
 
-def pass_blend_tiles(shape, P, S, offset, region, T):
+def pass_blend_tiles(shape, P, S, offset, region, T, level=0):
     """Fixed, disjoint, chunk-aligned OUTPUT tiles (T per axis) each carrying the overlapping window starts that
-    cover it (from the stride-S grid at ``offset``) + the CT read box (halo = min..max start + P). The output
-    tiling is FIXED per volume; only the window grid moves with ``offset``. ``region`` restricts computed tiles."""
+    cover it (from the stride-S grid at ``offset``) + the CT read box (``level``-prefixed for ``read_window``;
+    halo = min..max start + P). The output tiling is FIXED per volume; only the window grid moves with ``offset``.
+    ``shape``/``region`` are in ``level``'s voxel grid. ``region`` restricts computed tiles."""
     Z, Y, X = (int(s) for s in shape)
     rz0, rz1, ry0, ry1, rx0, rx1 = region if region else (0, Z, 0, Y, 0, X)
     gz, gy, gx = _overlap_grid(Z, P, S, offset), _overlap_grid(Y, P, S, offset), _overlap_grid(X, P, S, offset)
@@ -193,7 +195,7 @@ def pass_blend_tiles(shape, P, S, offset, region, T):
                     continue
                 tiles.append(dict(owned=(tz, tz1, ty, ty1, tx, tx1),
                                   origin=(min(sz), min(sy), min(sx)),
-                                  req=(0, min(sz), max(sz) + P, min(sy), max(sy) + P, min(sx), max(sx) + P),
+                                  req=(level, min(sz), max(sz) + P, min(sy), max(sy) + P, min(sx), max(sx) + P),
                                   starts=(sz, sy, sx)))
     return tiles
 
@@ -315,7 +317,7 @@ def _tta_seg_logits(net, xb2, affinity, variants):
 
 def run_pass(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, device,
              air=25, batch=4, nb=4, log_every=40, donedir=None, reclaim=False, claim_chunk=6, affinity=False,
-             readahead=2, prefetch_workers=3, tta_variants=None, pass_idx=0, passes=1):
+             readahead=2, prefetch_workers=3, tta_variants=None, pass_idx=0, passes=1, level=0):
     """One disjoint (raw-write) Jacobi pass — BLOCK-batched + prefetched (fp16). Reads CT in big blocks (``nb``*P
     per axis) through the prefetched :func:`iter_windows` (S3 I/O overlaps GPU), reads the matching ``prev`` block
     from the ``prev_arr`` zarr once per block (None on pass 0 → prev=0), runs the P^3 windows in each block in
@@ -331,7 +333,7 @@ def run_pass(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, device,
     if not tta_variants:
         tta_variants = [((), None)]                                 # no TTA (single identity forward)
     lo, hi, mean, std = ctnorm
-    blocks, (ngz, ngy, ngx) = pass_blocks(cur_arr.shape, P, offset, region, nb)
+    blocks, (ngz, ngy, ngx) = pass_blocks(cur_arr.shape, P, offset, region, nb, level=level)
     total_win = sum(len(b["wins"]) for b in blocks)
     print(f"[pass] {len(blocks)} blocks / {total_win} windows (grid {ngz}x{ngy}x{ngx})"
           f"{' [claim-queue]' if donedir else ''}", flush=True)
@@ -407,7 +409,7 @@ def run_pass(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, device,
 
 def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T, device,
                    air=25, batch=4, log_every=20, donedir=None, reclaim=False, claim_chunk=6, affinity=False,
-                   readahead=2, prefetch_workers=3, tta_variants=None, aff_arr=None, pass_idx=0, passes=1):
+                   readahead=2, prefetch_workers=3, tta_variants=None, aff_arr=None, pass_idx=0, passes=1, level=0):
     """One OVERLAP-mode pass: like :func:`run_pass` (prefetched blocks, claim-queue, fp16) but each claim item is a
     disjoint OUTPUT TILE that runs every stride-S window covering it (halo) and merges them with the villa Gaussian
     blend in LOGIT space (accumulate ``(l1-l0)·g`` + ``g``, normalise, sigmoid), then writes only its owned region —
@@ -422,7 +424,7 @@ def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T,
         tta_variants = [((), None)]                                          # no TTA
     lo, hi, mean, std = ctnorm
     gauss_t = torch.from_numpy(make_gaussian(P)).to(device)
-    tiles = pass_blend_tiles(cur_arr.shape, P, S, offset, region, T)
+    tiles = pass_blend_tiles(cur_arr.shape, P, S, offset, region, T, level=level)
     total_win = sum(len(t["starts"][0]) * len(t["starts"][1]) * len(t["starts"][2]) for t in tiles)
     print(f"[pass-blend] {len(tiles)} tiles / {total_win} windows (S={S} T={T})"
           f"{' [claim-queue]' if donedir else ''}", flush=True)
@@ -555,7 +557,7 @@ def _resolve_pass_spec(spec, passes, flag="--finalise"):
 
 
 def jacobi_refine(source, model, out_prefix, passes=3, ckpt="checkpoint_best.pth", device="cuda",
-                  air=25, region=None, keep_buffers=False, finalise="last", resume=False, batch=4, nb=4,
+                  air=25, region=None, level=0, keep_buffers=False, finalise="last", resume=False, batch=4, nb=4,
                   s3_prefix=None, upload="last", multi=False, reclaim=False, claim_chunk=6, leader=False,
                   affinity=True, n_orient=6, overlap=0.25, readahead=2, prefetch_workers=3,
                   tta="none", tta_passes="all", keep_affinity=False):
@@ -610,11 +612,35 @@ def jacobi_refine(source, model, out_prefix, passes=3, ckpt="checkpoint_best.pth
     ctnorm = NI.ct_norm_params(model)
     vol = NI.open_source(source)
     label = NI.source_label(source)
-    shape = tuple(int(v) for v in vol.meta.level_shapes[0])
-    vx = float(vol.meta.voxel_size_um)
+    # --- WORKING RESOLUTION: run on OME-Zarr pyramid `level` (default 0 = full res). Everything downstream — the
+    # buffer canvas, the window grid, --region, the output voxel size — is expressed on THIS level's grid, so a
+    # fine rescan can be run at the ~8.6 µm scale the model expects by picking the nearest level (e.g. 2.4 µm -> L2).
+    nlev = int(vol.meta.num_levels)
+    level = int(level)
+    if not (0 <= level < nlev):
+        raise SystemExit(f"hercunet infer --level {level}: source has levels 0..{nlev - 1} only ({label}).")
+    shape = tuple(int(v) for v in vol.meta.level_shapes[level])
+    vx = float(vol.meta.voxel_size_um) * float(vol.meta.level_downsamples[level])
     region_full = tuple(region) if region else (0, shape[0], 0, shape[1], 0, shape[2])
-    print(f"[jacobi] {label} L0={shape} P={P} chunk={chunk} passes={passes} region={region_full} batch={batch} nb={nb}",
-          flush=True)
+    # Big, unmissable warning if this level's voxel size is outside the model's native-coarse training band. HercUNet
+    # v0 was trained on the 7.5-9.5 µm grand-prize-native domain; we warn outside ~[7.5, 10] µm (10 tolerates a
+    # 2.4 µm scroll pooled to L2 = 9.6 µm, the pragmatic closest). Outside that the predictions will be unreliable.
+    TRAIN_LO, TRAIN_HI, WARN_LO, WARN_HI = 7.5, 9.5, 7.5, 10.0
+    if not (WARN_LO <= vx <= WARN_HI):
+        best = min(range(nlev), key=lambda L: abs(vol.meta.voxel_size_um * vol.meta.level_downsamples[L]
+                                                   - 0.5 * (TRAIN_LO + TRAIN_HI)))
+        best_vx = float(vol.meta.voxel_size_um) * float(vol.meta.level_downsamples[best])
+        bar = "!" * 92
+        print(f"\n{bar}\n"
+              f"!!  WARNING — OUT-OF-DOMAIN RESOLUTION: --level {level} of {label} is {vx:.2f} µm/voxel.\n"
+              f"!!  HercUNet v0 was TRAINED ONLY on the native-coarse {TRAIN_LO}-{TRAIN_HI} µm band; at {vx:.2f} µm "
+              f"the model is OUT OF DISTRIBUTION\n"
+              f"!!  and its surface predictions will be UNRELIABLE. Closest in-band level for this source is "
+              f"--level {best} ({best_vx:.2f} µm).\n"
+              f"!!  Re-run with --level {best} unless you specifically intend this resolution.\n"
+              f"{bar}\n", flush=True)
+    print(f"[jacobi] {label} level={level} vx={vx:.3f}µm shape={shape} (L0={tuple(int(v) for v in vol.meta.level_shapes[0])}) "
+          f"P={P} chunk={chunk} passes={passes} region={region_full} batch={batch} nb={nb}", flush=True)
 
     # ---- STORAGE WARNING: each pass writes a full-resolution uint8 surface-prob buffer. For a whole scroll that
     # is HUNDREDS of GB (up to ~500 GB); the number below is an UPPER BOUND over the computed box (only material /
@@ -700,12 +726,12 @@ def jacobi_refine(source, model, out_prefix, passes=3, ckpt="checkpoint_best.pth
                            batch=batch, donedir=(donedir if multi else None), reclaim=reclaim,
                            claim_chunk=claim_chunk, affinity=affinity,
                            readahead=readahead, prefetch_workers=prefetch_workers, tta_variants=pass_variants,
-                           aff_arr=aff_arr, pass_idx=p, passes=passes)
+                           aff_arr=aff_arr, pass_idx=p, passes=passes, level=level)
         else:
             run_pass(net, ctnorm, vol, prev_arr, cur, region_full, offset, P, device, air=air, batch=batch, nb=nb,
                      donedir=(donedir if multi else None), reclaim=reclaim, claim_chunk=claim_chunk, affinity=affinity,
                      readahead=readahead, prefetch_workers=prefetch_workers, tta_variants=pass_variants,
-                     pass_idx=p, passes=passes)
+                     pass_idx=p, passes=passes, level=level)
 
         # ---- pass p compute done. Multi: BARRIER (also the propagation guarantee — it polls until every L0 block
         # .done is VISIBLE, so L0 is readable cross-node by then). Write ``_complete`` (resume marker) at once — the

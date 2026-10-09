@@ -102,6 +102,27 @@ region you compute.
 - For **multi-instance** across pods, pass an explicit **pod-local** dir so each pod syncs its own copy — do not
   point it at the shared `--out` volume.
 
+## Resolution — run at the model's scale (`--level`)
+
+HercUNet v0 was trained **only** on the native-coarse **~7.5–9.5 µm** grand-prize domain (see the corpus). Most
+prize scrolls ship an ~8.6/9.4 µm masked volume, so the default **`--level 0`** is correct for them. But some
+scrolls were **rescanned finer** (2.4 µm, 1.1 µm). Running the model at a fine level is **out of distribution** —
+a 1.5 mm window would cover a fraction of what the model expects — and the predictions are unreliable.
+
+`--level L` picks the **OME-Zarr pyramid level** to run on. Each level is ~2× coarser, so for a fine rescan choose
+the level nearest ~8.6 µm:
+
+| source voxel | run with | effective voxel |
+|---|---|---|
+| 8.64 / 9.36 µm (most scrolls) | `--level 0` (default) | 8.6 / 9.4 µm |
+| 2.4 µm rescan | `--level 2` | ~9.6 µm |
+| 1.1 µm rescan | `--level 3` | ~9.0 µm |
+
+If the chosen level's voxel size lands **outside ~[7.5, 10] µm**, inference prints a big, unmissable warning and
+names the closest in-band level — the run still proceeds (you may intend it), but heed it. The whole engine then
+operates on that level's grid: the output surface zarr is written at the level's resolution (correct `voxelsize`
+for VC3D), `--region` coordinates are in the level's voxels, and `--pre-sync-source` fetches that level's chunks.
+
 ## Simplest run (local, nothing else needed)
 
 No local data, no S3, no config — pull the model from Hugging Face, stream a small PHerc1447 window straight from
@@ -256,7 +277,8 @@ interrupted multi-pass run continues from where it stopped without recomputing f
 | `--overlap f` | `0.25` | Gaussian-blend window overlap (HercUNet v0); `0` = disjoint raw-write mode |
 | `--tta none\|all\|mirror\|rotate\|z,y,x` | `none` | test-time augmentation per window (villa-style, logit average); N variants → N× forwards |
 | `--tta-passes all\|last\|no\|2,3` | `all` | which passes get TTA (same grammar as `--finalise`); ignored when `--tta none` |
-| `--region z0:z1,y0:y1,x0:x1` | **whole volume** | restrict to a sub-cube (smoke tests); omit to infer the entire volume |
+| `--level L` | `0` | OME-Zarr pyramid level to run on (0 = full res). Pick the level nearest **~8.6 µm** for a finer rescan (a 2.4 µm scroll → `--level 2` = 9.6 µm). A **big warning** prints if the level's voxel size is outside **~[7.5, 10] µm** (the model's trained band). `--region` and the output zarr are then on this level's grid |
+| `--region z0:z1,y0:y1,x0:x1` | **whole volume** | restrict to a sub-cube (smoke tests); omit to infer the entire volume. Coordinates are in the **working level's** voxels (= L0 at `--level 0`) |
 | `--gpus all\|0,1,3` | `all` | local GPUs to use (one worker process each) |
 | `--leader` | (multi only) | this pod creates/finalises/uploads — exactly one pod |
 | `--plain` | off | 2-channel `[CT, prev]` model instead of the 8-channel affinity model |
