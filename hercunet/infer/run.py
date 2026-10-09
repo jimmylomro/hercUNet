@@ -148,7 +148,7 @@ def _common_jargs(a, region, source):
     return dict(
         source=source, out_prefix=a.out, passes=a.passes, ckpt=a.ckpt, air=a.air, level=int(getattr(a, "level", 0)),
         region=region, keep_buffers=a.keep_buffers, finalise=a.finalise, resume=a.resume,
-        batch=a.batch, nb=a.nb, s3_prefix=a.s3_prefix, upload=a.upload, reclaim=a.reclaim, claim_chunk=a.claim_chunk,
+        batch=a.batch, nb=a.nb, s3_prefix=a.s3_prefix, upload=a.upload, reclaim=a.resume, claim_chunk=a.claim_chunk,
         affinity=not a.plain, n_orient=a.n_orient, overlap=a.overlap,
         readahead=a.readahead, prefetch_workers=a.prefetch_workers,
         tta=a.tta, tta_passes=a.tta_passes, keep_affinity=a.keep_affinity,

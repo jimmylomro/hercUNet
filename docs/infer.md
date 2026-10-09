@@ -192,8 +192,9 @@ hercunet infer multi-instance          --model-hf jimmylomro/hercunet-v0 \
 ```
 
 Workers steal work dynamically (a faster GPU does more); a hard barrier between passes guarantees pass *p* is
-fully written before pass *p+1* reads it. `--reclaim` re-queues work orphaned by a crashed worker. Extra pods can
-join mid-run. The `SOURCE` is positional (same on every pod); to go local, give each pod a **pod-local**
+fully written before pass *p+1* reads it. A restart with `--resume` re-queues tiles a killed worker left orphaned
+(a stale `.claim` with no `.done`); a fresh worker joining a LIVE job omits `--resume`, so it won't disturb other
+workers' in-flight claims. Extra pods can join mid-run. The `SOURCE` is positional (same on every pod); to go local, give each pod a **pod-local**
 `--pre-sync-source /local/dir` (each pod syncs its own copy — never the shared `--out` volume).
 
 ---
@@ -260,7 +261,11 @@ goes up first (directly viewable) and then, if that pass was also finalised, the
 ## Resume
 
 `--resume` skips any pass already marked `_complete` (a `{out}_pass{p}.zarr.done/_complete` marker), so an
-interrupted multi-pass run continues from where it stopped without recomputing finished passes.
+interrupted multi-pass run continues from where it stopped without recomputing finished passes. It **also
+re-queues tiles a killed worker left orphaned** (a `.claim` with no `.done`) so they're recomputed rather than
+skipped — without this the pass barrier would wait forever on those tiles. (Completed *tiles* are always skipped
+via their `.done` markers regardless of `--resume`; a stop/resume therefore loses only the few tiles that were
+mid-flight.)
 
 ---
 
@@ -290,10 +295,9 @@ interrupted multi-pass run continues from where it stopped without recomputing f
 | `--s3-prefix s3://…` | — | upload finished passes with s5cmd (AWS creds in env; write-preflighted; throttled progress logs) |
 | `--upload last\|all\|no\|0,2,3` | `last` | which passes upload to `--s3-prefix` (same grammar as `--finalise`); inert without `--s3-prefix` |
 | `--finalise last\|all\|no\|0,2,3` | `last` | which passes get an OME-Zarr pyramid (default: only the last/deliverable) |
-| `--resume` | off | skip passes already `_complete` |
+| `--resume` | off | continue an interrupted run: skip passes already `_complete` **and** re-queue tiles orphaned by killed workers (so they aren't skipped and the barrier can't hang). A fresh worker joining a *live* job omits it |
 | `--keep-buffers` | off | keep every pass buffer (default prunes to the last two) — ⚠️ `passes ×` a ~500 GB buffer |
 | `--keep-affinity` | off | also save (and, with `--s3-prefix`, upload) the affinity head of the final pass as `{PREFIX}_pass{last}_aff.zarr` (4-D `(n_aff,Z,Y,X)` uint8); needs the affinity model + `overlap>0` |
-| `--reclaim` | off | re-queue work orphaned by a crashed worker |
 
 **Going local (fast):** the old `--local-vol` flag is gone — pass the local copy **as the positional `SOURCE`**
 (`file:///path/x.zarr` or just the path). To localise an `s3://` run without pre-downloading by hand, add

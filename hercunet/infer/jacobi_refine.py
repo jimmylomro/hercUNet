@@ -432,6 +432,16 @@ def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T,
           f"{' [claim-queue]' if donedir else ''}", flush=True)
     t0 = time.time(); done = [0]
     asm_ex = ThreadPoolExecutor(max_workers=max(1, prefetch_workers))              # off-thread batch assembly (CPU/IO)
+    prev_ex = ThreadPoolExecutor(max_workers=2)                                    # off-thread prev-pass slab reads
+    PREV_DEPTH = 2                                                                  # prev slabs in flight (big; 2 hides the read)
+
+    def _read_prev(tile):
+        """Read a tile's prev-pass slab (the block its ``req`` covers) AHEAD of the GPU, so passes 1-3 don't
+        STALL on the synchronous read (the pass-1 slowdown). None on pass 0 (``prev_arr`` is None)."""
+        if prev_arr is None:
+            return None
+        _, z0, z1, y0, y1, x0, x1 = tile["req"]
+        return np.asarray(prev_arr[z0:z1, y0:y1, x0:x1]).astype(np.float32) / 255.0
 
     def _assemble_batch(chunk_st, ct_blk, pv_blk, bz0, by0, bx0):
         """Build one batch's [B,2,P,P,P] net input (norm_ct + prev-gather + stack) OFF the GPU thread, so the
@@ -448,7 +458,7 @@ def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T,
             arrs.append(np.stack([ct_n, pv]).astype(np.float32)); keep.append((z, y, x))
         return (np.stack(arrs) if arrs else None, keep)
 
-    def process_tile(ct_blk, tile):
+    def process_tile(ct_blk, tile, pv_blk):
         oz0, oz1, oy0, oy1, ox0, ox1 = tile["owned"]
         bz0, by0, bx0 = tile["origin"]
         sz, sy, sx = tile["starts"]
@@ -457,10 +467,8 @@ def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T,
         wsum = torch.zeros((th, tw, tdp), dtype=torch.float32, device=device)  # Σ g
         aff_acc = (torch.zeros((aff_arr.shape[0], th, tw, tdp), dtype=torch.float32, device=device)
                    if aff_arr is not None else None)                          # Σ aff·g (per channel)
-        pv_blk = None
-        if prev_arr is not None:
-            pv_blk = np.asarray(prev_arr[bz0:bz0 + ct_blk.shape[0], by0:by0 + ct_blk.shape[1],
-                                         bx0:bx0 + ct_blk.shape[2]]).astype(np.float32) / 255.0
+        if pv_blk is not None:                                                     # prefetched by _read_prev; trim to the CT block
+            pv_blk = pv_blk[:ct_blk.shape[0], :ct_blk.shape[1], :ct_blk.shape[2]]
         starts = [(z, y, x) for z in sz for y in sy for x in sx]
         chunks = [starts[i:i + batch] for i in range(0, len(starts), batch)]       # fixed batches, in order
         # Pipeline: assemble the next `depth` batches on the pool while the GPU runs the current one, so the
@@ -518,8 +526,12 @@ def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T,
 
     if donedir is None:                                                            # ---- single instance
         reqs = [t["req"] for t in tiles]
+        pvq = deque(); j = 0                                                        # prev-slab prefetch (tiles order)
+        while j < min(PREV_DEPTH, len(tiles)): pvq.append(prev_ex.submit(_read_prev, tiles[j])); j += 1
         for bi, (req, blk, org) in enumerate(iter_windows(vol, reqs, readahead=readahead, workers=prefetch_workers)):
-            process_tile(np.asarray(blk), tiles[bi])
+            pv = pvq.popleft().result()
+            if j < len(tiles): pvq.append(prev_ex.submit(_read_prev, tiles[j])); j += 1
+            process_tile(np.asarray(blk), tiles[bi], pv)
             if log_every and bi and bi % log_every == 0:
                 print(f"[pass-blend] P{pass_idx}/{passes - 1} tile {bi}/{len(tiles)} ({rate()})", flush=True)
     else:                                                                          # ---- multi instance: claim-queue
@@ -527,8 +539,12 @@ def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T,
         g0, tg0 = CQ.count_done(donedir), time.time()
         for chunk in CQ.claim_chunks(donedir, range(ntot), chunk=claim_chunk, reclaim=reclaim):
             reqs = [tiles[g]["req"] for g in chunk]
+            pvq = deque(); j = 0                                                    # prev-slab prefetch (chunk order)
+            while j < min(PREV_DEPTH, len(chunk)): pvq.append(prev_ex.submit(_read_prev, tiles[chunk[j]])); j += 1
             for (req, blk, org), gid in zip(iter_windows(vol, reqs, readahead=readahead, workers=prefetch_workers), chunk):
-                process_tile(np.asarray(blk), tiles[gid])
+                pv = pvq.popleft().result()
+                if j < len(chunk): pvq.append(prev_ex.submit(_read_prev, tiles[chunk[j]])); j += 1
+                process_tile(np.asarray(blk), tiles[gid], pv)
                 CQ.mark_done(donedir, gid)
                 nproc += 1
             gd = CQ.count_done(donedir)
@@ -541,7 +557,7 @@ def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T,
             print(f"[pass-blend] P{pass_idx}/{passes - 1} | this worker: {nproc} tiles · {rate()} "
                   f"| all workers: {gd}/{ntot} tiles · {grate * 60:.1f} tile/min "
                   f"| pass ETA {_hms(eta)} ({pass_pct}%) · run ETA {_hms(run_eta)} ({run_pct}%)", flush=True)
-    asm_ex.shutdown(wait=True)
+    asm_ex.shutdown(wait=True); prev_ex.shutdown(wait=True)
     print(f"[pass-blend] DONE (this worker) {rate()}", flush=True)
 
 
