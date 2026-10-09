@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import os
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -429,6 +431,22 @@ def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T,
     print(f"[pass-blend] {len(tiles)} tiles / {total_win} windows (S={S} T={T})"
           f"{' [claim-queue]' if donedir else ''}", flush=True)
     t0 = time.time(); done = [0]
+    asm_ex = ThreadPoolExecutor(max_workers=max(1, prefetch_workers))              # off-thread batch assembly (CPU/IO)
+
+    def _assemble_batch(chunk_st, ct_blk, pv_blk, bz0, by0, bx0):
+        """Build one batch's [B,2,P,P,P] net input (norm_ct + prev-gather + stack) OFF the GPU thread, so the
+        next batch's CPU/IO overlaps the current batch's forward (kills the 100%->0% starvation sawtooth).
+        Returns (stacked_float32 | None, keep_coords); None when every window in the batch is air."""
+        arrs, keep = [], []
+        for (z, y, x) in chunk_st:
+            oz, oy, ox = z - bz0, y - by0, x - bx0
+            sub = ct_blk[oz:oz + P, oy:oy + P, ox:ox + P]
+            if sub.shape != (P, P, P) or int(sub.max()) < air:                     # off-block or all-air → contributes nothing
+                continue
+            ct_n = NI.norm_ct(sub, lo, hi, mean, std)
+            pv = np.zeros((P, P, P), np.float32) if pv_blk is None else pv_blk[oz:oz + P, oy:oy + P, ox:ox + P]
+            arrs.append(np.stack([ct_n, pv]).astype(np.float32)); keep.append((z, y, x))
+        return (np.stack(arrs) if arrs else None, keep)
 
     def process_tile(ct_blk, tile):
         oz0, oz1, oy0, oy1, ox0, ox1 = tile["owned"]
@@ -444,21 +462,22 @@ def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T,
             pv_blk = np.asarray(prev_arr[bz0:bz0 + ct_blk.shape[0], by0:by0 + ct_blk.shape[1],
                                          bx0:bx0 + ct_blk.shape[2]]).astype(np.float32) / 255.0
         starts = [(z, y, x) for z in sz for y in sy for x in sx]
-        bi = 0
-        while bi < len(starts):
-            chunk_st = starts[bi:bi + batch]; bi += batch
-            arrs, keep = [], []
-            for (z, y, x) in chunk_st:
-                oz, oy, ox = z - bz0, y - by0, x - bx0
-                sub = ct_blk[oz:oz + P, oy:oy + P, ox:ox + P]
-                if sub.shape != (P, P, P) or int(sub.max()) < air:            # off-block or all-air → contributes nothing
-                    continue
-                ct_n = NI.norm_ct(sub, lo, hi, mean, std)
-                pv = np.zeros((P, P, P), np.float32) if pv_blk is None else pv_blk[oz:oz + P, oy:oy + P, ox:ox + P]
-                arrs.append(np.stack([ct_n, pv]).astype(np.float32)); keep.append((z, y, x))
-            if not arrs:
+        chunks = [starts[i:i + batch] for i in range(0, len(starts), batch)]       # fixed batches, in order
+        # Pipeline: assemble the next `depth` batches on the pool while the GPU runs the current one, so the
+        # CPU work (norm_ct + prev-gather + stack) and the prev-slab reads overlap compute instead of stalling
+        # it. Batches are consumed strictly in submit order, so the blend accumulation below is byte-identical
+        # to the serial version — this is a pure scheduling change, no maths touched.
+        depth = max(2, readahead)
+        pend = deque(); nxt = 0
+        while nxt < min(depth, len(chunks)):
+            pend.append(asm_ex.submit(_assemble_batch, chunks[nxt], ct_blk, pv_blk, bz0, by0, bx0)); nxt += 1
+        while pend:
+            arrs_np, keep = pend.popleft().result()
+            if nxt < len(chunks):                                                  # keep the queue full
+                pend.append(asm_ex.submit(_assemble_batch, chunks[nxt], ct_blk, pv_blk, bz0, by0, bx0)); nxt += 1
+            if arrs_np is None:                                                     # whole batch was air → nothing to do
                 continue
-            xb = torch.from_numpy(np.stack(arrs)).to(device, non_blocking=True)     # [B,2,P,P,P]
+            xb = torch.from_numpy(arrs_np).to(device, non_blocking=True)           # [B,2,P,P,P]
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
                 if aff_acc is not None and len(tta_variants) == 1:
                     seg_logits, aff = _seg_aff(net, xb, affinity)                   # one forward gives both (no TTA)
@@ -522,6 +541,7 @@ def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T,
             print(f"[pass-blend] P{pass_idx}/{passes - 1} | this worker: {nproc} tiles · {rate()} "
                   f"| all workers: {gd}/{ntot} tiles · {grate * 60:.1f} tile/min "
                   f"| pass ETA {_hms(eta)} ({pass_pct}%) · run ETA {_hms(run_eta)} ({run_pct}%)", flush=True)
+    asm_ex.shutdown(wait=True)
     print(f"[pass-blend] DONE (this worker) {rate()}", flush=True)
 
 
