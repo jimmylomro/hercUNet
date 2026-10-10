@@ -719,7 +719,21 @@ def jacobi_refine(source, model, out_prefix, passes=3, ckpt="checkpoint_best.pth
         print("[jacobi] THIS worker is the designated LEADER (creates each pass zarr + finalises + uploads)", flush=True)
     fin_threads = {}                                                   # pass -> Thread doing background finalize+upload
     prev_arr, prev_path = None, None
-    for p in range(passes):
+    # --resume: find the HIGHEST pass with a _complete marker. Every pass at/below it is done — even if its buffer
+    # was already freed (we keep only the last ~2). Resume from the next pass, wiring prev from that highest-complete
+    # pass, whose buffer is always still present (nothing ran after it to free it). This lets a run stop/resume PAST
+    # pass 0 without re-running freed passes. (The per-pass check inside the loop stays as a safety net.)
+    start_pass = 0
+    if resume:
+        for _p in range(passes):
+            _cp = f"{out_prefix}_pass{_p}.zarr"
+            if os.path.isdir(_cp) and os.path.exists(os.path.join(_cp + ".done", "_complete")):
+                start_pass, prev_path = _p + 1, _cp
+        if prev_path is not None:
+            prev_arr = zarr.open_group(prev_path, mode="r")["0"]
+            print(f"[jacobi] resume: passes 0..{start_pass - 1} already complete; prev buffer={prev_path}; "
+                  f"resuming at pass {start_pass}", flush=True)
+    for p in range(start_pass, passes):
         offset = 0 if p % 2 == 0 else (S // 2 if blend else P // 2)
         cur_path = f"{out_prefix}_pass{p}.zarr"
         donedir = cur_path + ".done"
