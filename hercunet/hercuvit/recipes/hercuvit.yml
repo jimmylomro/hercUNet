@@ -45,9 +45,17 @@ semantic_epochs: 50
 unfreeze_epochs: 25
 instance_epochs: 100
 
-# semantic loss (Dice + CE, deep supervision at full / 1-2 / 1-4)
+# semantic loss (thin medial-surface stack: fg-weighted CE + Focal-Tversky + clDice skel-recall + separation)
+sem_fg_weight: 30.0
 w_sem_ce: 1.0
-w_sem_dice: 1.0
+w_sem_tversky: 1.0
+w_sem_skel: 1.0
+w_sem_sep: 0.5
+tversky_alpha: 0.5
+tversky_beta: 0.5
+tversky_gamma: 1.0
+skel_iters: 3
+sep_radius: 2
 deep_sup_weights: [1.0, 0.5, 0.25]
 
 # instance loss (Mask2Former set prediction)

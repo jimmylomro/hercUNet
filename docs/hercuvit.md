@@ -399,3 +399,34 @@ the cached Dinovol checkpoint `/tmp/dino_ck/teacher_305k.pt`.
 - **Inference tuple** diverges from `load_affinity_net`'s nnU-Net tuple (`(net, recipe, model_cfg)`) — HercuViT is
   not an nnU-Net, so there is no plans/label manager; the recipe carries the working scale + class count.
 - Everything flagged best-effort (Dinovol norm, semantic target, resampling, point-sampling) is recorded in §13.
+
+---
+
+## Part III — Pod PoC findings (5090, scroll-5 corpus + PHerc1447)
+
+First end-to-end validation on real data (5090, dinovol teacher + 40-sample scroll-5 herculabels subset):
+
+- **Data path validated.** `open_source` streams scroll-5 CT (the flagged scroll-id resolution works: meta
+  `scroll=5` → data-layer catalog); `HercuvitDataset` yields robust-normalised 128³ CT + `owner>0` surface + owner.
+  Real unlabelled-crop streaming for distillation is now **data-layer-native** (`locate_material` +
+  `iter_material_tiles`, air-skipped + prefetched) — not a hand-rolled reader.
+- **Distillation works on real crops.** hercuvit-tiny distilled from the frozen teacher: held-out token cosine to
+  the teacher **0.39 → 0.71** (final loss 0.20). Peak ~4 GB.
+- **Window-seam measured + fixed.** Full-attention teacher boundary |Δ|-ratio **1.01** (no seam); windowed student
+  **1.34–1.47** (a real window-boundary discontinuity — the vertical/horizontal lines in the token PCA).
+  **Swin shifted windows** (alternating `window//2` cyclic shift + masked attention, RoPE kept absolute) cut it to
+  **1.11** — near the teacher. This **supersedes the design doc's §5.1 no-shift (ViTDet) choice** (2 global blocks +
+  short distillation did not smooth it); `retrofit_windowed(..., shifted=True)` is the default.
+- **Thin-surface loss.** The sheet-surface target is a ~0.2%-positive 1-voxel medial surface; a plain Dice+CE head
+  collapses to all-background. Ported HercUNet's thin-structure stack into a self-contained module
+  (`train/surface_loss.py`, **no nnU-Net dep**): foreground-weighted CE + Focal-Tversky + clDice skeleton-recall +
+  separation penalty. (Note: `soft_skel` erodes an already-1-voxel GT to near-empty, so skeleton-recall adds little
+  gradient on this target — the author's point-contrastive + linear-probe surface head is the robust complement.)
+- **Supervised stage-1 (semantic, transformer frozen), 2000 steps / 34 samples:** train surfDice@2 **0.245**
+  (fitting), val surfDice@2 **0.066** (undertrained at PoC scale). Real training step fits **~5 GB** (small, bf16).
+- **Decision (plan §1):** surface = author's point-contrastive + linear probe (robust to the thin-surface
+  imbalance) **and** hercunet thin-surface losses; Mask2Former head for per-sheet IDs. Dense-only semantic is a
+  baseline, not the final surface path.
+
+TODO (updated §13): point-contrastive + linear-probe surface head (author's recipe); scale up corpus + steps for a
+real semantic number; `shifted` as a recipe/CLI flag threaded through `build_from_cfg` for inference parity.

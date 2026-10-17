@@ -44,6 +44,9 @@ class WindowedEvaAttention(EvaAttention):
 
     #: set by :func:`retrofit_windowed`; tokens-per-axis of each window.
     window_size: tuple[int, int, int] = DEFAULT_WINDOW_SIZE
+    #: Swin-style cyclic shift per axis (0 = regular partition). Alternating windowed blocks use ``window//2`` so
+    #: a token at a window boundary in one block is interior in the next — this removes the fixed window seam.
+    shift: tuple[int, int, int] = (0, 0, 0)
 
     def forward(self, x, rope=None, attn_mask=None, rope_shape=None):  # noqa: D401 - matches base signature
         if attn_mask is not None:
@@ -89,25 +92,73 @@ class WindowedEvaAttention(EvaAttention):
         return out
 
     def _windowed_sdpa(self, q, k, v, spatial_shape):
-        """Per-window scaled-dot-product attention. q/k/v: ``(B, H, G, D)`` patch tokens in (z,y,x) raster order."""
+        """Per-window scaled-dot-product attention (optionally Swin-shifted). q/k/v: ``(B,H,G,D)`` patch tokens in
+        (z,y,x) raster order. With a non-zero ``shift`` the grid is cyclically rolled, windowed with a mask that
+        blocks attention between the wrapped sub-regions (standard Swin), then rolled back — so there is no fixed
+        window boundary across consecutive windowed blocks."""
         B, H, G, D = q.shape
         Dz, Dy, Dx = spatial_shape
         wz, wy, wx = self.window_size
+        sz, sy, sx = self.shift
         if Dz % wz or Dy % wy or Dx % wx:
             raise ValueError(f"token grid {spatial_shape} not divisible by window {self.window_size}")
         if Dz * Dy * Dx != G:
             raise ValueError(f"patch-token count {G} != prod(spatial_shape {spatial_shape})")
         nz, ny, nx = Dz // wz, Dy // wy, Dx // wx
+        shifted = bool(sz or sy or sx)
 
-        def to_windows(t):
+        def to_windows(t):  # (B,H,Dz,Dy,Dx,D) -> (B*nwin, H, w³, D)
             t = t.view(B, H, nz, wz, ny, wy, nx, wx, D)
             t = t.permute(0, 2, 4, 6, 1, 3, 5, 7, 8).contiguous()      # (B, nz, ny, nx, H, wz, wy, wx, D)
             return t.view(B * nz * ny * nx, H, wz * wy * wx, D)
 
-        out = super()._attention(to_windows(q), to_windows(k), to_windows(v))  # (B*nwin, H, w³, D)
+        qg = q.view(B, H, Dz, Dy, Dx, D); kg = k.view(B, H, Dz, Dy, Dx, D); vg = v.view(B, H, Dz, Dy, Dx, D)
+        if shifted:
+            qg = torch.roll(qg, (-sz, -sy, -sx), dims=(2, 3, 4))
+            kg = torch.roll(kg, (-sz, -sy, -sx), dims=(2, 3, 4))
+            vg = torch.roll(vg, (-sz, -sy, -sx), dims=(2, 3, 4))
+        qa, ka, va = to_windows(qg), to_windows(kg), to_windows(vg)
+        if shifted:
+            allow = self._swin_mask(spatial_shape, qa.device)          # (nwin, w³, w³) bool, True = may attend
+            attn_mask = allow.repeat(B, 1, 1).unsqueeze(1)             # (B*nwin, 1, w³, w³)
+            out = super()._attention(qa, ka, va, attn_mask=attn_mask)
+        else:
+            out = super()._attention(qa, ka, va)                      # (B*nwin, H, w³, D)
         out = out.view(B, nz, ny, nx, H, wz, wy, wx, D)
-        out = out.permute(0, 4, 1, 5, 2, 6, 3, 7, 8).contiguous()              # (B, H, nz, wz, ny, wy, nx, wx, D)
-        return out.view(B, H, G, D)
+        out = out.permute(0, 4, 1, 5, 2, 6, 3, 7, 8).contiguous()      # (B, H, nz, wz, ny, wy, nx, wx, D)
+        out = out.view(B, H, Dz, Dy, Dx, D)
+        if shifted:
+            out = torch.roll(out, (sz, sy, sx), dims=(2, 3, 4))
+        return out.reshape(B, H, G, D)
+
+    def _swin_mask(self, spatial_shape, device):
+        """Cached Swin attention mask ``(nwin, w³, w³)`` bool (True = same sub-region → may attend). After the
+        cyclic roll, each window mixes up to 8 (2³) sub-regions from opposite grid edges; attention is allowed
+        only within the same sub-region so wrapped-around tokens never attend across the true boundary."""
+        key = (tuple(spatial_shape), self.window_size, self.shift)
+        cache = getattr(self, "_mask_cache", None)
+        if cache is None:
+            cache = {}; self._mask_cache = cache
+        hit = cache.get(key)
+        if hit is not None and hit.device == device:
+            return hit
+        Dz, Dy, Dx = spatial_shape; wz, wy, wx = self.window_size; sz, sy, sx = self.shift
+        img = torch.zeros(1, 1, Dz, Dy, Dx, 1, device=device)
+
+        def _slices(n, w, s):
+            return (slice(0, n - w), slice(n - w, n - s), slice(n - s, None)) if s else (slice(0, n),)
+
+        cnt = 0
+        for zs in _slices(Dz, wz, sz):
+            for ys in _slices(Dy, wy, sy):
+                for xs in _slices(Dx, wx, sx):
+                    img[:, :, zs, ys, xs, :] = cnt; cnt += 1
+        nz, ny, nx = Dz // wz, Dy // wy, Dx // wx
+        lab = img.view(1, 1, nz, wz, ny, wy, nx, wx, 1).permute(0, 2, 4, 6, 1, 3, 5, 7, 8).contiguous()
+        lab = lab.view(nz * ny * nx, wz * wy * wx)                     # (nwin, w³) region id per token
+        allow = lab.unsqueeze(2) == lab.unsqueeze(1)                   # (nwin, w³, w³) True = same region
+        cache[key] = allow
+        return allow
 
 
 class SpatialReductionAttention(EvaAttention):
@@ -181,12 +232,17 @@ def retrofit_windowed(
     window_size: Sequence[int] = DEFAULT_WINDOW_SIZE,
     global_attention: str = "full",
     sr_factor: Sequence[int] = (2, 2, 2),
+    shifted: bool = True,
 ):
     """In-place: every block except ``global_blocks`` (1-indexed) uses windowed attention; the global blocks use
     ``global_attention`` (``"full"`` for hercuvit-small, ``"spatial_reduction"`` for tiny/nano).
 
-    Parameter-preserving — only reassigns each block's ``attn.__class__`` and sets ``window_size`` / ``sr_factor``.
-    Returns ``backbone``. Requires ``attention_type == "full"`` (axial blocks unsupported).
+    ``shifted`` (default True, Swin-style): alternating windowed blocks are cyclically shifted by ``window//2`` so
+    the window boundary moves between consecutive blocks — this removes the fixed window seam measured in the
+    no-shift (ViTDet) variant. Set ``shifted=False`` for the plain ViTDet no-shift behaviour.
+
+    Parameter-preserving — only reassigns each block's ``attn.__class__`` and sets ``window_size`` / ``shift`` /
+    ``sr_factor``. Returns ``backbone``. Requires ``attention_type == "full"`` (axial blocks unsupported).
     """
     if global_attention not in ("full", "spatial_reduction"):
         raise ValueError(f"global_attention must be 'full' or 'spatial_reduction', got {global_attention!r}")
@@ -194,7 +250,9 @@ def retrofit_windowed(
     global_set = {int(i) for i in global_blocks}
     win = tuple(int(w) for w in window_size)
     srf = tuple(int(s) for s in sr_factor)
-    n_windowed = n_sr = 0
+    half = tuple(w // 2 for w in win)
+    n_windowed = n_sr = n_shifted = 0
+    win_i = 0
     for idx1, block in enumerate(blocks, start=1):
         attn = getattr(block, "attn", None)
         if attn is None:
@@ -209,9 +267,15 @@ def retrofit_windowed(
             continue
         attn.__class__ = WindowedEvaAttention
         attn.window_size = win
+        # alternate windowed blocks: regular, shifted, regular, … (Swin)
+        attn.shift = half if (shifted and win_i % 2 == 1) else (0, 0, 0)
+        attn._mask_cache = None
         n_windowed += 1
+        n_shifted += int(any(attn.shift))
+        win_i += 1
     backbone._hercuvit_windowed = {
         "global_blocks": sorted(global_set), "window_size": win, "global_attention": global_attention,
-        "sr_factor": srf, "n_windowed": n_windowed, "n_spatial_reduction": n_sr,
+        "sr_factor": srf, "shifted": shifted, "n_windowed": n_windowed, "n_shifted": n_shifted,
+        "n_spatial_reduction": n_sr,
     }
     return backbone

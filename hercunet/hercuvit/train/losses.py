@@ -38,28 +38,31 @@ def _downsample_target(tgt01: torch.Tensor, side: int) -> torch.Tensor:
 
 
 def semantic_loss(sem_logits, sem_target: torch.Tensor, recipe) -> dict:
-    """``sem_logits`` = [full, 1/2, 1/4]; ``sem_target`` = (B,D,H,W) long. Returns ``{sem, ce, dice}`` (scalars)."""
+    """``sem_logits`` = [full, 1/2, 1/4]; ``sem_target`` = (B,D,H,W) long. Thin medial-surface stack (ported from
+    HercUNet, see ``train/surface_loss.py``): foreground-weighted CE + Focal-Tversky + clDice skeleton-recall +
+    separation penalty, with deep supervision. Returns ``{sem, ce, tversky, skel, sep, dice}`` (``dice``=Tversky,
+    kept for log compatibility)."""
+    from .surface_loss import surface_terms
     weights = recipe.deep_sup_weights
-    tgt01 = (sem_target > 0).float().unsqueeze(1)                       # (B,1,D,H,W)
+    tgt01 = (sem_target > 0).float().unsqueeze(1)                       # (B,1,D,H,W) for downsampling
     total = sem_logits[0].new_zeros(())
-    ce_acc = sem_logits[0].new_zeros(())
-    dice_acc = sem_logits[0].new_zeros(())
+    acc = {k: sem_logits[0].new_zeros(()) for k in ("ce", "tversky", "skel", "sep")}
     for i, logits in enumerate(sem_logits):
         w = float(weights[i]) if i < len(weights) else 0.0
         side = logits.shape[-1]
-        t = _downsample_target(tgt01, side)                            # (B,1,side,side,side)
-        tl = t.squeeze(1).long()
-        lf = logits.float()
-        ce = F.cross_entropy(lf, tl)
-        prob = torch.softmax(lf, dim=1)[:, 1]                          # (B,...) fg prob
-        g = t.squeeze(1)
-        num = 2.0 * (prob * g).flatten(1).sum(1) + 1.0
-        den = prob.flatten(1).sum(1) + g.flatten(1).sum(1) + 1.0
-        dice = (1.0 - num / den).mean()
-        total = total + w * (recipe.w_sem_ce * ce + recipe.w_sem_dice * dice)
-        ce_acc = ce_acc + w * ce
-        dice_acc = dice_acc + w * dice
-    return {"sem": total, "ce": ce_acc.detach(), "dice": dice_acc.detach()}
+        tl = (_downsample_target(tgt01, side).squeeze(1) > 0.5).long()  # (B,side,side,side) {0,1}
+        terms = surface_terms(
+            logits.float(), tl,
+            fg_weight=recipe.sem_fg_weight,
+            tversky_alpha=recipe.tversky_alpha, tversky_beta=recipe.tversky_beta, tversky_gamma=recipe.tversky_gamma,
+            skel_iters=recipe.skel_iters, sep_radius=recipe.sep_radius, ignore_label=None,
+        )
+        total = total + w * (recipe.w_sem_ce * terms["ce"] + recipe.w_sem_tversky * terms["tversky"]
+                             + recipe.w_sem_skel * terms["skel"] + recipe.w_sem_sep * terms["sep"])
+        for k in acc:
+            acc[k] = acc[k] + w * terms[k]
+    return {"sem": total, "ce": acc["ce"].detach(), "tversky": acc["tversky"].detach(),
+            "skel": acc["skel"].detach(), "sep": acc["sep"].detach(), "dice": acc["tversky"].detach()}
 
 
 # --------------------------------------------------------------------------- instance helpers

@@ -68,9 +68,18 @@ class HercuvitRecipe:
     unfreeze_epochs: int = 25                       # stage 2: all trainable, transformer 0.1×, windows ON
     instance_epochs: int = 100                      # stage 3: + instance head, joint
 
-    # --- semantic loss ---
+    # --- semantic loss (thin medial-surface stack, ported from HercUNet — see train/surface_loss.py) ---
+    sem_fg_weight: float = 30.0   # foreground CE weight — medial surfaces are ~0.1-0.3% of voxels; unweighted CE
+                                  # collapses to all-background, so up-weight the surface class.
     w_sem_ce: float = 1.0
-    w_sem_dice: float = 1.0
+    w_sem_tversky: float = 1.0    # Focal-Tversky (precision/imbalance), replaces plain Dice
+    w_sem_skel: float = 1.0       # clDice skeleton-recall (cover the GT medial skeleton)
+    w_sem_sep: float = 0.5        # separation penalty (anti-merge: P(surface) in inter-sheet gaps)
+    tversky_alpha: float = 0.5    # champion = symmetric (α=β=0.5) so Tversky = precision; skel-recall does recall
+    tversky_beta: float = 0.5
+    tversky_gamma: float = 1.0    # >1 = focal-Tversky
+    skel_iters: int = 3
+    sep_radius: int = 2
     deep_sup_weights: tuple = (1.0, 0.5, 0.25)      # full, 1/2, 1/4
 
     # --- instance loss (Mask2Former set prediction) ---

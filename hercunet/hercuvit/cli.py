@@ -103,6 +103,8 @@ def _add_distill(p: argparse.ArgumentParser) -> None:
     p.add_argument("--batch", type=int, default=1, help="crops per distillation step (default 1)")
     p.add_argument("--recipe", default=None, metavar="FILE.yml", help="YAML recipe (for the distill_* fields)")
     p.add_argument("--device", default="cuda", help="cuda | cpu (default cuda)")
+    p.add_argument("--source", default=None, metavar="SCROLL|ZARR",
+                   help="scroll id or zarr for real unlabelled CT crops (distil on real data, not synthetic)")
     p.add_argument("--smoke", action="store_true", help="tiny smoke run (few steps, for a quick sanity check)")
     p.set_defaults(func=_distill)
 

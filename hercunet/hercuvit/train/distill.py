@@ -45,6 +45,50 @@ def _synthetic_crops(n: int, batch: int, device, generator):
         yield torch.randn(batch, 1, 128, 128, 128, device=device, generator=generator)
 
 
+def _scroll_crops(source: str, n: int, batch: int, device, *, level: int = 0, crop: int = 128,
+                  min_material: float = 0.25, seed: int = 0, readahead: int = 4, workers: int = 4):
+    """Stream ``n`` batches of real, Dinovol-normalised ``crop``³ CT crops at random **tissue** locations in a
+    scroll (unlabelled — distillation needs no labels).
+
+    Fully data-layer-native: ``open_source`` opens the volume, ``locate_material`` (the data layer's coarse-slice
+    Otsu tissue detector) gives the material bbox for a random z-slab, and ``iter_material_tiles`` streams the
+    air-skipped, prefetched tissue tiles for that slab — no bespoke zarr/S3 reads and no hand-rolled nonzero
+    reject loop. Only the per-crop intensity normalisation (:func:`dinovol_normalise`) sits on top."""
+    import numpy as np
+    from ...infer.nnunet_infer import open_source
+    from ...data.tiling import locate_material, iter_material_tiles
+    from ..data.normalize import dinovol_normalise
+
+    vol = open_source(source)
+    Z, Y, X = vol.meta.level_shapes[level]
+    rng = np.random.default_rng(seed)
+    buf: list = []
+    produced = 0
+    guard = 0
+    while produced < n and guard < 10 * n + 50:
+        guard += 1
+        z0 = int(rng.integers(0, max(1, Z - crop)))
+        region = locate_material(vol, level, z0 + crop // 2)
+        if region is None:
+            continue
+        tiles = list(iter_material_tiles(vol, level, z0, z0 + crop, region, tile=crop, halo=0,
+                                         min_material=min_material, readahead=readahead, workers=workers))
+        rng.shuffle(tiles)
+        for t in tiles:
+            blk = np.asarray(t.block)
+            if blk.shape != (crop, crop, crop):   # bbox-edge tiles can be clipped — skip
+                continue
+            buf.append(dinovol_normalise(blk))
+            if len(buf) == batch:
+                yield torch.from_numpy(np.stack(buf)[:, None]).float().to(device)
+                buf = []
+                produced += 1
+                if produced >= n:
+                    return
+    if produced < n:
+        raise RuntimeError(f"could not sample {n} tissue crops from {source!r} (got {produced})")
+
+
 def distill(
     *,
     teacher_ckpt: str,
@@ -59,6 +103,7 @@ def distill(
     batch: int = 1,
     device: str = "cuda",
     smoke: bool = False,
+    source: str | None = None,
     log_every: int = 50,
     seed: int = 0,
 ) -> dict:
@@ -89,8 +134,12 @@ def distill(
     amp = device.startswith("cuda") if isinstance(device, str) else False
 
     last = {}
-    src = _synthetic_crops(steps, batch, device, gen) if smoke else _synthetic_crops(steps, batch, device, gen)
-    # NOTE: non-smoke real-crop streaming is the documented TODO (§13); the loop below is identical either way.
+    if source:
+        src = _scroll_crops(source, steps, batch, device, seed=seed)   # real unlabelled CT crops from a scroll
+    else:
+        src = _synthetic_crops(steps, batch, device, gen)              # synthetic (smoke / no source) — not meaningful
+        if not smoke:
+            print("[distil] WARNING: no --source given — distilling on SYNTHETIC noise (not meaningful).", flush=True)
     for step, x in enumerate(src, start=1):
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
             t_feats = teacher.forward_features(x, view_kind="global")
@@ -139,4 +188,5 @@ def run(args) -> dict:
         batch=int(g("batch", 1)),
         device=g("device", "cuda"),
         smoke=smoke,
+        source=g("source", None),
     )
