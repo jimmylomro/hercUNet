@@ -67,14 +67,28 @@ infer = [
                                    # faster than boto/s3fs for a zarr's 100k+ tiny objects (Go concurrency + cheap
                                    # signing); only invoked when --s3-prefix is given.
 ]
-# everything: viewer + fast reader + training + inference. Self-referential so it never drifts from the parts.
-full = ["hercunet[viz,accel,train,infer]"]
+# HercuViT: Dinovol-based sheet segmentation (hercunet.hercuvit). Standalone PyTorch trainer + full-volume
+# inference built on the vendored Dinovol EVA backbone; does NOT need the nnU-Net stack. torch/zarr/scipy/numpy
+# are already core deps; this adds the transformer + HF pull bits.
+hercuvit = [
+    "torch>=2.4",                  # SDPBackend.CUDNN_ATTENTION + sdpa_kernel(set_priority=) (attention backend)
+    "timm>=1.0",                   # layers used by the vendored Dinovol EVA backbone
+    "einops>=0.8",                 # tensor rearrange in the Dinovol backbone
+    "scipy>=1.9",                  # linear_sum_assignment (Hungarian matching) + ndimage (Gaussian blend)
+    "huggingface_hub>=0.20",       # --corpus-hf / --dinovol-hf / --model-hf pulls
+    "pyyaml>=6",                   # loads the recipe (hercunet/hercuvit/recipes/*.yml)
+    "zarr>=2.16,<3",               # OME-Zarr output (shared with the data layer)
+    "blosc2>=2.5",                 # zarr compression backend used by the output store
+]
+# everything: viewer + fast reader + training + inference + HercuViT. Self-referential so it never drifts.
+full = ["hercunet[viz,accel,train,infer,hercuvit]"]
 
 [project.urls]
 Repository = "https://github.com/jimmylomro/hercUNet"
 
 [project.scripts]
 hercunet = "hercunet.cli:main"
+hercuvit = "hercunet.hercuvit.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["hercunet*"]
@@ -82,6 +96,8 @@ include = ["hercunet*"]
 [tool.setuptools.package-data]
 # ship the training recipe YAMLs (loaded by hercunet.training.recipe at run time)
 "hercunet.recipes" = ["*.yml"]
+# ship the HercuViT recipe YAMLs (loaded by hercunet.hercuvit.train.recipe at run time)
+"hercunet.hercuvit.recipes" = ["*.yml"]
 
 [tool.pytest.ini_options]
 markers = ["network: hits the live Vesuvius S3 bucket (opt-in via HERCUNET_NET_TEST=1)"]
