@@ -47,6 +47,22 @@ def mask_logits_at_points(mask_embed: torch.Tensor, sampled_features: torch.Tens
     return torch.einsum("bqc,bcp->bqp", mask_embed, sampled_features)
 
 
+def m2f_semantic_prob(layer_out: dict, mask_features: torch.Tensor, *, reduce: str = "max") -> torch.Tensor:
+    """Mask2Former **semantic** readout — sheet-surface probability from the instance head (no separate dense head).
+
+    Mask2Former does semantic segmentation as mask classification: combine per-query (class-prob × mask-prob). Here
+    the single foreground class is "sheet", so ``sheet_prob(voxel) = reduce_q [ P(class_q=sheet) · σ(mask_q(voxel)) ]``
+    with ``mask_q = mask_embed_q · mask_features`` (``mask_features`` is the full-res pixel-decoder output that
+    consumes the stem skips). ``reduce="max"`` (is any sheet here) or ``"sum"`` (M2F's soft-union logit). Returns
+    ``(B, D, H, W)`` in [0,1].
+    """
+    cls = torch.softmax(layer_out["class_logits"].float(), dim=-1)[..., 1]            # (B,Q) P(sheet)
+    masks = torch.sigmoid(mask_logits_from_embed(layer_out["mask_embed"].float(), mask_features.float()))  # (B,Q,D,H,W)
+    weighted = cls[..., None, None, None] * masks
+    sem = weighted.amax(dim=1) if reduce == "max" else weighted.sum(dim=1)
+    return sem.clamp(0.0, 1.0)
+
+
 class QuerySelector(nn.Module):
     """Objectness over the token grid → top-K anchored queries (two-stage selection)."""
 

@@ -44,18 +44,18 @@ def semantic_loss(sem_logits, sem_target: torch.Tensor, recipe) -> dict:
     kept for log compatibility)."""
     from .surface_loss import surface_terms
     weights = recipe.deep_sup_weights
-    tgt01 = (sem_target > 0).float().unsqueeze(1)                       # (B,1,D,H,W) for downsampling
+    sem_f = sem_target[:, None].float()                                 # (B,1,D,H,W) {0 bg,1 surface,2 ignore}
     total = sem_logits[0].new_zeros(())
     acc = {k: sem_logits[0].new_zeros(()) for k in ("ce", "tversky", "skel", "sep")}
     for i, logits in enumerate(sem_logits):
         w = float(weights[i]) if i < len(weights) else 0.0
         side = logits.shape[-1]
-        tl = (_downsample_target(tgt01, side).squeeze(1) > 0.5).long()  # (B,side,side,side) {0,1}
+        tl = F.interpolate(sem_f, size=(side, side, side), mode="nearest")[:, 0].long()  # nearest keeps {0,1,2}
         terms = surface_terms(
             logits.float(), tl,
             fg_weight=recipe.sem_fg_weight,
             tversky_alpha=recipe.tversky_alpha, tversky_beta=recipe.tversky_beta, tversky_gamma=recipe.tversky_gamma,
-            skel_iters=recipe.skel_iters, sep_radius=recipe.sep_radius, ignore_label=None,
+            skel_iters=recipe.skel_iters, sep_radius=recipe.sep_radius, ignore_label=2,
         )
         total = total + w * (recipe.w_sem_ce * terms["ce"] + recipe.w_sem_tversky * terms["tversky"]
                              + recipe.w_sem_skel * terms["skel"] + recipe.w_sem_sep * terms["sep"])
@@ -66,19 +66,23 @@ def semantic_loss(sem_logits, sem_target: torch.Tensor, recipe) -> dict:
 
 
 # --------------------------------------------------------------------------- instance helpers
-def _sample_points(owner_flat: torch.Tensor, n: int, rng: torch.Generator) -> torch.Tensor:
-    """``n`` flat voxel indices: ~half from sheet voxels (owner>0), the rest uniform. Returns (n,) long."""
-    nvox = owner_flat.numel()
+def _sample_points(owner_flat: torch.Tensor, ignore_flat: torch.Tensor, n: int, rng: torch.Generator) -> torch.Tensor:
+    """``n`` flat voxel indices: ~half from sheet voxels (owner>0), the rest from **confident background**
+    (owner==0 AND not ignore). Ignore voxels (``ignore_flat``) are never sampled — they are neither positive nor
+    negative, matching the confidence/collapsed-sheet masking. Returns (n,) long."""
+    dev = owner_flat.device
     pos = (owner_flat > 0).nonzero(as_tuple=False).squeeze(1)
+    neg = ((owner_flat == 0) & (~ignore_flat)).nonzero(as_tuple=False).squeeze(1)
     n_pos = min(n // 2, int(pos.numel()))
     out = []
     if n_pos > 0:
-        pick = torch.randint(0, int(pos.numel()), (n_pos,), generator=rng, device=owner_flat.device)
-        out.append(pos[pick])
-    n_rand = n - n_pos
-    if n_rand > 0:
-        out.append(torch.randint(0, nvox, (n_rand,), generator=rng, device=owner_flat.device))
-    return torch.cat(out, 0) if out else torch.zeros(0, dtype=torch.long, device=owner_flat.device)
+        out.append(pos[torch.randint(0, int(pos.numel()), (n_pos,), generator=rng, device=dev)])
+    n_neg = n - n_pos
+    if n_neg > 0 and int(neg.numel()) > 0:
+        out.append(neg[torch.randint(0, int(neg.numel()), (n_neg,), generator=rng, device=dev)])
+    elif n_neg > 0 and int(pos.numel()) > 0:                     # degenerate: no clean bg → fall back to positives
+        out.append(pos[torch.randint(0, int(pos.numel()), (n_neg,), generator=rng, device=dev)])
+    return torch.cat(out, 0) if out else torch.zeros(0, dtype=torch.long, device=dev)
 
 
 def _bce_cost(pred_logits: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
@@ -147,9 +151,12 @@ def _instance_item(layer_out_b, feat_pts, owner_pts, ids, recipe, *, is_final: b
 
 
 def instance_loss(instance: dict, mask_features: torch.Tensor, owner: torch.Tensor,
-                  has_identity, recipe, *, seed: int = 0) -> dict:
+                  has_identity, recipe, *, ignore: torch.Tensor | None = None, seed: int = 0) -> dict:
     """Mask2Former set-prediction + objectness loss over the batch. Returns ``{inst, class, mask_bce, mask_dice,
-    obj}`` (``inst`` = the weighted total). Per item without identity → a grad-connected zero (no supervision)."""
+    obj}`` (``inst`` = the weighted total). Per item without identity → a grad-connected zero (no supervision).
+
+    ``ignore`` (B,D,H,W bool, from the surface label ``== 2``): confidence-/collapsed-sheet-masked voxels, excluded
+    from the point-sampled negatives and from the objectness target — never supervised as background."""
     B = mask_features.shape[0]
     C = mask_features.shape[1]
     layers = instance["layers"]
@@ -175,8 +182,10 @@ def instance_loss(instance: dict, mask_features: torch.Tensor, owner: torch.Tens
         n_ident += 1
 
         owner_flat = owner[b].reshape(-1)
+        ign_b = ignore[b] if ignore is not None else torch.zeros_like(owner[b], dtype=torch.bool)
+        ignore_flat = ign_b.reshape(-1).bool()
         ids = [int(i) for i in torch.unique(owner_flat).tolist() if i > 0]
-        pts = _sample_points(owner_flat, recipe.point_sample, rng)
+        pts = _sample_points(owner_flat, ignore_flat, recipe.point_sample, rng)
         mf_flat = mask_features[b].reshape(C, -1)                     # (C, Nvox)
         feat_pts = mf_flat[:, pts]                                    # (C,P)
         owner_pts = owner_flat[pts]                                   # (P,)
@@ -190,12 +199,15 @@ def instance_loss(instance: dict, mask_features: torch.Tensor, owner: torch.Tens
             tot_bce = tot_bce + w * out["mask_bce"]
             tot_dice = tot_dice + w * out["mask_dice"]
 
-        # token objectness: 16³ cell is positive iff a sheet voxel falls in it (max-pool owner>0 by patch=8).
+        # token objectness: 16³ cell is positive iff a sheet voxel falls in it; cells that are >=50% ignore are
+        # excluded from the objectness BCE (not forced to either class).
         side = round(objectness.shape[1] ** (1 / 3))
+        k = owner[b].shape[-1] // side
         pool = (owner[b] > 0).float()[None, None]
-        k = pool.shape[-1] // side
         obj_target = (F.max_pool3d(pool, kernel_size=k, stride=k) > 0).reshape(-1).float()
-        tot_obj = tot_obj + F.binary_cross_entropy_with_logits(objectness[b], obj_target)
+        obj_valid = (F.avg_pool3d(ign_b.float()[None, None], kernel_size=k, stride=k) < 0.5).reshape(-1).float()
+        obj_bce = F.binary_cross_entropy_with_logits(objectness[b], obj_target, reduction="none")
+        tot_obj = tot_obj + (obj_bce * obj_valid).sum() / obj_valid.sum().clamp_min(1.0)
 
     denom = max(n_ident, 1)
     inst = (recipe.w_class * tot_class + recipe.w_mask_bce * tot_bce
