@@ -24,7 +24,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from ..model.instance_head import mask_logits_at_points
+from ..model.instance_head import mask_logits_at_points, mask_logits_from_embed
 
 
 # --------------------------------------------------------------------------- semantic
@@ -101,51 +101,54 @@ def _dice_cost(prob: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
     return 1.0 - (num + 1.0) / (den + 1.0)
 
 
-def _instance_item(layer_out_b, feat_pts, owner_pts, ids, recipe, *, is_final: bool):
-    """Matched set-prediction losses for ONE item at ONE decoder layer.
+def _instance_item(layer_out_b, feat_pts, owner_pts, ids, mask_features_b, owner_b, valid_b, recipe):
+    """Matched set-prediction losses for ONE item at ONE decoder layer. Hungarian assignment uses the cheap
+    point-sampled cost, but the **mask loss is DENSE** — the matched queries' full-resolution masks (``mask_embed
+    · mask_features``) are supervised against the GT sheet over every valid (non-ignore) voxel. Dense is essential
+    here: sparse point-sampled mask loss leaves the full-res mask features sheet-uncorrelated (measured AUC≈0.5).
 
-    ``layer_out_b`` = {class_logits (Q,2), mask_embed (Q,C), anchors (Q,3)} for this item;
-    ``feat_pts`` (C,P) point-sampled mask features; ``owner_pts`` (P,) owner id per point; ``ids`` the GT ids.
-    Returns ``{class, mask_bce, mask_dice}`` scalar tensors (grad-connected).
+    ``feat_pts`` (C,P) / ``owner_pts`` (P,) = sampled features/owner (cost only); ``mask_features_b`` (C,D,H,W),
+    ``owner_b`` (D,H,W), ``valid_b`` (D,H,W bool) = dense. Returns ``{class, mask_bce, mask_dice}``.
     """
     class_logits = layer_out_b["class_logits"]                         # (Q,2)
     mask_embed = layer_out_b["mask_embed"]                             # (Q,C)
     Q = class_logits.shape[0]
     device = class_logits.device
-
-    pred_pts = mask_logits_at_points(mask_embed.unsqueeze(0), feat_pts.unsqueeze(0))[0]  # (Q,P)
     G = len(ids)
     if G == 0:
         cls_target = torch.zeros(Q, dtype=torch.long, device=device)   # all no-object
         cw = torch.tensor([recipe.no_object_weight, 1.0], device=device)
         loss_class = F.cross_entropy(class_logits, cls_target, weight=cw)
-        zero = pred_pts.sum() * 0.0
+        zero = mask_embed.sum() * 0.0
         return {"class": loss_class, "mask_bce": zero, "mask_dice": zero}
 
+    # --- Hungarian assignment on the cheap sampled cost ---
+    pred_pts = mask_logits_at_points(mask_embed.unsqueeze(0), feat_pts.unsqueeze(0))[0]  # (Q,P)
     gt_pts = torch.stack([(owner_pts == i).float() for i in ids], 0)   # (G,P)
     with torch.no_grad():
-        cls_prob = torch.softmax(class_logits, dim=-1)                 # (Q,2)
-        cost_class = -cls_prob[:, 1].unsqueeze(1).expand(Q, G)
-        cost_bce = _bce_cost(pred_pts, gt_pts)
-        cost_dice = _dice_cost(torch.sigmoid(pred_pts), gt_pts)
-        cost = (recipe.cost_class * cost_class + recipe.cost_mask_bce * cost_bce
-                + recipe.cost_mask_dice * cost_dice)
+        cls_prob = torch.softmax(class_logits, dim=-1)
+        cost = (recipe.cost_class * (-cls_prob[:, 1].unsqueeze(1).expand(Q, G))
+                + recipe.cost_mask_bce * _bce_cost(pred_pts, gt_pts)
+                + recipe.cost_mask_dice * _dice_cost(torch.sigmoid(pred_pts), gt_pts))
         from scipy.optimize import linear_sum_assignment
         rows, cols = linear_sum_assignment(cost.detach().float().cpu().numpy())
     rows_t = torch.as_tensor(rows, dtype=torch.long, device=device)
-    cols_t = torch.as_tensor(cols, dtype=torch.long, device=device)
 
     cls_target = torch.zeros(Q, dtype=torch.long, device=device)
     cls_target[rows_t] = 1                                             # matched queries → sheet
     cw = torch.tensor([recipe.no_object_weight, 1.0], device=device)
     loss_class = F.cross_entropy(class_logits, cls_target, weight=cw)
 
-    mp = pred_pts[rows_t]                                              # (M,P)
-    mg = gt_pts[cols_t]                                                # (M,P)
-    loss_bce = F.binary_cross_entropy_with_logits(mp, mg)
-    prob = torch.sigmoid(mp)
-    num = 2.0 * (prob * mg).sum(-1) + 1.0
-    den = prob.sum(-1) + mg.sum(-1) + 1.0
+    # --- DENSE mask loss on the matched queries (full-res, ignore-masked) ---
+    me_m = mask_embed[rows_t]                                          # (M,C)
+    mlog = mask_logits_from_embed(me_m.unsqueeze(0), mask_features_b.unsqueeze(0))[0]     # (M,D,H,W)
+    gt_m = torch.stack([(owner_b == int(ids[c])).float() for c in cols.tolist()], 0)     # (M,D,H,W)
+    v = valid_b.float().unsqueeze(0)                                   # (1,D,H,W)
+    bce = F.binary_cross_entropy_with_logits(mlog, gt_m, reduction="none")
+    loss_bce = (bce * v).sum() / (v.sum() * mlog.shape[0]).clamp_min(1.0)
+    p = torch.sigmoid(mlog)
+    num = 2.0 * (p * gt_m * v).sum(dim=(1, 2, 3)) + 1.0
+    den = (p * v).sum(dim=(1, 2, 3)) + (gt_m * v).sum(dim=(1, 2, 3)) + 1.0
     loss_dice = (1.0 - num / den).mean()
     return {"class": loss_class, "mask_bce": loss_bce, "mask_dice": loss_dice}
 
@@ -182,10 +185,11 @@ def instance_loss(instance: dict, mask_features: torch.Tensor, owner: torch.Tens
         n_ident += 1
 
         owner_flat = owner[b].reshape(-1)
-        ign_b = ignore[b] if ignore is not None else torch.zeros_like(owner[b], dtype=torch.bool)
-        ignore_flat = ign_b.reshape(-1).bool()
+        ign_b = (ignore[b] if ignore is not None else torch.zeros_like(owner[b], dtype=torch.bool)).bool()
+        ignore_flat = ign_b.reshape(-1)
+        valid_b = ~ign_b                                              # (D,H,W) non-ignore voxels (dense mask loss)
         ids = [int(i) for i in torch.unique(owner_flat).tolist() if i > 0]
-        pts = _sample_points(owner_flat, ignore_flat, recipe.point_sample, rng)
+        pts = _sample_points(owner_flat, ignore_flat, recipe.point_sample, rng)  # for the Hungarian COST only
         mf_flat = mask_features[b].reshape(C, -1)                     # (C, Nvox)
         feat_pts = mf_flat[:, pts]                                    # (C,P)
         owner_pts = owner_flat[pts]                                   # (P,)
@@ -193,7 +197,7 @@ def instance_loss(instance: dict, mask_features: torch.Tensor, owner: torch.Tens
         for li, lay in enumerate(layers):
             lay_b = {"class_logits": lay["class_logits"][b], "mask_embed": lay["mask_embed"][b]}
             is_final = (li == len(layers) - 1)
-            out = _instance_item(lay_b, feat_pts, owner_pts, ids, recipe, is_final=is_final)
+            out = _instance_item(lay_b, feat_pts, owner_pts, ids, mask_features[b], owner[b], valid_b, recipe)
             w = 1.0 if is_final else recipe.aux_weight
             tot_class = tot_class + w * out["class"]
             tot_bce = tot_bce + w * out["mask_bce"]

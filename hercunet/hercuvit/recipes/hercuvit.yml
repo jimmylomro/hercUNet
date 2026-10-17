@@ -46,7 +46,7 @@ unfreeze_epochs: 25
 instance_epochs: 100
 
 # semantic loss (thin medial-surface stack: fg-weighted CE + Focal-Tversky + clDice skel-recall + separation)
-sem_fg_weight: 30.0
+sem_fg_weight: 5.0
 w_sem_ce: 1.0
 w_sem_tversky: 1.0
 w_sem_skel: 1.0

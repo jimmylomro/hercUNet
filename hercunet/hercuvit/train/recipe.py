@@ -69,7 +69,7 @@ class HercuvitRecipe:
     instance_epochs: int = 100                      # stage 3: + instance head, joint
 
     # --- semantic loss (thin medial-surface stack, ported from HercUNet — see train/surface_loss.py) ---
-    sem_fg_weight: float = 30.0   # foreground CE weight — medial surfaces are ~0.1-0.3% of voxels; unweighted CE
+    sem_fg_weight: float = 5.0   # foreground CE weight — medial surfaces are ~0.1-0.3% of voxels; unweighted CE
                                   # collapses to all-background, so up-weight the surface class.
     w_sem_ce: float = 1.0
     w_sem_tversky: float = 1.0    # Focal-Tversky (precision/imbalance), replaces plain Dice
