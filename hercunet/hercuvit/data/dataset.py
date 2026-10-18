@@ -65,22 +65,41 @@ class ScrollCtReader:
         return self._vols[key]
 
     def __call__(self, scroll, level, org, shape) -> np.ndarray:
-        z0, y0, x0 = (int(o) for o in org)
+        # ``org`` is the window CENTRE (z,y,x), as written by the label export — mirror hercunet's origin math
+        # (train/dataset.py:_window_req, "same origin math as label generation's open_ct"): the read origin is
+        # ``centre - shape//2`` clipped to the level's bounds. Treating ``org`` as the origin (no -shape//2) reads a
+        # window offset by half a window → CT misaligned with the label on every axis.
+        zc, yc, xc = (int(o) for o in org)
         dz, dy, dx = (int(s) for s in shape)
-        blk, _origin = self._vol(scroll).read_window(int(level), z0, z0 + dz, y0, y0 + dy, x0, x0 + dx)
+        vol = self._vol(scroll)
+        Zf, Yf, Xf = vol.meta.level_shapes[int(level)]
+        z0 = int(np.clip(zc - dz // 2, 0, max(0, Zf - dz)))
+        y0 = int(np.clip(yc - dy // 2, 0, max(0, Yf - dy)))
+        x0 = int(np.clip(xc - dx // 2, 0, max(0, Xf - dx)))
+        blk, _origin = vol.read_window(int(level), z0, z0 + dz, y0, y0 + dy, x0, x0 + dx)
         return np.asarray(blk)
 
 
 # --------------------------------------------------------------------------- pure helpers (unit-testable)
 def resample_to_crop(ct: np.ndarray, labels: dict, voxel_um: float, *,
-                     target_voxel_um: float = TARGET_VOXEL_UM, crop: int = CROP) -> tuple[np.ndarray, dict]:
-    """Centre-crop the native cube to Dinovol's physical FOV, then resize to ``crop``³ (CT trilinear, every label
-    nearest). ``labels`` maps name -> ``(D,H,W)`` int volume. Returns ``(ct_crop, {name: label_crop})``."""
+                     target_voxel_um: float = TARGET_VOXEL_UM, crop: int = CROP,
+                     rng: np.random.Generator | None = None) -> tuple[np.ndarray, dict]:
+    """Crop the native cube to Dinovol's physical FOV, then resize to ``crop``³ (CT trilinear, every label nearest).
+    ``labels`` maps name -> ``(D,H,W)`` int volume. Returns ``(ct_crop, {name: label_crop})``.
+
+    The FOV (``crop·target_voxel_um/voxel_um`` ≈ 155³ for a 128³@9.6µm crop of a 7.91µm window) is smaller than the
+    native herculabels window (~220³), so a crop is needed to hold the 9.6µm scale. With ``rng`` the crop offset is
+    RANDOM (whole native window is seen across epochs + a free spatial augmentation); without it the crop is CENTRED
+    (deterministic — used for validation). Centre-only would keep ~35% of each window and never see the outer sheets."""
     ct = np.asarray(ct, dtype=np.float32)
     fov_vox = max(1, int(round(crop * target_voxel_um / float(voxel_um))))
 
     def _c(n, want):
-        take = min(n, want); lo = (n - take) // 2
+        take = min(n, want)
+        if rng is not None and n > take:
+            lo = int(rng.integers(0, n - take + 1))
+        else:
+            lo = (n - take) // 2
         return slice(lo, lo + take)
 
     sz, sy, sx = _c(ct.shape[0], fov_vox), _c(ct.shape[1], fov_vox), _c(ct.shape[2], fov_vox)
@@ -195,8 +214,10 @@ class HercuvitDataset(Dataset):
         if tuple(ct_native.shape) != tuple(int(s) for s in shape):
             raise ValueError(f"{path}: CT read shape {ct_native.shape} != meta shape {tuple(shape)}")
         ct_norm = dinovol_normalise(ct_native)
+        # random crop offset when augmenting (whole ~220³ window seen over epochs); centre-cropped for val.
         ct, labs = resample_to_crop(ct_norm, {"surf": surf, "owner": inst}, vu,
-                                    target_voxel_um=self.target_voxel_um, crop=self.crop)
+                                    target_voxel_um=self.target_voxel_um, crop=self.crop,
+                                    rng=(rng if self.augment else None))
         if self.augment:
             ct, labs = geometric_augment(ct, labs, rng)
 
