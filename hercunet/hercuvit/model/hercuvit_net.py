@@ -122,6 +122,7 @@ _RETROFIT_KEYS = ("global_blocks", "window_size", "global_attention", "sr_factor
 #: this; the recipe may still override individual fields). ``small`` = {} means "dinovol-matching defaults".
 #: ``mlp_ratio`` is the hidden/embed ratio (tiny: hidden 768, nano: hidden 512).
 VARIANT_ARCH: dict[str, dict] = {
+    "full": {"global_blocks": "all"},   # raw Dinovol loaded in full: ALL-global attention, no windowing (the teacher)
     "small": {},
     "tiny": {
         "embed_dim": 288, "depth": 8, "num_heads": 6, "mlp_ratio": 768 / 288,
@@ -135,11 +136,21 @@ VARIANT_ARCH: dict[str, dict] = {
 
 
 def build_variant(ckpt_path, variant: str = "small", **kwargs) -> HercuVitNet:
-    """Convenience wrapper: build a named variant (``small`` / ``tiny`` / ``nano``) from :data:`VARIANT_ARCH`."""
+    """Convenience wrapper: build a named variant (``full`` / ``small`` / ``tiny`` / ``nano``) from :data:`VARIANT_ARCH`."""
     if variant not in VARIANT_ARCH:
         raise ValueError(f"unknown variant {variant!r}; expected one of {sorted(VARIANT_ARCH)}")
     arch = VARIANT_ARCH[variant] or None
     return build_hercuvit(ckpt_path, arch_override=arch, **kwargs)
+
+
+def encoder_variant(ckpt_path) -> str:
+    """Deduce the variant from an encoder ``.pt``: a distilled encoder reports its baked ``variant``
+    (small/tiny/nano); a raw Dinovol teacher is ``full`` (all-global). Lets the CLI pick the variant from the file
+    instead of a flag."""
+    blob = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    if isinstance(blob, dict) and "student_backbone" in blob:
+        return blob.get("variant", "small")
+    return "full"
 
 
 def build_hercuvit(
@@ -161,53 +172,66 @@ def build_hercuvit(
     add_null_query: bool = False,
     learned_queries: bool = False,
     strict_load: bool = True,
-    distilled_encoder: str | None = None,
 ) -> HercuVitNet:
-    """Build **any** HercuViT variant — one config-driven path.
+    """Build **any** HercuViT variant from an encoder ``.pt`` — one config-driven path that DETECTS the kind:
 
-    ``arch_override`` (from a recipe preset) may set the Eva keys ``embed_dim / depth / num_heads / mlp_ratio``
-    and the retrofit keys ``global_blocks / window_size / global_attention / sr_factor``. With no override it
-    builds **hercuvit-small** (the dinovol-matching config, weights loaded strictly). When the Eva config differs
-    from the checkpoint (hercuvit-tiny / -nano) only the shape-matching Dinovol weights are transferred (stem
-    always; attention when ``embed_dim`` is unchanged) and the rest stay fresh for distillation
-    (``train/distill.py``). ``global_attention="spatial_reduction"`` selects PVT-style global blocks for the slim
-    variants. Returns the net on ``device``; ``net._hercuvit_fresh_params`` lists the un-transferred params.
+    * a **distilled encoder** (a ``hercuvit distill`` output, has ``student_backbone``) is self-contained — the
+      exact windowed variant (small/tiny/nano) is rebuilt from its saved ``model_cfg`` + ``variant_cfg`` and the
+      trained windowed weights loaded. ``arch_override`` is ignored (the file is authoritative).
+    * a **raw Dinovol teacher** is built per ``arch_override``: ``{}`` → small (windowed retrofit, strict load);
+      ``{"global_blocks": "all"}`` (the ``full`` variant) → ALL-global, no windowing; tiny/nano transfer the
+      shape-matching weights and leave the rest fresh for distillation.
+
+    Returns the net on ``device``; ``net._hercuvit_fresh_params`` lists un-transferred params (empty for a
+    distilled encoder / small / full).
     """
     arch = dict(arch_override or {})
-    teacher, ckpt_cfg, _ = load_dinovol_checkpoint(ckpt_path, map_location=device)
-    cfg = dict(ckpt_cfg)
-    for key in _EVA_ARCH_KEYS:
-        if key in arch:
-            cfg[key] = arch[key]
-    gblocks = arch.get("global_blocks", global_blocks)
-    win = arch.get("window_size", window_size)
-    gattn = arch.get("global_attention", global_attention)
-    srf = arch.get("sr_factor", sr_factor)
+    blob = torch.load(ckpt_path, map_location=device, weights_only=False)
 
-    is_small = all(cfg.get(k) == ckpt_cfg.get(k) for k in _EVA_ARCH_KEYS)
-    backbone = build_dinovol_backbone(cfg)
-    bb_sd = _strip_backbone_prefix(teacher)
-    fresh: list[str] = []
-    if is_small:
-        missing, unexpected = backbone.load_state_dict(bb_sd, strict=False)
-        missing = [m for m in missing if "num_batches_tracked" not in m]
-        unexpected = [u for u in unexpected if "num_batches_tracked" not in u]
-        if strict_load and (missing or unexpected):
-            raise RuntimeError(f"Dinovol backbone load not clean: missing={missing[:5]} unexpected={unexpected[:5]}")
-    else:
-        fresh = load_matching_backbone_weights(backbone, bb_sd)  # slim variant: transfer stem/attn, distil the rest
-    backbone.return_embed_skips = True
-    retrofit_windowed(backbone, global_blocks=gblocks, window_size=win, global_attention=gattn, sr_factor=srf)
-
-    if distilled_encoder:                 # warm-start the RETROFITTED backbone from a distilled encoder (same keys)
-        dsd = torch.load(distilled_encoder, map_location=device, weights_only=False)
-        sd = dsd.get("student_backbone", dsd) if isinstance(dsd, dict) else dsd
-        dm, du = backbone.load_state_dict(sd, strict=False)
+    if isinstance(blob, dict) and "student_backbone" in blob:
+        # DISTILLED encoder — self-contained: rebuild the exact variant from its saved cfg + load the trained weights.
+        cfg = dict(blob["model_cfg"])
+        vcfg = blob.get("variant_cfg", {})
+        backbone = build_dinovol_backbone(cfg)
+        backbone.return_embed_skips = True
+        retrofit_windowed(backbone, global_blocks=vcfg.get("global_blocks", global_blocks),
+                          window_size=vcfg.get("window_size", window_size),
+                          global_attention=vcfg.get("global_attention", global_attention),
+                          sr_factor=vcfg.get("sr_factor", sr_factor))
+        dm, du = backbone.load_state_dict(blob["student_backbone"], strict=False)
         dm = [k for k in dm if "num_batches_tracked" not in k]
         du = [k for k in du if "num_batches_tracked" not in k]
         if strict_load and (dm or du):
             raise RuntimeError(f"distilled encoder load not clean: missing={dm[:5]} unexpected={du[:5]}")
-        fresh = []                        # a distilled encoder leaves no fresh (un-transferred) params
+        fresh: list[str] = []
+    else:
+        # RAW Dinovol teacher — build per the variant's arch_override.
+        teacher = blob["teacher"]
+        ckpt_cfg = blob["config"]["model"]
+        cfg = dict(ckpt_cfg)
+        for key in _EVA_ARCH_KEYS:
+            if key in arch:
+                cfg[key] = arch[key]
+        gblocks = arch.get("global_blocks", global_blocks)
+        if gblocks == "all":                                        # the 'full' variant: window nothing = all-global
+            gblocks = tuple(range(1, int(cfg["depth"]) + 1))
+        win = arch.get("window_size", window_size)
+        gattn = arch.get("global_attention", global_attention)
+        srf = arch.get("sr_factor", sr_factor)
+        is_small = all(cfg.get(k) == ckpt_cfg.get(k) for k in _EVA_ARCH_KEYS)
+        backbone = build_dinovol_backbone(cfg)
+        bb_sd = _strip_backbone_prefix(teacher)
+        fresh = []
+        if is_small:
+            missing, unexpected = backbone.load_state_dict(bb_sd, strict=False)
+            missing = [m for m in missing if "num_batches_tracked" not in m]
+            unexpected = [u for u in unexpected if "num_batches_tracked" not in u]
+            if strict_load and (missing or unexpected):
+                raise RuntimeError(f"Dinovol backbone load not clean: missing={missing[:5]} unexpected={unexpected[:5]}")
+        else:
+            fresh = load_matching_backbone_weights(backbone, bb_sd)  # slim: transfer stem/attn, distil the rest
+        backbone.return_embed_skips = True
+        retrofit_windowed(backbone, global_blocks=gblocks, window_size=win, global_attention=gattn, sr_factor=srf)
 
     net = HercuVitNet(
         backbone,

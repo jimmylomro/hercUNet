@@ -42,8 +42,10 @@ def test_recipe_default_and_yaml_roundtrip(tmp_path):
 def test_variant_source_of_truth_and_resolve():
     # arch numbers are the single source of truth in hercuvit_net.VARIANT_ARCH; the recipe only selects a name.
     from hercunet.hercuvit.model.hercuvit_net import VARIANT_ARCH
-    assert set(R.VARIANTS) == set(VARIANT_ARCH) == {"small", "tiny", "nano"}
+    assert set(R.VARIANTS) == {"small", "tiny", "nano"}        # distillable/recipe-selectable variants
+    assert set(VARIANT_ARCH) == {"full", "small", "tiny", "nano"}   # + 'full' = raw Dinovol all-global (load mode)
     assert VARIANT_ARCH["small"] == {}                         # small = Dinovol-matching defaults
+    assert VARIANT_ARCH["full"] == {"global_blocks": "all"}    # full = window nothing
     assert VARIANT_ARCH["tiny"]["depth"] == 8 and VARIANT_ARCH["nano"]["embed_dim"] == 192
     assert R.HERCUVIT.variant == "small" and R.HERCUVIT.arch_override == {}
     # netbuild.resolve_arch merges the recipe tweak OVER the canonical preset.
@@ -62,11 +64,11 @@ def test_distill_fields_present():
 def test_cli_parses_all_subcommands():
     from hercunet.hercuvit.cli import build_parser
     p = build_parser()
-    a = p.parse_args(["train", "chain", "--corpus-hf", "--dinovol-hf", "--out", "/tmp/o", "--variant", "tiny"])
+    a = p.parse_args(["train", "chain", "--corpus-hf", "--encoder-hf", "--out", "/tmp/o", "--variant", "tiny"])
     assert a.variant == "tiny" and a.out == "/tmp/o"
-    a = p.parse_args(["train", "fit", "--corpus", "/c", "--dinovol", "/d.pt", "--out", "/o",
+    a = p.parse_args(["train", "fit", "--corpus", "/c", "--encoder", "/d.pt", "--out", "/o",
                       "--attention-backend", "flash"])
-    assert a.attention_backend == "flash"
+    assert a.attention_backend == "flash" and a.encoder == "/d.pt"
     a = p.parse_args(["distill", "--student", "nano", "--out", "/o", "--smoke", "--batch", "2"])
     assert a.student == "nano" and a.func.__name__ == "_distill" and a.smoke is True and a.batch == 2
     a = p.parse_args(["infer", "single-instance", "PHerc1447", "--model", "/m", "--out", "/o"])

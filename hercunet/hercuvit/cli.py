@@ -29,13 +29,14 @@ def _add_train_common(p: argparse.ArgumentParser) -> None:
                    help="local herculabels corpus dir (sample_*.npz)")
     p.add_argument("--corpus-hf", dest="corpus_hf", nargs="?", const=_CORPUS_HF, default=None, metavar="REPO",
                    help=f"download the corpus from an HF dataset (bare flag = {_CORPUS_HF})")
-    # Dinovol encoder source (local ckpt or HF model)
-    p.add_argument("--dinovol", default=None, metavar="CKPT",
-                   help="local Dinovol encoder checkpoint (teacher_305k.pt)")
-    p.add_argument("--dinovol-hf", dest="dinovol_hf", nargs="?", const=_DINOVOL_HF, default=None, metavar="REPO",
-                   help=f"download the Dinovol encoder from an HF model repo (bare flag = {_DINOVOL_HF})")
-    p.add_argument("--dinovol-file", dest="dinovol_file", default=None, metavar="NAME",
-                   help="checkpoint filename within the Dinovol HF repo (default: teacher_305k.pt)")
+    # encoder source — the variant is DEDUCED from the .pt (distilled → small/tiny/nano; raw Dinovol → full)
+    p.add_argument("--encoder", default=None, metavar="CKPT",
+                   help="encoder checkpoint to start from: a `hercuvit distill` output (→ its windowed variant) OR "
+                        "a raw Dinovol teacher (→ 'full', all-global). The variant is read from the file.")
+    p.add_argument("--encoder-hf", dest="encoder_hf", nargs="?", const=_DINOVOL_HF, default=None, metavar="REPO",
+                   help=f"download the encoder from an HF model repo (bare flag = the raw Dinovol {_DINOVOL_HF})")
+    p.add_argument("--encoder-file", dest="encoder_file", default=None, metavar="NAME",
+                   help="checkpoint filename within the HF encoder repo (default: teacher_305k.pt)")
     p.add_argument("--out", required=True, metavar="DIR", help="output dir for checkpoints + logs")
     p.add_argument("--recipe", default=None, metavar="FILE.yml",
                    help="YAML recipe (copy hercunet/hercuvit/recipes/hercuvit.yml and edit); omit for the default")
@@ -46,11 +47,8 @@ def _add_train_common(p: argparse.ArgumentParser) -> None:
                    help="SDPA kernel: auto|flash|cudnn|efficient|math (default: the recipe's 'auto'). Use 'auto' "
                         "on GPUs with no cuDNN plan for the windowed shapes (e.g. RTX 4060)")
     p.add_argument("--variant", default=None, choices=_VARIANTS,
-                   help="architecture variant (default: the recipe's 'small'). small = BUILT ~27M windowed "
-                        "retrofit; tiny/nano = distilled nets (built via `hercuvit distill`)")
-    p.add_argument("--distilled-encoder", dest="distilled_encoder", default=None, metavar="CKPT",
-                   help="warm-start the windowed encoder from a distilled checkpoint (`hercuvit distill` output) "
-                        "instead of the raw Dinovol weights — recovers token identity under windowed attention")
+                   help="FROM-SCRATCH training of this variant (no encoder) — mutually exclusive with --encoder; "
+                        "NOT supported yet (raises). Normal training deduces the variant from --encoder.")
     p.add_argument("--num-workers", dest="num_workers", type=int, default=4, help="DataLoader workers (default 4)")
     p.add_argument("--continue", dest="continue_", action="store_true",
                    help="resume from {out}/checkpoint_latest.pth instead of warm-starting fresh")
@@ -99,8 +97,9 @@ def _add_distill(p: argparse.ArgumentParser) -> None:
                    help="output encoder (.pt file; a DIR for --student all). Reloaded via --distilled-encoder")
     p.add_argument("--steps", type=int, default=None, help="distillation steps (default: the recipe's)")
     p.add_argument("--corpus-mode", dest="corpus_mode", default="random",
-                   choices=("random", "herculabels", "m7"),
-                   help="unlabelled-crop source: random (many scrolls, default) | herculabels (--corpus) | m7 (--manifest)")
+                   choices=("random", "herculabels", "m7", "labels"),
+                   help="unlabelled-crop source: random (many scrolls, default) | herculabels (--corpus) | "
+                        "m7 (--manifest) | labels (herculabels + m7 together, the hercunet-corpus)")
     p.add_argument("--scrolls", default=None, metavar="IDS",
                    help="comma scroll ids for --corpus-mode random (default: all mined scrolls)")
     p.add_argument("--manifest", default=None, metavar="FILE.json",
@@ -113,8 +112,11 @@ def _add_distill(p: argparse.ArgumentParser) -> None:
     p.add_argument("--gram-weight", dest="gram_weight", type=float, default=None, help="Gram distillation weight")
     p.add_argument("--token-weight", dest="token_weight", type=float, default=None, help="per-token distil weight")
     p.add_argument("--cls-weight", dest="cls_weight", type=float, default=None, help="cls/register distil weight")
-    p.add_argument("--distill-lr", dest="distill_lr", type=float, default=None, help="distillation LR")
-    p.add_argument("--batch", type=int, default=1, help="crops per distillation step (default 1)")
+    p.add_argument("--distill-lr", dest="distill_lr", type=float, default=None, help="peak distillation LR")
+    p.add_argument("--warmup", type=int, default=0, metavar="N", help="linear LR warmup steps (serious runs: ~5%)")
+    p.add_argument("--lr-schedule", dest="lr_schedule", default="cosine", choices=("cosine", "constant"),
+                   help="LR schedule after warmup: cosine decay to ~0 (default) | constant")
+    p.add_argument("--batch", type=int, default=1, help="crops per distillation step (default 1; serious: 8)")
     p.add_argument("--recipe", default=None, metavar="FILE.yml", help="YAML recipe (for the distill_* fields)")
     p.add_argument("--device", default="cuda", help="cuda | cpu (default cuda)")
     p.add_argument("--source", default=None, metavar="SCROLL|ZARR",
