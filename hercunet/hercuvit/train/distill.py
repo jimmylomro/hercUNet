@@ -136,29 +136,60 @@ def _random_crops(scrolls, n, batch, device, *, seed=0, chunk=64, **kw):
         raise RuntimeError(f"could not sample {n} crops across {len(scrolls)} scrolls (got {produced})")
 
 
-def _ct_collate(b):
-    """DataLoader collate: stack just the CT (distillation is unlabelled). Module-level so workers can pickle it."""
-    return torch.stack([x["ct"] for x in b])
-
-
-def _herculabels_crops(corpus_dir, n, batch, device, *, seed=0, workers=6):
-    """HERCULABELS mode: stream the CT of the herculabels windows (reuses :class:`HercuvitDataset`; CT only,
-    labels dropped, augment on). Curated sheet-bearing crops, already Dinovol-normalised. Prefetched with a worker
-    DataLoader so the per-window S3 reads overlap (serious runs would starve on sequential reads)."""
-    from torch.utils.data import DataLoader
-    from ..data.dataset import HercuvitDataset
+def _herculabels_crops(corpus_dir, n, batch, device, *, seed=0, readahead=6, workers=6):
+    """HERCULABELS mode — CT streamed with hercunet's PROVEN pattern (``train/dataset.py`` export-labels): group
+    the windows BY SCROLL, open each volume ONCE via the shared backend (catalog built once), build centre-aligned
+    read requests with ``_window_req``, and ``iter_windows(vol, reqs)`` to prefetch the reads overlapped with the
+    distill compute. No per-window ``open_source``, no hand-rolled threads — all reused machinery. CT-only."""
+    import collections, glob, os
+    import numpy as np
+    from ...config import Config
+    from ...data import get_backend, iter_windows
+    from ...train.dataset import _find_scroll, _window_req, _scroll_of
+    from ..data.dataset import HercuvitDataset, resample_to_crop, TARGET_VOXEL_UM, CROP
+    from ..data.normalize import dinovol_normalise
     if not corpus_dir:
         raise SystemExit("hercuvit distil --corpus-mode herculabels needs --corpus <dir> (or --corpus-hf).")
-    ds = HercuvitDataset(corpus_dir, augment=True, identity_only=False)   # all windows; augment = free variety
-    loader = DataLoader(ds, batch_size=batch, shuffle=True, num_workers=workers, collate_fn=_ct_collate,
-                        drop_last=True, pin_memory=(str(device) != "cpu"), persistent_workers=bool(workers))
+    be = get_backend(Config.from_env())
+    paths = sorted(glob.glob(os.path.join(corpus_dir, "sample_*.npz")))
+    if not paths:
+        raise SystemExit(f"no sample_*.npz under {corpus_dir!r} — pull jimmylomro/hercunet-corpus first")
+    by_scroll = collections.OrderedDict()
+    for p in paths:
+        by_scroll.setdefault(_scroll_of(p), []).append(p)
+    rng = np.random.default_rng(seed)
+    scrolls = list(by_scroll)
+    print(f"[distil] herculabels: {len(paths)} windows / {len(scrolls)} scrolls — hercunet iter_windows prefetch "
+          f"(readahead {readahead})", flush=True)
     produced = 0
+    buf: list = []
     while produced < n:
-        for ct in loader:                                # (batch,1,128,128,128) Dinovol-normalised, prefetched
-            yield ct.to(device, non_blocking=True)
-            produced += 1
-            if produced >= n:
-                return
+        rng.shuffle(scrolls)
+        for sid in scrolls:
+            try:
+                vol = be.open_scroll_volume(_find_scroll(be, sid))
+            except Exception as e:                               # a missing/dead scroll never aborts the run
+                print(f"[distil] skip scroll {sid}: {type(e).__name__} {str(e)[:60]}", flush=True)
+                continue
+            sp = list(by_scroll[sid]); rng.shuffle(sp)
+            metas = {}; reqs = []; use = []
+            for p in sp:
+                try:
+                    meta = HercuvitDataset._peek_meta(p)         # cheap meta-only read (no mesh decode)
+                except Exception:
+                    continue
+                metas[p] = meta; reqs.append(_window_req(meta, vol)); use.append(p)
+            for p, (_r, blk, _o) in zip(use, iter_windows(vol, reqs, readahead=readahead, workers=workers)):
+                meta = metas[p]
+                ct, _ = resample_to_crop(dinovol_normalise(np.asarray(blk)), {}, float(meta["voxel_um"]),
+                                         target_voxel_um=TARGET_VOXEL_UM, crop=CROP, rng=rng)
+                buf.append(torch.from_numpy(np.ascontiguousarray(ct)).float()[None])
+                if len(buf) == batch:
+                    yield torch.stack(buf).to(device)
+                    buf = []
+                    produced += 1
+                    if produced >= n:
+                        return
 
 
 def _m7_crops(manifest, n, batch, device, *, seed=0, crop=128):
@@ -243,6 +274,136 @@ def _labels_crops(corpus_dir, n, batch, device, *, manifest=None, seed=0):
             gens.pop(i % len(gens))
 
 
+# --------------------------------------------------------------------------- sharded CT pre-extraction (the fix)
+# Concurrent s3fs reads DEADLOCK in-process on this environment (measured: sockets open, 0 B/s), so — exactly like
+# hercunet's export-labels — we parallelise S3 across SHARD PROCESSES (each its own s3fs, SINGLE-THREADED reads =
+# iter_windows workers=1), write Dinovol-normalised 128³ crops to a LOCAL cache, then distil on local (fast, safe).
+
+def prep_shard(*, corpus_dir, manifest, mode, crops_out, nshards, shard, seed=0):
+    """ONE shard of the CT pre-extraction (single-threaded reads → no s3fs-concurrency deadlock). Writes this
+    shard's Dinovol-normalised 128³ crops as .npy into ``crops_out``. Reused machinery: the backend, ``_window_req``,
+    ``iter_windows`` (workers=1), ``resample_to_crop``, ``dinovol_normalise``; m7 via the manifest's direct URLs."""
+    import os, glob, collections, json
+    import numpy as np
+    from ..data.dataset import HercuvitDataset, resample_to_crop, TARGET_VOXEL_UM, CROP
+    from ..data.normalize import dinovol_normalise
+    os.makedirs(crops_out, exist_ok=True)
+    saved = 0
+
+    def _save(ct, tag):
+        np.save(os.path.join(crops_out, f"{tag}.npy"), np.ascontiguousarray(ct).astype(np.float16))
+
+    if mode in ("herculabels", "labels") and corpus_dir:
+        from ...config import Config
+        from ...data import get_backend, iter_windows
+        from ...train.dataset import _find_scroll, _window_req, _scroll_of
+        be = get_backend(Config.from_env())
+        paths = sorted(glob.glob(os.path.join(corpus_dir, "sample_*.npz")))
+        paths = [p for i, p in enumerate(paths) if i % nshards == shard]      # this shard's windows
+        by_scroll = collections.OrderedDict()
+        for p in paths:
+            by_scroll.setdefault(_scroll_of(p), []).append(p)
+        for sid, sp in by_scroll.items():
+            try:
+                vol = be.open_scroll_volume(_find_scroll(be, sid))
+            except Exception as e:                                           # noqa: BLE001
+                print(f"[prep {shard}] skip scroll {sid}: {type(e).__name__} {str(e)[:60]}", flush=True); continue
+            metas = {}; reqs = []; use = []
+            for p in sp:
+                try:
+                    meta = HercuvitDataset._peek_meta(p)
+                except Exception:
+                    continue
+                metas[p] = meta; reqs.append(_window_req(meta, vol)); use.append(p)
+            for p, (_r, blk, _o) in zip(use, iter_windows(vol, reqs, readahead=1, workers=1)):   # SINGLE-THREADED
+                meta = metas[p]
+                ct, _ = resample_to_crop(dinovol_normalise(np.asarray(blk)), {}, float(meta["voxel_um"]),
+                                         target_voxel_um=TARGET_VOXEL_UM, crop=CROP, rng=None)
+                _save(ct, "h_" + os.path.basename(p)[:-4]); saved += 1
+                if saved <= 3 or saved % 10 == 0:                    # fine-grained liveness (slow cross-region reads)
+                    print(f"[prep {shard}/{nshards}] {saved} crops ({sid})", flush=True)
+
+    if mode in ("m7", "labels") and manifest:
+        from ...data import ZarrSegment
+        regions = json.load(open(manifest))
+        regions = [r for i, r in enumerate(regions) if i % nshards == shard]
+        segs = {}; h = CROP // 2
+        for r in regions:
+            z, y, x = r.get("center_l0") or [o + h for o in r["origin_l0"]]
+            url = r["vol"]
+            if url not in segs:
+                try:
+                    segs[url] = ZarrSegment(url, None)
+                except Exception:
+                    segs[url] = None
+            if segs[url] is None:
+                continue
+            try:
+                blk = np.asarray(segs[url].read_window(0, z - h, z + h, y - h, y + h, x - h, x + h)[0])
+            except Exception:
+                continue
+            if blk.shape != (CROP, CROP, CROP):
+                continue
+            _save(dinovol_normalise(blk), f"m7_{r.get('scroll')}_{z}_{y}_{x}"); saved += 1
+    print(f"[prep {shard}/{nshards}] DONE {saved} crops -> {crops_out}", flush=True)
+    return saved
+
+
+def _ensure_crop_cache(*, corpus_dir, manifest, mode, crops_dir, nshards):
+    """Idempotently build the local crop cache: if not already done, launch ``nshards`` ``distill-prep`` SHARD
+    PROCESSES (each its own s3fs, single-threaded → no deadlock), wait, mark ``.done``. Reused next time."""
+    import os, glob, sys, subprocess
+    os.makedirs(crops_dir, exist_ok=True)
+    done = os.path.join(crops_dir, ".done")
+    have = len(glob.glob(os.path.join(crops_dir, "*.npy")))
+    if os.path.exists(done) and have:
+        print(f"[distil] crop cache ready: {have} crops in {crops_dir} (cached)", flush=True)
+        return crops_dir
+    print(f"[distil] pre-extracting CT crops → {crops_dir} via {nshards} shard processes (single-threaded S3) …", flush=True)
+    procs = []
+    for s in range(nshards):
+        cmd = [sys.executable, "-m", "hercunet.hercuvit.cli", "distill-prep", "--crops-out", crops_dir,
+               "--corpus-mode", mode, "--nshards", str(nshards), "--shard", str(s)]
+        if corpus_dir:
+            cmd += ["--corpus", corpus_dir]
+        if manifest:
+            cmd += ["--manifest", manifest]
+        procs.append(subprocess.Popen(cmd))
+    rc = [p.wait() for p in procs]
+    have = len(glob.glob(os.path.join(crops_dir, "*.npy")))
+    if not have:
+        raise SystemExit(f"pre-extraction produced no crops (shard rc={rc})")
+    open(done, "w").close()
+    print(f"[distil] pre-extraction done: {have} crops (shard rc={rc})", flush=True)
+    return crops_dir
+
+
+def _local_crops(crops_dir, n, batch, device, *, seed=0, augment=True):
+    """Stream Dinovol-normalised 128³ crops from the LOCAL cache (fast, concurrent-safe — no s3fs). Cycles the
+    cache with a shuffle + geometric augmentation for variety across the long run."""
+    import glob, os
+    import numpy as np
+    from ..data.dataset import geometric_augment
+    files = sorted(glob.glob(os.path.join(crops_dir, "*.npy")))
+    if not files:
+        raise SystemExit(f"no crops in {crops_dir}")
+    print(f"[distil] local crop cache: {len(files)} crops (augment={augment})", flush=True)
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(len(files)).tolist(); i = 0
+    produced = 0; buf: list = []
+    while produced < n:
+        if i >= len(order):
+            order = rng.permutation(len(files)).tolist(); i = 0
+        ct = np.load(files[order[i]]).astype(np.float32); i += 1
+        if augment:
+            ct, _ = geometric_augment(ct, {}, rng)
+        buf.append(torch.from_numpy(np.ascontiguousarray(ct)).float()[None])
+        if len(buf) == batch:
+            yield torch.stack(buf).to(device)
+            buf = []
+            produced += 1
+
+
 def _corpus_crops(mode, n, batch, device, *, scrolls=None, corpus=None, manifest=None, source=None, seed=0, **kw):
     """Mode-switched unlabelled-crop stream for distillation. ``random`` (many scrolls) | ``herculabels`` (corpus
     CT) | ``m7`` (manifest regions) | ``labels`` (herculabels + m7) | ``scroll`` (one ``--source``). All yield
@@ -300,6 +461,8 @@ def distill(
     warmup: int = 0,
     lr_schedule: str = "cosine",
     weight_decay: float = 0.05,
+    prep_shards: int = 8,
+    crops_dir: str | None = None,
     log_every: int = 50,
     seed: int = 0,
 ) -> dict:
@@ -348,6 +511,7 @@ def distill(
     gen = torch.Generator(device=device).manual_seed(seed)
     amp = device.startswith("cuda") if isinstance(device, str) else False
 
+    import os
     use_synthetic = smoke and not (source or corpus or manifest or scrolls)
     if use_synthetic:
         print("[distil] smoke: SYNTHETIC crops (no data source) — exercises the machinery only.", flush=True)
@@ -355,8 +519,20 @@ def distill(
     else:
         mode = "scroll" if source else corpus_mode
         print(f"[distil] {student_variant} <- teacher | mode={mode} | steps={steps} batch={batch} lr={lr}", flush=True)
-        src = _corpus_crops(mode, steps, batch, device, scrolls=scrolls, corpus=corpus, manifest=manifest,
-                            source=source, seed=seed)
+        if mode in ("herculabels", "m7", "labels"):
+            # pre-extract to a LOCAL crop cache via shard processes (single-threaded S3 reads), then distil on it
+            man = manifest
+            if man is None and mode in ("m7", "labels") and corpus:          # auto-find the m7 manifest in the corpus
+                import glob
+                hits = (glob.glob(os.path.join(corpus, "corpus_index", "*.json"))
+                        + glob.glob(os.path.join(corpus, "**", "*manifest*.json"), recursive=True))
+                man = hits[0] if hits else None
+            cdir = crops_dir or os.path.join(os.path.dirname(out) if out else ".", f"distil_crops_{mode}")
+            _ensure_crop_cache(corpus_dir=corpus, manifest=man, mode=mode, crops_dir=cdir, nshards=prep_shards)
+            src = _local_crops(cdir, steps, batch, device, seed=seed)
+        else:
+            src = _corpus_crops(mode, steps, batch, device, scrolls=scrolls, corpus=corpus, manifest=manifest,
+                                source=source, seed=seed)
 
     last: dict = {}
     best_cos = -1.0
@@ -404,6 +580,12 @@ def run(args) -> dict:
     """CLI entry (``hercuvit distill``). Distils one variant, or ``--student all`` → small + tiny + nano (each
     saved under ``--out`` as ``<variant>.pt``). Missing/None attrs fall back to defaults (the recipe values)."""
     import os
+    os.environ.pop("HF_HUB_ENABLE_HF_TRANSFER", None)       # deprecated → drop it (silences the FutureWarning)
+    try:                                                     # silence the benign unauthenticated-request spam
+        from huggingface_hub.utils import logging as _hflog
+        _hflog.set_verbosity_error()
+    except Exception:
+        pass
     from .chain import resolve_corpus
     def g(name, default):
         v = getattr(args, name.replace("-", "_"), default)
@@ -436,6 +618,7 @@ def run(args) -> dict:
         checkpoint_every=int(g("checkpoint_every", 0)),
         warmup=int(g("warmup", 0)),
         lr_schedule=g("lr_schedule", "cosine"),
+        prep_shards=int(g("prep_shards", 8)),
     )
     variants = ["small", "tiny", "nano"] if student == "all" else [student]
     results = []
@@ -447,3 +630,18 @@ def run(args) -> dict:
         print(f"[distil] ===== variant {v} -> {vout} =====", flush=True)
         results.append(distill(student_variant=v, out=vout, **common))
     return results[0] if len(results) == 1 else {"variants": results}
+
+
+def prep_run(args) -> int:
+    """CLI entry for ``hercuvit distill-prep`` — ONE shard of the CT pre-extraction (the orchestrator launches N of
+    these as separate processes; ``--corpus`` is the already-resolved LOCAL corpus dir)."""
+    import os
+    os.environ.pop("HF_HUB_ENABLE_HF_TRANSFER", None)
+    try:
+        from huggingface_hub.utils import logging as _hflog
+        _hflog.set_verbosity_error()
+    except Exception:
+        pass
+    return prep_shard(corpus_dir=getattr(args, "corpus", None), manifest=getattr(args, "manifest", None),
+                      mode=getattr(args, "corpus_mode", "labels"), crops_out=args.crops_out,
+                      nshards=int(args.nshards), shard=int(args.shard))

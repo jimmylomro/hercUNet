@@ -21,12 +21,11 @@ def resolve_corpus(corpus=None, corpus_hf=None, *, allow_patterns=None) -> str:
     if not corpus_hf:
         raise SystemExit("hercuvit train: give a corpus — --corpus <dir> or --corpus-hf <repo> "
                          "(e.g. --corpus-hf jimmylomro/hercunet-corpus).")
-    import os
     from huggingface_hub import snapshot_download
-    try:                                      # hf_transfer = Rust chunked parallel downloader (big files); opt-in if present
-        import hf_transfer  # noqa: F401
-        os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
-    except ImportError:
+    try:                                      # quieten the benign "unauthenticated request" spam (public dataset)
+        from huggingface_hub.utils import logging as _hf_logging
+        _hf_logging.set_verbosity_error()
+    except Exception:
         pass
     what = f" ({', '.join(allow_patterns)})" if allow_patterns else ""
     print(f"[hercuvit] resolving corpus from HF dataset {corpus_hf}{what} (cached if already pulled) …", flush=True)

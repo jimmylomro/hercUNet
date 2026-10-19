@@ -152,7 +152,9 @@ class HercuvitDataset(Dataset):
         augment: bool = True,
         ct_reader: Optional[Callable] = None,
         seed: int = 0,
+        ct_only: bool = False,
     ) -> None:
+        self.ct_only = bool(ct_only)          # distillation: read only the CT (skip the expensive label build)
         self.corpus_dir = corpus_dir
         self.record = record
         self.surface_tau = float(surface_tau)
@@ -199,6 +201,15 @@ class HercuvitDataset(Dataset):
         shape = tuple(meta["shape"]); vu = float(meta["voxel_um"]); ds = int(meta.get("conf_ds", 4))
         per_sheet = meta.get("quality", {}).get("per_sheet", {})
         ident = bool(rec.get("meshes"))
+
+        if self.ct_only:                                                 # distillation: CT crop only, no labels
+            ct_native = self.ct_reader(meta.get("scroll"), int(meta.get("level", 0)),
+                                       meta.get("org") or meta.get("coords"), shape)
+            ct, _ = resample_to_crop(dinovol_normalise(ct_native), {}, vu, target_voxel_um=self.target_voxel_um,
+                                     crop=self.crop, rng=(rng if self.augment else None))
+            if self.augment:
+                ct, _ = geometric_augment(ct, {}, rng)
+            return {"ct": torch.from_numpy(np.ascontiguousarray(ct)).float().unsqueeze(0), "path": path}
 
         # labels — identical to export-labels
         mag, lab3, _nrm, _w3, owner_full = build_gradphi_edt(rec["meshes"], shape, vu, return_owner_full=True)

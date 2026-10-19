@@ -75,10 +75,11 @@ hercuvit = [
     "timm>=1.0",                   # layers used by the vendored Dinovol EVA backbone
     "einops>=0.8",                 # tensor rearrange in the Dinovol backbone
     "scipy>=1.9",                  # linear_sum_assignment (Hungarian matching) + ndimage (Gaussian blend)
-    "huggingface_hub>=0.20",       # --corpus-hf / --dinovol-hf / --model-hf pulls
+    "huggingface_hub>=0.20",       # --corpus-hf / --encoder-hf / --model-hf pulls
     "pyyaml>=6",                   # loads the recipe (hercunet/hercuvit/recipes/*.yml)
     "zarr>=2.16,<3",               # OME-Zarr output (shared with the data layer)
     "blosc2>=2.5",                 # zarr compression backend used by the output store
+    "numba>=0.59",                 # JITs the constrained-MALIS union-find for AffMALIS + distill (numpy<=2.4; auto-fallback)
 ]
 # everything: viewer + fast reader + training + inference + HercuViT. Self-referential so it never drifts.
 full = ["hercunet[viz,accel,train,infer,hercuvit]"]

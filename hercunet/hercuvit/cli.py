@@ -106,6 +106,8 @@ def _add_distill(p: argparse.ArgumentParser) -> None:
                    help="m7 scout manifest for --corpus-mode m7 (approved compressed-sheet regions)")
     p.add_argument("--checkpoint-every", dest="checkpoint_every", type=int, default=0, metavar="N",
                    help="save the encoder every N steps (resumable long runs; default: only at the end)")
+    p.add_argument("--prep-shards", dest="prep_shards", type=int, default=8, metavar="N",
+                   help="processes for the local CT pre-extraction (each single-threaded S3; default 8)")
     p.add_argument("--corpus", default=None, metavar="DIR", help="local herculabels corpus (for --corpus-mode herculabels)")
     p.add_argument("--corpus-hf", dest="corpus_hf", nargs="?", const=_CORPUS_HF, default=None, metavar="REPO",
                    help=f"download the herculabels corpus from an HF dataset (bare flag = {_CORPUS_HF})")
@@ -172,8 +174,17 @@ def build_parser() -> argparse.ArgumentParser:
     _add_train_chain(train_cmds)
     _add_train_fit(train_cmds)
 
-    distill = groups.add_parser("distill", help="distil a slim tiny/nano student (lead-owned architecture)")
+    distill = groups.add_parser("distill", help="distil a windowed variant (small/tiny/nano) from the Dinovol teacher")
     _add_distill(distill)
+
+    prep = groups.add_parser("distill-prep", help="(internal) one shard of the distillation CT pre-extraction")
+    prep.add_argument("--corpus", default=None, metavar="DIR", help="local corpus dir (resolved by the orchestrator)")
+    prep.add_argument("--manifest", default=None, metavar="FILE.json", help="m7 scout manifest")
+    prep.add_argument("--corpus-mode", dest="corpus_mode", default="labels", choices=("herculabels", "m7", "labels"))
+    prep.add_argument("--crops-out", dest="crops_out", required=True, metavar="DIR", help="local crop-cache dir")
+    prep.add_argument("--nshards", type=int, default=8)
+    prep.add_argument("--shard", type=int, default=0)
+    prep.set_defaults(func=lambda a: __import__("hercunet.hercuvit.train.distill", fromlist=["prep_run"]).prep_run(a))
 
     infer = groups.add_parser("infer", help="full-volume inference")
     infer_cmds = infer.add_subparsers(dest="command", metavar="<mode>", required=True)
