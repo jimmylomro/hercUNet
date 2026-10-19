@@ -50,6 +50,8 @@ class HercuVitNet(nn.Module):
         instance_layers: int = 3,
         deep_supervision: bool = True,
         with_instance: bool = True,
+        add_null_query: bool = False,
+        learned_queries: bool = False,
     ) -> None:
         super().__init__()
         self.backbone = backbone
@@ -71,6 +73,8 @@ class HercuVitNet(nn.Module):
                 n_queries=n_queries,
                 n_layers=instance_layers,
                 mask_dim=mask_dim,
+                add_null=add_null_query,
+                learned_queries=learned_queries,
             )
         else:
             self.instance_head = None
@@ -154,6 +158,8 @@ def build_hercuvit(
     instance_layers: int = 3,
     deep_supervision: bool = True,
     with_instance: bool = True,
+    add_null_query: bool = False,
+    learned_queries: bool = False,
     strict_load: bool = True,
 ) -> HercuVitNet:
     """Build **any** HercuViT variant — one config-driven path.
@@ -202,6 +208,8 @@ def build_hercuvit(
         instance_layers=instance_layers,
         deep_supervision=deep_supervision,
         with_instance=with_instance,
+        add_null_query=add_null_query,
+        learned_queries=learned_queries,
     )
     net = net.to(device)
     net._hercuvit_fresh_params = fresh      # params left for distillation (empty for small)

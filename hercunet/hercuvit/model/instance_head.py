@@ -6,7 +6,7 @@ Set-prediction instance masks for sheets. Design ``docs/hercuvit.md`` §7:
   each carrying an **anchor** (its token-cell centre in [-1,1], refined per layer) and a **content** vector
   (token feature projected 288→``dim``).
 - **Query decoder.** ``n_layers`` layers; each = self-attention among queries + **3D multi-scale deformable
-  cross-attention** (reusing :class:`hercunet.tracer.decoder.DeformableCrossAttn`) around the anchor over the
+  cross-attention** (:class:`DeformableCrossAttn`, defined below) around the anchor over the
   1/8 tokens and the 1/4 decoder features + an FFN; an MLP refines the anchor.
 - **Outputs per query:** a sheet / no-object class logit, a refined anchor, and a ``mask_dim`` mask embedding.
   The instance mask is ``sigmoid(mask_embed · mask_features)`` against the shared full-resolution mask features
@@ -24,7 +24,44 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from ...tracer.decoder import DeformableCrossAttn
+class DeformableCrossAttn(nn.Module):
+    """Single-scale 3-D deformable cross-attention: each query samples ``n_points`` locations per head around
+    its reference point on the node-feature grid and attends over them. Self-contained (torch only)."""
+
+    def __init__(self, dim, n_heads=4, n_points=8):
+        super().__init__()
+        assert dim % n_heads == 0
+        self.dim, self.h, self.k = dim, n_heads, n_points
+        self.hd = dim // n_heads
+        self.sampling_offsets = nn.Linear(dim, n_heads * n_points * 3)
+        self.attn_weights = nn.Linear(dim, n_heads * n_points)
+        self.value_proj = nn.Linear(dim, dim)
+        self.out_proj = nn.Linear(dim, dim)
+        nn.init.zeros_(self.sampling_offsets.weight); nn.init.zeros_(self.sampling_offsets.bias)
+        nn.init.zeros_(self.attn_weights.weight); nn.init.zeros_(self.attn_weights.bias)
+
+    def forward(self, q, ref, node_feat):
+        """q:(B,Q,dim) queries; ref:(B,Q,3) reference points in [-1,1] (z,y,x); node_feat:(B,dim,nd,nh,nw)."""
+        B, Q, _ = q.shape
+        nd, nh, nw = node_feat.shape[2:]
+        val = self.value_proj(node_feat.flatten(2).transpose(1, 2))          # (B, N, dim)
+        val = val.transpose(1, 2).reshape(B, self.dim, nd, nh, nw)
+        off = self.sampling_offsets(q).view(B, Q, self.h, self.k, 3)
+        aw = self.attn_weights(q).view(B, Q, self.h, self.k)
+        aw = torch.softmax(aw, dim=-1)
+        # sampling locations in [-1,1]; offsets are in normalised units (small, zero-init => start at ref)
+        loc = ref.view(B, Q, 1, 1, 3) + 0.1 * off                            # (B,Q,h,k,3)
+        out = q.new_zeros(B, Q, self.dim)
+        for hh in range(self.h):
+            vh = val[:, hh * self.hd:(hh + 1) * self.hd]                      # (B,hd,nd,nh,nw)
+            # grid_sample wants grid last-dim order (x,y,z); our coords are (z,y,x) -> flip
+            g = loc[:, :, hh].flip(-1).reshape(B, Q, self.k, 1, 3)            # (B,Q,k,1,3)
+            samp = F.grid_sample(vh, g, mode="bilinear", padding_mode="border",
+                                 align_corners=True)                          # (B,hd,Q,k,1)
+            samp = samp.squeeze(-1).permute(0, 2, 3, 1)                       # (B,Q,k,hd)
+            wsum = (samp * aw[:, :, hh].unsqueeze(-1)).sum(dim=2)             # (B,Q,hd)
+            out[:, :, hh * self.hd:(hh + 1) * self.hd] = wsum
+        return self.out_proj(out)
 
 
 def _coord_grid(shape: Sequence[int], device, dtype) -> torch.Tensor:
@@ -136,8 +173,22 @@ class InstanceHead(nn.Module):
         n_heads: int = 4,
         n_points: int = 8,
         mask_dim: int = 32,
+        add_null: bool = False,
+        learned_queries: bool = False,
     ) -> None:
         super().__init__()
+        self.add_null = bool(add_null)
+        self.learned_queries = bool(learned_queries)
+        if self.add_null:
+            # reserved learned NULL / no-sheet query (index 0), HercUNet sheet-seg convention: excluded from the
+            # Hungarian match, used as the background (owner==0) CE target so off-sheet voxels drain to null.
+            self.null_query = nn.Parameter(torch.zeros(dim))
+            self.null_anchor = nn.Parameter(torch.zeros(3))
+        if self.learned_queries:
+            # option 1: fixed persistent learned queries (DETR-style) + learned reference points — they specialise
+            # (each query owns a sheet across steps) for stable Hungarian, instead of per-forward top-K selection.
+            self.query_embed = nn.Parameter(torch.randn(int(n_queries), dim) * 0.02)
+            self.query_ref = nn.Parameter(torch.rand(int(n_queries), 3) * 2 - 1)   # spread in [-1,1]
         self.selector = QuerySelector(token_dim, dim, n_queries)
         self.proj8 = nn.Conv3d(token_dim, dim, kernel_size=1)   # 1/8 token grid -> query width
         self.proj4 = nn.Conv3d(feat_14_dim, dim, kernel_size=1)  # 1/4 decoder features -> query width
@@ -152,7 +203,17 @@ class InstanceHead(nn.Module):
         B, C, dz, dy, dx = tokens_grid.shape
         tokens_seq = tokens_grid.flatten(2).transpose(1, 2)                 # (B, G, token_dim), raster (z,y,x)
         coords = _coord_grid((dz, dy, dx), tokens_grid.device, tokens_grid.dtype)
-        content, anchors, objectness, idx = self.selector(tokens_seq, coords)
+        if self.learned_queries:                                            # option 1: fixed learned queries
+            content = self.query_embed.to(tokens_seq.dtype).expand(B, -1, -1)
+            anchors = self.query_ref.clamp(-1.0, 1.0).to(tokens_seq.dtype).expand(B, -1, -1)
+            objectness = tokens_grid.new_zeros(B, dz * dy * dx)              # unused (no two-stage selection)
+            idx = torch.full((B, self.selector.n_queries), -1, dtype=torch.long, device=tokens_grid.device)
+        else:
+            content, anchors, objectness, idx = self.selector(tokens_seq, coords)
+        if self.add_null:                                                   # prepend the reserved null query (index 0)
+            content = torch.cat([self.null_query.to(content.dtype).expand(B, 1, -1), content], dim=1)
+            anchors = torch.cat([self.null_anchor.to(anchors.dtype).expand(B, 1, -1), anchors], dim=1)
+            idx = torch.cat([idx.new_full((B, 1), -1), idx], dim=1)         # null has no source token
 
         feats = [self.proj8(tokens_grid), self.proj4(feat_14)]              # multi-scale deformable keys/values
         q = content

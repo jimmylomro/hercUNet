@@ -42,10 +42,12 @@ class HercuvitRecipe:
     window_size: tuple = (8, 8, 8)                  # windowed-attention window in tokens (8³ → 2×2×2 windows)
     n_sem_classes: int = 2                          # background / sheet-surface
     mask_dim: int = 32                              # shared mask-feature width (Dinovol embedding width)
-    n_queries: int = 64                             # instance queries (top-K objectness tokens)
+    n_queries: int = 64                             # instance queries
     query_dim: int = 64                             # query decoder width
     instance_layers: int = 3                        # query-decoder layers
     deep_supervision: bool = True
+    learned_queries: bool = True                    # persistent learned queries (DETR-style) — specialise, stable match
+    add_null_query: bool = True                     # reserved null/no-sheet query (index 0) for the softmax ownership
 
     # --- attention backend (plumbing; NOT a pillar change — raised via flag, docs §12) ---
     attention_backend: str = "auto"
@@ -81,6 +83,20 @@ class HercuvitRecipe:
     skel_iters: int = 3
     sep_radius: int = 2
     deep_sup_weights: tuple = (1.0, 0.5, 0.25)      # full, 1/2, 1/4
+
+    # --- OPTIONAL SymSkel add-on (per-query thinness; train/losses.py:m2f_symskel_mask_loss) ---
+    # Off by default (w_symskel=0 → pure plain-M2F). >0 adds the per-query SymSkel thin-surface stack (fg-CE +
+    # Focal-Tversky + clDice skel-recall) on each matched sigmoid mask, for A/B against the plain-M2F baseline.
+    w_symskel: float = 0.0                            # weight of the per-query SymSkel term (0 = off)
+
+    # --- OPTIONAL AffMALIS add-on (membership-derived affinity + constrained MALIS; hercunet.training.malis) ---
+    # Off by default (w_malis=0). aff_δ = Σ_q p(q|v)·p(q|v+δ) from the softmax membership, MALIS against owner — the
+    # maximin attractive/repulsive passes for separation. See train/losses.py:affinity_malis_loss. Needs numba for a
+    # usable speed (the njit maximin/union-find); crop bounds the O(E log E) cost (full-window is minutes/step).
+    w_malis: float = 0.0                              # weight of the MALIS term (0 = off; try 1.0 to A/B separation)
+    malis_crop: int = 48                              # random cube side (voxels) MALIS runs on per item (hercunet=48)
+    malis_offsets: tuple = ((1, 0, 0), (0, 1, 0), (0, 0, 1), (3, 0, 0), (0, 3, 0), (0, 0, 3),
+                            (9, 0, 0), (0, 9, 0), (0, 0, 9))   # 3 axes × {1,3,9} voxels (hercunet default)
 
     # --- instance loss (Mask2Former set prediction) ---
     w_class: float = 2.0                            # sheet / no-object classification

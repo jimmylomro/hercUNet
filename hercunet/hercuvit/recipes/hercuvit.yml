@@ -20,6 +20,8 @@ n_queries: 64
 query_dim: 64
 instance_layers: 3
 deep_supervision: true
+learned_queries: true     # persistent learned queries (specialise → stable Hungarian, no fragmentation)
+add_null_query: true      # reserved null query (index 0) for softmax ownership
 
 # attention SDPA backend: auto|flash|cudnn|efficient|math.
 # DEFAULT auto — the Dinovol config pins cuDNN, which has no execution plan for the windowed shapes on some
@@ -57,6 +59,14 @@ tversky_gamma: 1.0
 skel_iters: 3
 sep_radius: 2
 deep_sup_weights: [1.0, 0.5, 0.25]
+
+# OPTIONAL add-ons over the plain-M2F default (both OFF by default = pure plain M2F on thin labels):
+#  * w_symskel > 0 — per-query SymSkel thin-surface stack on each matched sigmoid mask (train/losses.py:m2f_symskel_mask_loss)
+#  * w_malis   > 0 — membership-affinity constrained MALIS for separation (train/losses.py:affinity_malis_loss; needs numba)
+# Use these to A/B separation/thinness at corpus scale, where near-identical compressed sheets stress separation.
+w_symskel: 0.0
+w_malis: 0.0
+malis_crop: 48    # random cube side (voxels) MALIS runs on per item when enabled (hercunet default; full-window is minutes/step)
 
 # instance loss (Mask2Former set prediction)
 w_class: 2.0

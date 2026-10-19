@@ -77,6 +77,7 @@ def run_training(
         n_sem_classes=rec.n_sem_classes, mask_dim=rec.mask_dim, n_queries=rec.n_queries,
         query_dim=rec.query_dim, instance_layers=rec.instance_layers,
         deep_supervision=rec.deep_supervision, with_instance=True,
+        add_null_query=rec.add_null_query, learned_queries=rec.learned_queries,
     )
 
     ds = HercuvitDataset(corpus_dir, augment=rec.augment, target_voxel_um=rec.target_voxel_um,

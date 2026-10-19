@@ -88,7 +88,7 @@ class HercuvitTrainer:
     # ---- one epoch --------------------------------------------------------------------------------
     def _run_epoch(self, loader, epoch: int, stage: int) -> None:
         self.net.train()
-        acc = {k: 0.0 for k in ("loss", "sem", "ce", "dice", "inst", "class", "bce", "mdice", "obj")}
+        acc = {k: 0.0 for k in ("loss", "class", "bce", "dice", "obj", "symskel", "malis")}
         n = 0
         amp_dtype = torch.bfloat16
         t0 = time.time()
@@ -97,18 +97,31 @@ class HercuvitTrainer:
             sem = batch["sem"].to(self.device, non_blocking=True)
             owner = batch["owner"].to(self.device, non_blocking=True)
             has_id = batch["has_identity"]
+            owner_thin = owner * (sem == 1).to(owner.dtype)    # THIN GT: sheet id kept ONLY on its medial surface
 
             lr = self._apply_lr()
             self.optim.zero_grad(set_to_none=True)
             with torch.autocast(device_type=self.device.type, dtype=amp_dtype):
                 out = self.net(ct)
-                sem_terms = L.semantic_loss(out["sem_logits"], sem, self.recipe)
-                loss = sem_terms["sem"]
-                inst_terms = None
-                if stage >= 3 and out["instance"] is not None:
-                    inst_terms = L.instance_loss(out["instance"], out["mask_features"], owner,
-                                                 has_id, self.recipe, seed=self.global_step)
-                    loss = loss + inst_terms["inst"]
+                inst = out["instance"]
+                # DEFAULT: PLAIN Mask2Former on THIN labels — Hungarian + per-query sigmoid mask BCE+Dice (+token
+                # objectness) against each sheet's THIN medial surface (owner & sem==1), ignore-masked. Each matched
+                # mask IS a thin sheet and its query index IS the membership; the readout max_q[P(sheet_q)·σ(mask_q)]
+                # is thin for free. On the overfit windows this matched the full old-HercUNet machinery, so it's the
+                # baseline. SymSkel (per-query thinness) and AffMALIS (separation) are OPTIONAL add-ons — enabled by
+                # recipe w_symskel / w_malis > 0 — for A/B at corpus scale, where near-identical compressed sheets
+                # actually stress separation. (The intermediate node/edge ownership head is gone.)
+                it = L.instance_loss(inst, out["mask_features"], owner_thin, has_id, self.recipe,
+                                     ignore=(sem == 2), seed=self.global_step)
+                loss = it["inst"]
+                skt = mt = None
+                if self.recipe.w_symskel > 0 and inst is not None:
+                    sk, skt = L.m2f_symskel_mask_loss(inst, out["mask_features"], sem, owner, has_id, self.recipe,
+                                                      seed=self.global_step, use_softmax=False)
+                    loss = loss + self.recipe.w_symskel * sk
+                if self.recipe.w_malis > 0 and inst is not None:
+                    ml, mt = L.affinity_malis_loss(inst, out["mask_features"], owner, has_id, self.recipe)
+                    loss = loss + self.recipe.w_malis * ml
             loss_f = loss.float()
             loss_f.backward()
             if self.recipe.grad_clip:
@@ -118,20 +131,19 @@ class HercuvitTrainer:
 
             n += 1
             acc["loss"] += float(loss_f.detach())
-            acc["sem"] += float(sem_terms["sem"].detach())
-            acc["ce"] += float(sem_terms["ce"]); acc["dice"] += float(sem_terms["dice"])
-            if inst_terms is not None:
-                acc["inst"] += float(inst_terms["inst"].detach())
-                acc["class"] += float(inst_terms["class"]); acc["bce"] += float(inst_terms["mask_bce"])
-                acc["mdice"] += float(inst_terms["mask_dice"]); acc["obj"] += float(inst_terms["obj"])
+            acc["class"] += float(it["class"]); acc["bce"] += float(it["mask_bce"])
+            acc["dice"] += float(it["mask_dice"]); acc["obj"] += float(it["obj"])
+            if skt is not None:
+                acc["symskel"] += float(skt["tversky"])
+            if mt is not None:
+                acc["malis"] += float(mt["malis"])
 
         m = {k: v / max(n, 1) for k, v in acc.items()}
         dt = time.time() - t0
         print(
             f"{_C['tot']}[ep {epoch}] loss {m['loss']:.4f}{_C['r']} | "
-            f"{_C['sem']}sem {m['sem']:.4f}{_C['r']} {_C['dim']}(ce {m['ce']:.3f} dice {m['dice']:.3f}){_C['r']} | "
-            f"{_C['inst']}inst {m['inst']:.4f}{_C['r']} "
-            f"{_C['dim']}[class {m['class']:.3f} bce {m['bce']:.3f} dice {m['mdice']:.3f} obj {m['obj']:.3f}]{_C['r']} "
+            f"{_C['inst']}inst [class {m['class']:.3f} bce {m['bce']:.3f} dice {m['dice']:.3f} obj {m['obj']:.3f}]{_C['r']} | "
+            f"{_C['sem']}symskel {m['symskel']:.3f} malis {m['malis']:.4f}{_C['r']} "
             f"{_C['dim']}| lr {self.optim.param_groups[0]['lr']:.2e} stage {stage} {dt:.0f}s{_C['r']}",
             flush=True,
         )
