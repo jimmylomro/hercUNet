@@ -41,7 +41,6 @@ grad_clip: 1.0
 warmup_steps: 200
 lr_schedule: constant
 
-# --- staged schedule: semantic (frozen) → unfreeze transformer 0.1× → + instance head ---
-semantic_epochs: 50
-unfreeze_epochs: 25
-instance_epochs: 100
+# --- schedule: LP-FT — transformer frozen for a head warmup, then fine-tuned @ transformer_lr_mult × LR ---
+epochs: 175
+freeze_warmup_epochs: 50

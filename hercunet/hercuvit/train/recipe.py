@@ -87,10 +87,11 @@ class HercuvitRecipe:
     warmup_steps: int = 200
     lr_schedule: str = "constant"                   # "constant" (Dinovol convention) | "cosine"
 
-    # --- staged schedule (§7): semantic → unfreeze transformer (0.1×) → add instance ---
-    semantic_epochs: int = 50                       # stage 1: transformer frozen, stem+decoder+sem head
-    unfreeze_epochs: int = 25                       # stage 2: all trainable, transformer 0.1×, windows ON
-    instance_epochs: int = 100                      # stage 3: + instance head, joint
+    # --- schedule: LP-FT (Kumar et al., ICLR 2022) — the transformer is FROZEN for a head warmup (train the
+    #     head on the distilled encoder's features so the random head's early gradients don't distort them),
+    #     then fine-tuned at ``transformer_lr_mult`` × LR for the remainder. ---
+    epochs: int = 175                               # total training epochs
+    freeze_warmup_epochs: int = 50                  # epochs with the transformer frozen (0 = fine-tune from step 0)
 
     # --- semantic loss (thin medial-surface stack, ported from HercUNet — see train/surface_loss.py) ---
     sem_fg_weight: float = 5.0   # foreground CE weight — medial surfaces are ~0.1-0.3% of voxels; unweighted CE
@@ -134,15 +135,8 @@ class HercuvitRecipe:
     oversample_ratio: float = 3.0
     importance_ratio: float = 0.75
 
-    # --- distillation (config only; the logic is lead-owned — model/variants.py, model/distill.py,
-    #     train/distill.py). Reserved surface for building hercuvit-tiny/nano from a trained small teacher (§8.1). ---
-    distill_teacher: str = "scrollprize/dinovol_ps8_9.6um_101626"   # HF repo or ckpt path of the teacher
-    distill_student_variant: str = "tiny"           # tiny | nano — the slim student to distil
-    distill_gram_weight: float = 1.0                # Gram / feature-correlation distillation weight
-    distill_token_weight: float = 1.0               # per-token feature distillation weight
-    distill_cls_weight: float = 1.0                 # cls / register-token distillation weight
-    distill_steps: int = 100000
-    distill_lr: float = 1.0e-4
+    # NOTE: distillation (teacher, steps, lr, loss weights) is configured on the ``hercuvit distill`` CLI, NOT in
+    # this recipe — a training recipe defines the SUPERVISED net + schedule only.
 
     def encoder_arch(self) -> dict:
         """Assemble the encoder-arch ``dict`` that ``build_hercuvit`` consumes (as ``arch_override``) from this
@@ -159,9 +153,6 @@ class HercuvitRecipe:
             arch["decoder_channels"] = tuple(self.decoder_channels)
         arch.update(self.arch_override or {})
         return arch
-
-    def n_stages(self) -> int:
-        return 3
 
     def summary(self) -> str:
         """One-line ``field=value`` dump (minus ``name``) for the per-run audit log."""

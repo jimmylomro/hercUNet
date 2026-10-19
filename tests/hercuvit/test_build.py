@@ -36,7 +36,7 @@ def test_recipe_default_and_yaml_roundtrip(tmp_path):
     with open(f, "w") as fh:
         fh.write("variant: small\nbase_lr: 2.0e-4\nattention_backend: math\n")
     r2 = R.load(f)
-    assert r2.base_lr == 2.0e-4 and r2.attention_backend == "math" and r2.semantic_epochs == rec.semantic_epochs
+    assert r2.base_lr == 2.0e-4 and r2.attention_backend == "math" and r2.epochs == rec.epochs
 
 
 def test_variant_recipes_define_arch():
@@ -57,11 +57,10 @@ def test_variant_recipes_define_arch():
     assert replace(R.variant_recipe("tiny"), arch_override={"depth": 9}).encoder_arch()["depth"] == 9
 
 
-def test_distill_fields_present():
+def test_schedule_fields():
     rec = R.active()
-    assert rec.distill_teacher.startswith("scrollprize/")
-    assert rec.distill_student_variant in ("tiny", "nano")
-    assert rec.distill_steps > 0
+    assert rec.epochs > 0 and 0 <= rec.freeze_warmup_epochs <= rec.epochs   # LP-FT freeze-warmup schedule
+    assert not hasattr(rec, "distill_teacher") and not hasattr(rec, "semantic_epochs")   # dead fields removed
 
 
 def test_cli_parses_all_subcommands():

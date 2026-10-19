@@ -5,15 +5,13 @@ directive) that reuses hercunet machinery around it: the data layer (dataset), t
 (encoder loaded by ``build_hercuvit``), and the single-line ``[ep N] loss …`` logging. bf16 autocast, AdamW on
 ``net.param_groups``, grad-clip, warmup + constant (or cosine) LR.
 
-Staged schedule (§7), one ``run()``:
-  1. **Semantic** (epochs ``[0, semantic_epochs)``) — transformer frozen, stem + pixel decoder + semantic head
-     at full LR; Dice + CE deep supervision.
-  2. **Unfreeze** (next ``unfreeze_epochs``) — all trainable, transformer at ``transformer_lr_mult`` × LR, windows
-     ON (always on — the retrofit is structural); still semantic-only.
-  3. **Instance** (remaining ``instance_epochs``) — add the Mask2Former instance losses; joint, encoder low LR.
-
-The optimiser is rebuilt at each stage transition (the trainable-parameter set changes). Checkpoints save model +
-optimiser + epoch + the Dinovol ``model_cfg`` (so inference rebuilds the architecture without the Dinovol ckpt).
+Loss: PLAIN Mask2Former on THIN labels every epoch (Hungarian + per-query sigmoid mask BCE+Dice + token
+objectness against each sheet's thin medial surface), with the OPTIONAL SymSkel (``w_symskel>0``) and AffMALIS
+(``w_malis>0``) add-ons. Schedule: **LP-FT** (Kumar et al., ICLR 2022) — the transformer is FROZEN for the first
+``freeze_warmup_epochs`` (train the head on the distilled encoder's features so the random head's early gradients
+do not distort them), then fine-tuned at ``transformer_lr_mult`` × LR for the rest. The optimiser is rebuilt on the
+freeze→unfreeze transition (the trainable set changes). Checkpoints save model + optimiser + epoch + the Dinovol
+``model_cfg`` (so inference rebuilds the architecture without the Dinovol ckpt).
 """
 from __future__ import annotations
 
@@ -37,28 +35,26 @@ class HercuvitTrainer:
         self.model_cfg = model_cfg
         self.device = torch.device(device)
         os.makedirs(out_dir, exist_ok=True)
-        self.num_epochs = int(recipe.semantic_epochs + recipe.unfreeze_epochs + recipe.instance_epochs)
+        self.num_epochs = int(recipe.epochs)
         self.start_epoch = 0
         self.global_step = 0
-        self._stage = None
+        self._frozen = None
         self.optim = None
 
-    # ---- staged schedule --------------------------------------------------------------------------
-    def stage_for_epoch(self, ep: int) -> int:
-        r = self.recipe
-        if ep < r.semantic_epochs:
-            return 1
-        if ep < r.semantic_epochs + r.unfreeze_epochs:
-            return 2
-        return 3
+    # ---- LP-FT freeze-warmup ----------------------------------------------------------------------
+    def _frozen_at(self, ep: int) -> bool:
+        """True while the transformer is frozen — the first ``freeze_warmup_epochs`` (train the head on the
+        distilled encoder's features), then it is fine-tuned at ``transformer_lr_mult`` × LR."""
+        return ep < int(self.recipe.freeze_warmup_epochs)
 
-    def _configure_stage(self, stage: int) -> None:
-        if stage == self._stage:
+    def _set_frozen(self, frozen: bool) -> None:
+        if frozen == self._frozen:
             return
-        self.net.set_transformer_trainable(stage >= 2)          # stage 1 freezes the transformer
-        self._build_optimiser()
-        self._stage = stage
-        print(f"[stage {stage}] transformer_trainable={stage >= 2} instance_loss={stage >= 3}", flush=True)
+        self.net.set_transformer_trainable(not frozen)          # freeze only the transformer blocks (stem/head train)
+        self._build_optimiser()                                 # the trainable set changed → rebuild the optimiser
+        self._frozen = frozen
+        print(f"[hercuvit] transformer {'FROZEN (head warmup)' if frozen else 'trainable @ transformer_lr_mult × LR'}",
+              flush=True)
 
     def _build_optimiser(self) -> None:
         groups = self.net.param_groups(base_lr=self.recipe.base_lr,
@@ -86,7 +82,7 @@ class HercuvitTrainer:
         return self.optim.param_groups[0]["lr"]
 
     # ---- one epoch --------------------------------------------------------------------------------
-    def _run_epoch(self, loader, epoch: int, stage: int) -> None:
+    def _run_epoch(self, loader, epoch: int) -> None:
         self.net.train()
         acc = {k: 0.0 for k in ("loss", "class", "bce", "dice", "obj", "symskel", "malis")}
         n = 0
@@ -144,7 +140,7 @@ class HercuvitTrainer:
             f"{_C['tot']}[ep {epoch}] loss {m['loss']:.4f}{_C['r']} | "
             f"{_C['inst']}inst [class {m['class']:.3f} bce {m['bce']:.3f} dice {m['dice']:.3f} obj {m['obj']:.3f}]{_C['r']} | "
             f"{_C['sem']}symskel {m['symskel']:.3f} malis {m['malis']:.4f}{_C['r']} "
-            f"{_C['dim']}| lr {self.optim.param_groups[0]['lr']:.2e} stage {stage} {dt:.0f}s{_C['r']}",
+            f"{_C['dim']}| lr {self.optim.param_groups[0]['lr']:.2e} {'frozen' if self._frozen else 'ft'} {dt:.0f}s{_C['r']}",
             flush=True,
         )
 
@@ -154,9 +150,8 @@ class HercuvitTrainer:
         print(f"[recipe] {self.recipe.name}: {self.recipe.summary()}", flush=True)
         self.net.to(self.device)
         for epoch in range(self.start_epoch, self.num_epochs):
-            stage = self.stage_for_epoch(epoch)
-            self._configure_stage(stage)
-            self._run_epoch(loader, epoch, stage)
+            self._set_frozen(self._frozen_at(epoch))
+            self._run_epoch(loader, epoch)
             self.save_checkpoint(epoch, "checkpoint_latest.pth")
         self.save_checkpoint(self.num_epochs - 1, "checkpoint_final.pth")
         print("[hercuvit] training done", flush=True)
@@ -176,7 +171,7 @@ class HercuvitTrainer:
             "epoch": epoch,
             "global_step": self.global_step,
             "optim": self.optim.state_dict() if self.optim is not None else None,
-            "stage": self._stage,
+            "frozen": self._frozen,
         }, path)
 
     def load_checkpoint(self, path: str) -> None:
@@ -184,12 +179,11 @@ class HercuvitTrainer:
         self.net.load_state_dict(ck["model"])
         self.start_epoch = int(ck.get("epoch", -1)) + 1
         self.global_step = int(ck.get("global_step", 0))
-        # rebuild the optimiser for the resumed stage, then load its state
-        stage = self.stage_for_epoch(self.start_epoch)
-        self._configure_stage(stage)
+        # rebuild the optimiser for the resumed freeze state, then load its state
+        self._set_frozen(self._frozen_at(self.start_epoch))
         if ck.get("optim") is not None:
             try:
                 self.optim.load_state_dict(ck["optim"])
             except (ValueError, KeyError):
-                print("[hercuvit] optimiser state did not match the resumed stage — continuing fresh optim", flush=True)
+                print("[hercuvit] optimiser state did not match the resumed freeze state — continuing fresh optim", flush=True)
         print(f"[hercuvit] resumed from {path} at epoch {self.start_epoch}", flush=True)
