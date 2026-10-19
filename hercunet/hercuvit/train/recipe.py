@@ -162,9 +162,28 @@ class HercuvitRecipe:
 _BUILTIN = "small"
 _TUPLE_FIELDS = {"global_blocks", "window_size", "deep_sup_weights", "sr_factor", "decoder_channels"}
 
+#: TRAINING fields — set on the ``hercuvit train`` CLI (flags), NOT in the model yaml. The yaml defines THE MODEL;
+#: a yaml that tries to set any of these is rejected. (``HercuvitRecipe`` holds both because the resolved run config
+#: is model-from-yaml + training-from-CLI; the split is enforced at the yaml boundary, below.)
+_TRAIN_FIELDS = frozenset({
+    "attention_backend", "target_voxel_um", "augment", "batch_size",
+    "base_lr", "transformer_lr_mult", "weight_decay", "grad_clip", "warmup_steps", "lr_schedule",
+    "epochs", "freeze_warmup_epochs",
+    "sem_fg_weight", "w_sem_ce", "w_sem_tversky", "w_sem_skel", "w_sem_sep",
+    "tversky_alpha", "tversky_beta", "tversky_gamma", "skel_iters", "sep_radius", "deep_sup_weights",
+    "w_symskel", "w_malis", "malis_crop", "malis_offsets",
+    "w_class", "w_mask_bce", "w_mask_dice", "w_objectness",
+    "cost_class", "cost_mask_bce", "cost_mask_dice", "no_object_weight", "aux_weight",
+    "point_sample", "oversample_ratio", "importance_ratio",
+})
+#: MODEL fields — the only keys a recipe yaml may set (everything that is not training).
+_MODEL_FIELDS = frozenset(f.name for f in fields(HercuvitRecipe)) - _TRAIN_FIELDS
+
 
 def _from_yaml(text: str, source: str = "<recipe>") -> HercuvitRecipe:
-    """Build a :class:`HercuvitRecipe` from YAML (a ``field: value`` mapping on top of the schema defaults)."""
+    """Build a :class:`HercuvitRecipe` from a MODEL yaml (a ``field: value`` mapping of MODEL fields only). Training
+    config (epochs, batch_size, lr, schedule, loss weights, attention backend) is set on the CLI, not here, and is
+    rejected if it appears in the yaml."""
     try:
         import yaml
     except ImportError as e:
@@ -177,6 +196,10 @@ def _from_yaml(text: str, source: str = "<recipe>") -> HercuvitRecipe:
     bad = sorted(k for k in over if k not in valid)
     if bad:
         raise SystemExit(f"hercuvit recipe {source}: unknown field(s) {bad}. Valid fields: {sorted(valid)}.")
+    train_in_yaml = sorted(k for k in over if k in _TRAIN_FIELDS)
+    if train_in_yaml:
+        raise SystemExit(f"hercuvit recipe {source}: the model yaml must not set TRAINING config {train_in_yaml} — "
+                         f"these are CLI flags (e.g. --epochs, --batch-size, --base-lr). The yaml defines the MODEL only.")
     for k in _TUPLE_FIELDS:
         if over.get(k) is not None:
             over[k] = tuple(over[k])

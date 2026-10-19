@@ -27,16 +27,27 @@ def test_apply_attention_backend_sets_priority():
     assert all(isinstance(p, list) and p for p in prios)
 
 
-def test_recipe_default_and_yaml_roundtrip(tmp_path):
+def test_model_yaml_overrides_model_fields_only(tmp_path):
     rec = R.active()
-    assert rec.name == "small" and rec.variant == "small"       # default recipe is now the `small` variant yaml
-    assert rec.attention_backend == "auto"
-    # a partial YAML override only touches the named fields.
+    assert rec.name == "small" and rec.variant == "small"       # default recipe is the `small` model yaml
+    assert rec.attention_backend == "auto"                      # training default (not from the yaml)
+    # a model yaml sets MODEL fields; training stays at the code defaults.
     f = os.path.join(str(tmp_path), "v.yml")
     with open(f, "w") as fh:
-        fh.write("variant: small\nbase_lr: 2.0e-4\nattention_backend: math\n")
+        fh.write("variant: small\nn_queries: 48\nmask_dim: 16\n")
     r2 = R.load(f)
-    assert r2.base_lr == 2.0e-4 and r2.attention_backend == "math" and r2.epochs == rec.epochs
+    assert r2.n_queries == 48 and r2.mask_dim == 16 and r2.epochs == rec.epochs and r2.base_lr == rec.base_lr
+
+
+def test_model_yaml_rejects_training_fields(tmp_path):
+    # the yaml defines the MODEL only — training config is CLI flags, so training keys in a yaml are rejected.
+    import pytest
+    f = os.path.join(str(tmp_path), "bad.yml")
+    for bad in ("base_lr: 2.0e-4\n", "epochs: 10\n", "batch_size: 4\n", "w_malis: 1.0\n", "attention_backend: math\n"):
+        with open(f, "w") as fh:
+            fh.write("variant: small\n" + bad)
+        with pytest.raises(SystemExit):
+            R.load(f)
 
 
 def test_variant_recipes_define_arch():

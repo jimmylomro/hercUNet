@@ -1,20 +1,20 @@
-# HercuViT recipe — the `small` variant (the shipped DEFAULT). A recipe FULLY DEFINES the network: training
-# from scratch, the net is built from these fields; training from an `--encoder` .pt, the ENCODER comes from the
-# .pt (its baked weights) and these encoder fields are VALIDATED against it, while the decoder + heads are still
-# built fresh from here. Schema: hercunet/hercuvit/train/recipe.py:HercuvitRecipe (omitted fields = schema default).
+# HercuViT MODEL — the `small` variant (the default). A recipe yaml defines THE NETWORK ONLY; training config
+# (epochs, batch size, lr, schedule, loss weights, attention backend) is set on the `hercuvit train` CLI as flags,
+# not here. Schema: hercunet/hercuvit/train/recipe.py (the MODEL fields). Reading this file tells you the network.
+#
+# `small` IS the Dinovol teacher, windowed — so its encoder DIMS come from the teacher .pt (embed_dim/depth/
+# num_heads/mlp_ratio left unset = take them from the .pt). Only the windowing is `small`-specific.
 name: small
 variant: small
 
 # --- encoder arch ---
-# `small` IS the Dinovol teacher, windowed — so its encoder DIMS come from the teacher .pt (embed_dim/depth/
-# num_heads/mlp_ratio left unset = take them from the .pt). Only the windowing is `small`-specific:
 global_attention: full          # the global blocks do full attention (no spatial reduction)
 sr_factor: [2, 2, 2]            # (unused when global_attention=full; kept for schema symmetry)
-
-# --- shared architecture ---
 window: 128                     # input cube side (voxels) = Dinovol crop
 global_blocks: [4, 7, 10]       # 1-indexed blocks that keep GLOBAL attention; the rest are windowed
 window_size: [8, 8, 8]          # windowed-attention window in tokens (8³ → 2×2×2 windows)
+
+# --- decoder + heads ---
 # decoder_channels: unset → (192,128,48,16). Only the 1/8 width is free; (1/4,1/2,1/1)=(128,48,16) are LOCKED
 # to the stem skips by the additive decoder skips.
 n_sem_classes: 2
@@ -25,22 +25,3 @@ instance_layers: 3
 deep_supervision: true
 learned_queries: true
 add_null_query: true
-
-attention_backend: auto
-
-# --- data ---
-target_voxel_um: 9.6
-augment: true
-batch_size: 1
-
-# --- optimiser / schedule ---
-base_lr: 1.0e-4
-transformer_lr_mult: 0.1
-weight_decay: 0.05
-grad_clip: 1.0
-warmup_steps: 200
-lr_schedule: constant
-
-# --- schedule: LP-FT — transformer frozen for a head warmup, then fine-tuned @ transformer_lr_mult × LR ---
-epochs: 175
-freeze_warmup_epochs: 50

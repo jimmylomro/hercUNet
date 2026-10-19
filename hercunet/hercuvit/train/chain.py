@@ -71,9 +71,7 @@ def run_training(
     encoder_ckpt: str,
     out: str,
     recipe_path: str | None = None,
-    epochs: int | None = None,
     device: str = "cuda",
-    attention_backend: str | None = None,
     variant: str | None = None,
     num_workers: int = 4,
     continue_training: bool = False,
@@ -81,6 +79,7 @@ def run_training(
     pre_extract: bool = True,
     train_cache: str | None = None,
     prep_shards: int = 8,
+    train_overrides: dict | None = None,
 ) -> None:
     """Build HercuViT from an encoder checkpoint (``encoder_ckpt`` — a distilled encoder or a raw Dinovol teacher;
     ``build_hercuvit`` detects which + the windowed retrofit) and fit on the herculabels corpus. ``variant`` is the
@@ -104,8 +103,8 @@ def run_training(
     # deduced variant (e.g. a distilled nano .pt → recipes/nano.yml: slim decoder + nano heads). An explicit
     # --recipe wins. The encoder's arch then comes from the .pt and build_hercuvit validates the recipe against it.
     rec = _recipe.load(recipe_path) if recipe_path else (_recipe.variant_recipe(variant) if variant else _recipe.load(None))
-    if attention_backend:                                            # CLI override of the recipe field
-        rec = replace(rec, attention_backend=attention_backend)
+    if train_overrides:                                              # TRAINING config from the CLI flags (yaml is model-only)
+        rec = replace(rec, **train_overrides)
     _recipe.set_active(rec)
 
     blob = torch.load(encoder_ckpt, map_location="cpu", weights_only=False)      # model_cfg for the saved checkpoints
@@ -139,8 +138,6 @@ def run_training(
           flush=True)
 
     trainer = HercuvitTrainer(net, rec, out, model_cfg=model_cfg, device=device)
-    if epochs:
-        trainer.num_epochs = int(epochs)
     if continue_training:
         latest = os.path.join(out, "checkpoint_latest.pth")
         if os.path.isfile(latest):
@@ -150,17 +147,24 @@ def run_training(
     trainer.run(loader)
 
 
+#: train fields settable on the CLI (the yaml is model-only); unset flags keep the recipe defaults.
+_TRAIN_FLAGS = ("epochs", "freeze_warmup_epochs", "batch_size", "base_lr", "transformer_lr_mult",
+                "weight_decay", "grad_clip", "warmup_steps", "lr_schedule", "augment",
+                "target_voxel_um", "attention_backend", "w_symskel", "w_malis")
+
+
 def _run_from_args(args) -> None:
     """Shared body for ``fit`` / ``chain`` — resolve corpus + encoder, then fit (optionally pre-extracting first)."""
     corpus_dir = resolve_corpus(args.corpus, args.corpus_hf)
     encoder_ckpt, variant = resolve_encoder_and_variant(args)
+    train_overrides = {k: getattr(args, k) for k in _TRAIN_FLAGS if getattr(args, k, None) is not None}
     run_training(corpus_dir=corpus_dir, encoder_ckpt=encoder_ckpt, variant=variant, out=args.out,
-                 recipe_path=args.recipe, epochs=args.epochs, device=args.device,
-                 attention_backend=args.attention_backend,
+                 recipe_path=args.recipe, device=args.device,
                  num_workers=args.num_workers, continue_training=args.continue_,
                  pre_extract=not getattr(args, "no_pre_extract", False),
                  train_cache=getattr(args, "train_cache", None),
-                 prep_shards=int(getattr(args, "prep_shards", 8)))
+                 prep_shards=int(getattr(args, "prep_shards", 8)),
+                 train_overrides=train_overrides)
 
 
 def fit(args) -> None:

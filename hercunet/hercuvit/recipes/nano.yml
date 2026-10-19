@@ -1,6 +1,6 @@
-# HercuViT recipe — the `nano` variant: the smallest distilled transformer (~6-8M), built by `hercuvit distill`
-# from EXACTLY these encoder numbers and trained supervised from the resulting encoder .pt. A recipe fully defines
-# the network (see small.yml). Schema: hercunet/hercuvit/train/recipe.py:HercuvitRecipe.
+# HercuViT MODEL — the `nano` variant: the smallest distilled transformer (~6-8M), built by `hercuvit distill`
+# from EXACTLY these encoder numbers. A recipe yaml defines THE NETWORK ONLY; training config (epochs, batch, lr,
+# schedule, loss weights) is set on the `hercuvit train` CLI as flags. Schema: hercunet/hercuvit/train/recipe.py.
 name: nano
 variant: nano
 
@@ -11,11 +11,11 @@ num_heads: 4                    # teacher 6 → 4
 mlp_ratio: 2.6666666666666665   # hidden 512 / embed 192  (= 8/3)
 global_attention: spatial_reduction   # windowed blocks reduce keys/values spatially (sr_factor)
 sr_factor: [2, 2, 2]
-
-# --- shared architecture ---
 window: 128
 global_blocks: [3, 6]           # only blocks 3 & 6 keep global attention; the rest are windowed 8³
 window_size: [8, 8, 8]
+
+# --- decoder + heads ---
 decoder_channels: [128, 128, 48, 16]   # SLIM decoder for nano: 1/8 width 192→128 (1/4,1/2,1/1 locked to stem skips)
 n_sem_classes: 2
 mask_dim: 32
@@ -25,22 +25,3 @@ instance_layers: 3
 deep_supervision: true
 learned_queries: true
 add_null_query: true
-
-attention_backend: auto
-
-# --- data ---
-target_voxel_um: 9.6
-augment: true
-batch_size: 1
-
-# --- optimiser / schedule ---
-base_lr: 1.0e-4
-transformer_lr_mult: 0.1
-weight_decay: 0.05
-grad_clip: 1.0
-warmup_steps: 200
-lr_schedule: constant
-
-# --- schedule: LP-FT — transformer frozen for a head warmup, then fine-tuned @ transformer_lr_mult × LR ---
-epochs: 175
-freeze_warmup_epochs: 50

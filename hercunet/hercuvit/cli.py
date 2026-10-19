@@ -41,12 +41,30 @@ def _add_train_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--recipe", default=None, metavar="FILE.yml",
                    help="YAML recipe defining the net (copy recipes/{small,tiny,nano}.yml and edit); omit to use "
                         "the encoder's variant recipe, or small.yml from scratch")
-    p.add_argument("--epochs", type=int, default=None, metavar="N",
-                   help="override the total training length (e.g. --epochs 1 for a smoke run)")
     p.add_argument("--device", default="cuda", help="cuda | cpu (default cuda)")
+    # --- training config (CLI FLAGS — the yaml is model-only). Unset flags keep the code defaults. ---
+    p.add_argument("--epochs", type=int, default=None, metavar="N", help="total training epochs (default 175)")
+    p.add_argument("--freeze-warmup-epochs", dest="freeze_warmup_epochs", type=int, default=None, metavar="N",
+                   help="LP-FT: epochs with the transformer frozen before fine-tuning (default 50; 0 = from step 0)")
+    p.add_argument("--batch-size", dest="batch_size", type=int, default=None, metavar="N", help="batch size (default 1)")
+    p.add_argument("--base-lr", dest="base_lr", type=float, default=None, metavar="LR", help="base LR (default 1e-4)")
+    p.add_argument("--transformer-lr-mult", dest="transformer_lr_mult", type=float, default=None, metavar="M",
+                   help="LR multiplier for the (unfrozen) transformer blocks (default 0.1)")
+    p.add_argument("--weight-decay", dest="weight_decay", type=float, default=None, help="AdamW weight decay (default 0.05)")
+    p.add_argument("--grad-clip", dest="grad_clip", type=float, default=None, help="grad-norm clip (default 1.0)")
+    p.add_argument("--warmup-steps", dest="warmup_steps", type=int, default=None, help="LR warmup steps (default 200)")
+    p.add_argument("--lr-schedule", dest="lr_schedule", default=None, choices=("constant", "cosine"),
+                   help="LR schedule after warmup (default constant)")
+    p.add_argument("--augment", dest="augment", default=None, action=argparse.BooleanOptionalAction,
+                   help="geometric augmentation (--augment / --no-augment; default on)")
+    p.add_argument("--target-voxel-um", dest="target_voxel_um", type=float, default=None,
+                   help="resample working scale µm (default 9.6)")
     p.add_argument("--attention-backend", dest="attention_backend", default=None, choices=_BACKENDS,
-                   help="SDPA kernel: auto|flash|cudnn|efficient|math (default: the recipe's 'auto'). Use 'auto' "
-                        "on GPUs with no cuDNN plan for the windowed shapes (e.g. RTX 4060)")
+                   help="SDPA kernel auto|flash|cudnn|efficient|math (default auto; hardware, not model)")
+    p.add_argument("--w-symskel", dest="w_symskel", type=float, default=None,
+                   help="weight of the optional per-query SymSkel thin-surface loss (default 0 = off)")
+    p.add_argument("--w-malis", dest="w_malis", type=float, default=None,
+                   help="weight of the optional AffMALIS separation loss (default 0 = off)")
     p.add_argument("--variant", default=None, choices=_VARIANTS,
                    help="FROM-SCRATCH training of this variant (no encoder) — mutually exclusive with --encoder; "
                         "NOT supported yet (raises). Normal training deduces the variant from --encoder.")
