@@ -126,6 +126,24 @@ def geometric_augment(ct: np.ndarray, labels: dict, rng: np.random.Generator) ->
     return _t(ct), {k: _t(v) for k, v in labels.items()}
 
 
+def build_native_labels(rec: dict, meta: dict, *, surface_tau: float = 0.91, ignore_score: float = 0.80,
+                        confidence_ignore: bool = True) -> tuple[np.ndarray, np.ndarray]:
+    """Build the NATIVE-resolution (pre-resample) surface ``{0 bg, 1 surface, 2 ignore}`` + instance owner
+    (``0 = bg/ignore``, sheet ids ``>=1``) for one herculabels window — identical to ``hercunet train
+    export-labels``. Shared by :meth:`HercuvitDataset.__getitem__` and the training pre-extraction so there is one
+    label definition. Returns ``(surf, inst)`` at the window's native shape; the CT read + resample/augment are the
+    caller's job (labels are mesh-derived and CT-independent)."""
+    shape = tuple(meta["shape"]); vu = float(meta["voxel_um"]); ds = int(meta.get("conf_ds", 4))
+    per_sheet = meta.get("quality", {}).get("per_sheet", {})
+    mag, lab3, _nrm, _w3, owner_full = build_gradphi_edt(rec["meshes"], shape, vu, return_owner_full=True)
+    weight = _weight(rec.get("conf", {}), shape, ds)
+    surf = _build_surface_label(mag, owner_full, weight, per_sheet, surface_tau=surface_tau,
+                                ignore_score=ignore_score, confidence_ignore=confidence_ignore)
+    inst = (lab3.astype(np.int32) + 1)                               # -1 -> 0 (bg), sheet ids -> >=1
+    inst[surf == IGNORE] = 0                                         # ignore excluded from instance pairs
+    return surf, inst
+
+
 # --------------------------------------------------------------------------- dataset
 class HercuvitDataset(Dataset):
     """herculabels corpus → Dinovol-normalised CT + confidence-masked surface ``{0,1,2}`` + instance owner at
@@ -198,8 +216,7 @@ class HercuvitDataset(Dataset):
         rng = np.random.default_rng(self.seed + idx)
         meta, recs = load_sample_bundle(path)                            # reused loader
         rec = recs[self.record]
-        shape = tuple(meta["shape"]); vu = float(meta["voxel_um"]); ds = int(meta.get("conf_ds", 4))
-        per_sheet = meta.get("quality", {}).get("per_sheet", {})
+        shape = tuple(meta["shape"]); vu = float(meta["voxel_um"])
         ident = bool(rec.get("meshes"))
 
         if self.ct_only:                                                 # distillation: CT crop only, no labels
@@ -211,13 +228,9 @@ class HercuvitDataset(Dataset):
                 ct, _ = geometric_augment(ct, {}, rng)
             return {"ct": torch.from_numpy(np.ascontiguousarray(ct)).float().unsqueeze(0), "path": path}
 
-        # labels — identical to export-labels
-        mag, lab3, _nrm, _w3, owner_full = build_gradphi_edt(rec["meshes"], shape, vu, return_owner_full=True)
-        weight = _weight(rec.get("conf", {}), shape, ds)
-        surf = _build_surface_label(mag, owner_full, weight, per_sheet, surface_tau=self.surface_tau,
-                                    ignore_score=self.ignore_score, confidence_ignore=self.confidence_ignore)
-        inst = (lab3.astype(np.int32) + 1)                               # -1 -> 0 (bg), sheet ids -> >=1
-        inst[surf == IGNORE] = 0                                         # ignore excluded from instance pairs
+        # labels — identical to export-labels (shared native-label builder)
+        surf, inst = build_native_labels(rec, meta, surface_tau=self.surface_tau, ignore_score=self.ignore_score,
+                                         confidence_ignore=self.confidence_ignore)
 
         # CT (Dinovol robust norm) then resample CT + labels to 128³ / 9.6 µm
         ct_native = self.ct_reader(meta.get("scroll"), int(meta.get("level", 0)),
@@ -237,6 +250,54 @@ class HercuvitDataset(Dataset):
             "sem": torch.from_numpy(np.ascontiguousarray(labs["surf"])).long(),          # {0 bg,1 surface,2 ignore}
             "owner": torch.from_numpy(np.ascontiguousarray(labs["owner"])).long(),       # instance ids (0 = bg/ignore)
             "has_identity": bool(ident),
+            "path": path,
+        }
+
+
+class LocalHercuvitDataset(Dataset):
+    """Training dataset backed by a LOCAL pre-extracted cache (``train prep-shard`` → native ``.npz`` windows).
+
+    Each cached file holds one window's **native** CT (Dinovol-normalised float16) + native ``surf`` ``{0,1,2}`` +
+    native instance ``owner`` — everything expensive (the S3 CT read + the ``build_gradphi_edt`` label build) done
+    once. ``__getitem__`` only does the cheap per-epoch work: :func:`resample_to_crop` (random crop offset when
+    augmenting) + :func:`geometric_augment`, returning the SAME dict as :class:`HercuvitDataset`. Reading from local
+    ``.npz`` is fork/concurrency-safe, so a ``num_workers > 0`` DataLoader is finally safe here (the live S3 path
+    deadlocks under worker concurrency — see ``train/preextract.py``).
+
+    Augmentation is fresh per call (``default_rng()``), so every epoch sees a different crop offset + flip of each
+    window — a genuine improvement over the live dataset's ``seed + idx`` seeding, which froze one view per sample."""
+
+    def __init__(self, cache_dir: str, *, augment: bool = True, target_voxel_um: float = TARGET_VOXEL_UM,
+                 crop: int = CROP) -> None:
+        self.cache_dir = cache_dir
+        self.augment = bool(augment)
+        self.target_voxel_um = float(target_voxel_um)
+        self.crop = int(crop)
+        self.files = sorted(glob.glob(os.path.join(cache_dir, "win_*.npz")))
+        if not self.files:
+            raise FileNotFoundError(f"no win_*.npz under {cache_dir!r} — run the training pre-extraction first")
+
+    def __len__(self) -> int:
+        return len(self.files)
+
+    def __getitem__(self, idx: int) -> dict:
+        path = self.files[idx]
+        with np.load(path, allow_pickle=False) as z:
+            ct_norm = np.asarray(z["ct"], dtype=np.float32)
+            surf = np.asarray(z["surf"])
+            owner = np.asarray(z["owner"])
+            vu = float(z["voxel_um"])
+            ident = bool(z["has_identity"])
+        rng = np.random.default_rng() if self.augment else None           # fresh entropy → per-epoch variety
+        ct, labs = resample_to_crop(ct_norm, {"surf": surf, "owner": owner}, vu,
+                                    target_voxel_um=self.target_voxel_um, crop=self.crop, rng=rng)
+        if self.augment:
+            ct, labs = geometric_augment(ct, labs, rng)
+        return {
+            "ct": torch.from_numpy(np.ascontiguousarray(ct)).float().unsqueeze(0),       # (1,128,128,128)
+            "sem": torch.from_numpy(np.ascontiguousarray(labs["surf"])).long(),          # {0 bg,1 surface,2 ignore}
+            "owner": torch.from_numpy(np.ascontiguousarray(labs["owner"])).long(),       # instance ids (0 = bg/ignore)
+            "has_identity": ident,
             "path": path,
         }
 

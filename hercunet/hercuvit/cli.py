@@ -52,6 +52,14 @@ def _add_train_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--num-workers", dest="num_workers", type=int, default=4, help="DataLoader workers (default 4)")
     p.add_argument("--continue", dest="continue_", action="store_true",
                    help="resume from {out}/checkpoint_latest.pth instead of warm-starting fresh")
+    # pre-extraction (default ON): pull the gated training set (CT+labels) to a LOCAL cache via shard processes,
+    # then train from local — the live S3 path deadlocks under worker concurrency + re-streams every epoch.
+    p.add_argument("--train-cache", dest="train_cache", default=None, metavar="DIR",
+                   help="local pre-extracted training cache dir (default: {out}/train_cache)")
+    p.add_argument("--prep-shards", dest="prep_shards", type=int, default=8, metavar="N",
+                   help="processes for the local training pre-extraction (each single-threaded S3; default 8)")
+    p.add_argument("--no-pre-extract", dest="no_pre_extract", action="store_true",
+                   help="train directly from the live S3 corpus (slow, re-streams each epoch; use --num-workers 0)")
 
 
 def _train_chain(args: argparse.Namespace) -> None:
@@ -78,6 +86,20 @@ def _add_train_fit(sub: argparse._SubParsersAction) -> None:
                                    "(staged: semantic → unfreeze transformer → add instance head).")
     _add_train_common(p)
     p.set_defaults(func=_train_fit)
+
+
+def _add_train_prep(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("prep-shard", help="(internal) one shard of the training pre-extraction (CT + labels)",
+                       description="Pre-extract one shard of the gated training set (native CT + surf + owner) to a "
+                                   "local cache. The trainer launches N of these as separate processes.")
+    p.add_argument("--corpus", required=True, metavar="DIR", help="local corpus dir (resolved by the orchestrator)")
+    p.add_argument("--cache-dir", dest="cache_dir", required=True, metavar="DIR", help="local training-cache dir")
+    p.add_argument("--nshards", type=int, default=8)
+    p.add_argument("--shard", type=int, default=0)
+    p.add_argument("--no-identity-only", dest="no_identity_only", action="store_true",
+                   help="keep windows with no identity record (default: identity-only, matching the dataset)")
+    p.set_defaults(func=lambda a: __import__("hercunet.hercuvit.train.preextract",
+                                             fromlist=["prep_run"]).prep_run(a))
 
 
 # --------------------------------------------------------------------------------- distill --
@@ -173,6 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_cmds = train.add_subparsers(dest="command", metavar="<step>", required=True)
     _add_train_chain(train_cmds)
     _add_train_fit(train_cmds)
+    _add_train_prep(train_cmds)
 
     distill = groups.add_parser("distill", help="distil a windowed variant (small/tiny/nano) from the Dinovol teacher")
     _add_distill(distill)

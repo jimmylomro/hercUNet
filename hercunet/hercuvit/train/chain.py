@@ -78,17 +78,25 @@ def run_training(
     num_workers: int = 4,
     continue_training: bool = False,
     identity_only: bool = True,
+    pre_extract: bool = True,
+    train_cache: str | None = None,
+    prep_shards: int = 8,
 ) -> None:
     """Build HercuViT from an encoder checkpoint (``encoder_ckpt`` — a distilled encoder or a raw Dinovol teacher;
     ``build_hercuvit`` detects which + the windowed retrofit) and fit on the herculabels corpus. ``variant`` is the
-    one deduced from the encoder (overrides the recipe)."""
+    one deduced from the encoder (overrides the recipe).
+
+    ``pre_extract`` (default): pre-extract the gated training set (CT + labels) to a LOCAL cache via shard processes
+    (``preextract._ensure_train_cache``), then train from :class:`LocalHercuvitDataset` with a safe worker DataLoader
+    — the live S3 path deadlocks under worker concurrency and re-streams every epoch. ``--no-pre-extract`` falls back
+    to the live :class:`HercuvitDataset` (use ``--num-workers 0`` there on an S3 corpus)."""
     import os
 
     import torch
     from torch.utils.data import DataLoader
 
     from .. import netbuild
-    from ..data.dataset import HercuvitDataset, hercuvit_collate
+    from ..data.dataset import HercuvitDataset, LocalHercuvitDataset, hercuvit_collate
     from . import recipe as _recipe
     from .trainer import HercuvitTrainer
 
@@ -112,11 +120,22 @@ def run_training(
         add_null_query=rec.add_null_query, learned_queries=rec.learned_queries,
     )
 
-    ds = HercuvitDataset(corpus_dir, augment=rec.augment, target_voxel_um=rec.target_voxel_um,
-                         crop=rec.window, identity_only=identity_only)
+    if pre_extract:
+        from .preextract import _ensure_train_cache
+        cache_dir = train_cache or os.path.join(out, "train_cache")
+        _ensure_train_cache(corpus_dir=corpus_dir, cache_dir=cache_dir, nshards=prep_shards,
+                            identity_only=identity_only)
+        ds = LocalHercuvitDataset(cache_dir, augment=rec.augment, target_voxel_um=rec.target_voxel_um,
+                                  crop=rec.window)
+        src = cache_dir
+    else:                                                            # live S3 (re-streams every epoch; workers unsafe)
+        ds = HercuvitDataset(corpus_dir, augment=rec.augment, target_voxel_um=rec.target_voxel_um,
+                             crop=rec.window, identity_only=identity_only)
+        src = corpus_dir
     loader = DataLoader(ds, batch_size=rec.batch_size, shuffle=True, num_workers=num_workers,
                         collate_fn=hercuvit_collate, drop_last=True, pin_memory=(device != "cpu"))
-    print(f"[hercuvit] corpus {corpus_dir}: {len(ds)} samples; batch {rec.batch_size}; device {device}", flush=True)
+    print(f"[hercuvit] {src}: {len(ds)} samples; batch {rec.batch_size}; workers {num_workers}; device {device}",
+          flush=True)
 
     trainer = HercuvitTrainer(net, rec, out, model_cfg=model_cfg, device=device)
     if epochs:
@@ -130,21 +149,24 @@ def run_training(
     trainer.run(loader)
 
 
-def fit(args) -> None:
-    """``hercuvit train fit`` handler: corpus + encoder already local (or pulled by flag)."""
+def _run_from_args(args) -> None:
+    """Shared body for ``fit`` / ``chain`` — resolve corpus + encoder, then fit (optionally pre-extracting first)."""
     corpus_dir = resolve_corpus(args.corpus, args.corpus_hf)
     encoder_ckpt, variant = resolve_encoder_and_variant(args)
     run_training(corpus_dir=corpus_dir, encoder_ckpt=encoder_ckpt, variant=variant, out=args.out,
                  recipe_path=args.recipe, epochs=args.epochs, device=args.device,
                  attention_backend=args.attention_backend,
-                 num_workers=args.num_workers, continue_training=args.continue_)
+                 num_workers=args.num_workers, continue_training=args.continue_,
+                 pre_extract=not getattr(args, "no_pre_extract", False),
+                 train_cache=getattr(args, "train_cache", None),
+                 prep_shards=int(getattr(args, "prep_shards", 8)))
+
+
+def fit(args) -> None:
+    """``hercuvit train fit`` handler: corpus + encoder already local (or pulled by flag)."""
+    _run_from_args(args)
 
 
 def chain(args) -> None:
     """``hercuvit train chain`` handler: pull the corpus + encoder, build, fit — one command."""
-    corpus_dir = resolve_corpus(args.corpus, args.corpus_hf)
-    encoder_ckpt, variant = resolve_encoder_and_variant(args)
-    run_training(corpus_dir=corpus_dir, encoder_ckpt=encoder_ckpt, variant=variant, out=args.out,
-                 recipe_path=args.recipe, epochs=args.epochs, device=args.device,
-                 attention_backend=args.attention_backend,
-                 num_workers=args.num_workers, continue_training=args.continue_)
+    _run_from_args(args)
