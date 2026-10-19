@@ -161,6 +161,7 @@ def build_hercuvit(
     add_null_query: bool = False,
     learned_queries: bool = False,
     strict_load: bool = True,
+    distilled_encoder: str | None = None,
 ) -> HercuVitNet:
     """Build **any** HercuViT variant — one config-driven path.
 
@@ -197,6 +198,16 @@ def build_hercuvit(
         fresh = load_matching_backbone_weights(backbone, bb_sd)  # slim variant: transfer stem/attn, distil the rest
     backbone.return_embed_skips = True
     retrofit_windowed(backbone, global_blocks=gblocks, window_size=win, global_attention=gattn, sr_factor=srf)
+
+    if distilled_encoder:                 # warm-start the RETROFITTED backbone from a distilled encoder (same keys)
+        dsd = torch.load(distilled_encoder, map_location=device, weights_only=False)
+        sd = dsd.get("student_backbone", dsd) if isinstance(dsd, dict) else dsd
+        dm, du = backbone.load_state_dict(sd, strict=False)
+        dm = [k for k in dm if "num_batches_tracked" not in k]
+        du = [k for k in du if "num_batches_tracked" not in k]
+        if strict_load and (dm or du):
+            raise RuntimeError(f"distilled encoder load not clean: missing={dm[:5]} unexpected={du[:5]}")
+        fresh = []                        # a distilled encoder leaves no fresh (un-transferred) params
 
     net = HercuVitNet(
         backbone,

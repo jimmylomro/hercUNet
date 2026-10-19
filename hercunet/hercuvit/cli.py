@@ -47,7 +47,10 @@ def _add_train_common(p: argparse.ArgumentParser) -> None:
                         "on GPUs with no cuDNN plan for the windowed shapes (e.g. RTX 4060)")
     p.add_argument("--variant", default=None, choices=_VARIANTS,
                    help="architecture variant (default: the recipe's 'small'). small = BUILT ~27M windowed "
-                        "retrofit; tiny/nano = deferred distilled nets (built via `hercuvit distill`)")
+                        "retrofit; tiny/nano = distilled nets (built via `hercuvit distill`)")
+    p.add_argument("--distilled-encoder", dest="distilled_encoder", default=None, metavar="CKPT",
+                   help="warm-start the windowed encoder from a distilled checkpoint (`hercuvit distill` output) "
+                        "instead of the raw Dinovol weights — recovers token identity under windowed attention")
     p.add_argument("--num-workers", dest="num_workers", type=int, default=4, help="DataLoader workers (default 4)")
     p.add_argument("--continue", dest="continue_", action="store_true",
                    help="resume from {out}/checkpoint_latest.pth instead of warm-starting fresh")
@@ -90,12 +93,23 @@ def _add_distill(p: argparse.ArgumentParser) -> None:
     """Configure the ``hercuvit distill`` parser (a direct command — architecture/logic is lead-owned)."""
     p.add_argument("--teacher", default=_DINOVOL_HF, metavar="REPO|CKPT",
                    help=f"teacher model (HF repo or local ckpt; default {_DINOVOL_HF})")
-    p.add_argument("--student", default="tiny", choices=("tiny", "nano"), help="slim student variant to distil")
-    p.add_argument("--out", required=True, metavar="DIR", help="output dir for the distilled student")
+    p.add_argument("--student", default="small", choices=("small", "tiny", "nano", "all"),
+                   help="windowed variant to distil (small|tiny|nano, or 'all' → <variant>.pt per variant in --out)")
+    p.add_argument("--out", required=True, metavar="PATH",
+                   help="output encoder (.pt file; a DIR for --student all). Reloaded via --distilled-encoder")
     p.add_argument("--steps", type=int, default=None, help="distillation steps (default: the recipe's)")
-    p.add_argument("--corpus", default=None, metavar="DIR", help="local corpus of unlabeled crops")
+    p.add_argument("--corpus-mode", dest="corpus_mode", default="random",
+                   choices=("random", "herculabels", "m7"),
+                   help="unlabelled-crop source: random (many scrolls, default) | herculabels (--corpus) | m7 (--manifest)")
+    p.add_argument("--scrolls", default=None, metavar="IDS",
+                   help="comma scroll ids for --corpus-mode random (default: all mined scrolls)")
+    p.add_argument("--manifest", default=None, metavar="FILE.json",
+                   help="m7 scout manifest for --corpus-mode m7 (approved compressed-sheet regions)")
+    p.add_argument("--checkpoint-every", dest="checkpoint_every", type=int, default=0, metavar="N",
+                   help="save the encoder every N steps (resumable long runs; default: only at the end)")
+    p.add_argument("--corpus", default=None, metavar="DIR", help="local herculabels corpus (for --corpus-mode herculabels)")
     p.add_argument("--corpus-hf", dest="corpus_hf", nargs="?", const=_CORPUS_HF, default=None, metavar="REPO",
-                   help=f"download the crops corpus from an HF dataset (bare flag = {_CORPUS_HF})")
+                   help=f"download the herculabels corpus from an HF dataset (bare flag = {_CORPUS_HF})")
     p.add_argument("--gram-weight", dest="gram_weight", type=float, default=None, help="Gram distillation weight")
     p.add_argument("--token-weight", dest="token_weight", type=float, default=None, help="per-token distil weight")
     p.add_argument("--cls-weight", dest="cls_weight", type=float, default=None, help="cls/register distil weight")

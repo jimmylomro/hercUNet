@@ -49,8 +49,11 @@ def run_training(
     num_workers: int = 4,
     continue_training: bool = False,
     identity_only: bool = True,
+    distilled_encoder: str | None = None,
 ) -> None:
-    """Build HercuViT (Dinovol warm-start + windowed retrofit + backend fix) and fit on the herculabels corpus."""
+    """Build HercuViT (Dinovol warm-start + windowed retrofit + backend fix) and fit on the herculabels corpus.
+    ``distilled_encoder`` warm-starts the windowed encoder from a ``hercuvit distill`` checkpoint (recovers token
+    identity under windowed attention) instead of the raw Dinovol weights."""
     import os
 
     import torch
@@ -78,6 +81,7 @@ def run_training(
         query_dim=rec.query_dim, instance_layers=rec.instance_layers,
         deep_supervision=rec.deep_supervision, with_instance=True,
         add_null_query=rec.add_null_query, learned_queries=rec.learned_queries,
+        distilled_encoder=distilled_encoder,
     )
 
     ds = HercuvitDataset(corpus_dir, augment=rec.augment, target_voxel_um=rec.target_voxel_um,
@@ -105,7 +109,8 @@ def fit(args) -> None:
     run_training(corpus_dir=corpus_dir, dinovol_ckpt=dinovol_ckpt, out=args.out,
                  recipe_path=args.recipe, epochs=args.epochs, device=args.device,
                  attention_backend=args.attention_backend, variant=args.variant,
-                 num_workers=args.num_workers, continue_training=args.continue_)
+                 num_workers=args.num_workers, continue_training=args.continue_,
+                 distilled_encoder=getattr(args, "distilled_encoder", None))
 
 
 def chain(args) -> None:
@@ -115,4 +120,5 @@ def chain(args) -> None:
     run_training(corpus_dir=corpus_dir, dinovol_ckpt=dinovol_ckpt, out=args.out,
                  recipe_path=args.recipe, epochs=args.epochs, device=args.device,
                  attention_backend=args.attention_backend, variant=args.variant,
-                 num_workers=args.num_workers, continue_training=args.continue_)
+                 num_workers=args.num_workers, continue_training=args.continue_,
+                 distilled_encoder=getattr(args, "distilled_encoder", None))
