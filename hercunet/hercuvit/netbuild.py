@@ -28,7 +28,7 @@ import torch
 
 from .dinovol.dinov2_eva import attention_priority as _dinovol_priority
 from .model.encoder import build_dinovol_backbone
-from .model.hercuvit_net import VARIANT_ARCH, HercuVitNet, build_hercuvit  # noqa: F401 (re-export)
+from .model.hercuvit_net import HercuVitNet, build_hercuvit, DEFAULT_DECODER_CHANNELS  # noqa: F401 (re-export)
 from .model.windowed import DEFAULT_GLOBAL_BLOCKS, DEFAULT_WINDOW_SIZE, retrofit_windowed
 
 
@@ -49,29 +49,23 @@ def apply_attention_backend(net, backend: str = "auto") -> int:
     return n
 
 
-def resolve_arch(variant: str = "small", arch_override: Optional[dict] = None) -> dict:
-    """Merge the recipe's ``arch_override`` tweak OVER the canonical ``VARIANT_ARCH[variant]`` (single source of
-    truth in ``hercuvit_net``). Returns the merged arch dict ({} for plain small → Dinovol-matching defaults)."""
-    if variant not in VARIANT_ARCH:
-        raise ValueError(f"unknown variant {variant!r}; expected one of {sorted(VARIANT_ARCH)}")
-    return {**VARIANT_ARCH[variant], **(arch_override or {})}
-
-
 def build(
     ckpt_path,
     *,
     device: str | torch.device = "cpu",
     attention_backend: str = "auto",
-    variant: str = "small",
     arch_override: Optional[dict] = None,
     global_blocks: Sequence[int] = DEFAULT_GLOBAL_BLOCKS,
     window_size: Sequence[int] = DEFAULT_WINDOW_SIZE,
     **kwargs,
 ) -> HercuVitNet:
-    """``build_hercuvit(..., arch_override=…)`` + :func:`apply_attention_backend` — the single build entry for every
-    variant. ``arch`` = ``VARIANT_ARCH[variant]`` + the recipe tweak; ``{}`` → small (Dinovol-matching). The
-    returned net also carries ``_hercuvit_arch`` (the resolved arch) so the trainer can store it for inference."""
-    arch = resolve_arch(variant, arch_override)
+    """``build_hercuvit(..., arch_override=…)`` + :func:`apply_attention_backend` — the single build entry.
+
+    ``arch_override`` is the architecture assembled from the recipe (``HercuvitRecipe.encoder_arch()``) — the recipe
+    IS the network definition, there is no hidden preset. When loading a distilled encoder, ``build_hercuvit``
+    validates this arch against the ``.pt`` (the file wins). The returned net carries ``_hercuvit_arch`` (the
+    resolved arch) so the trainer can store it for inference (``build_from_cfg``)."""
+    arch = dict(arch_override or {})
     net = build_hercuvit(ckpt_path, arch_override=(arch or None), device=device,
                          global_blocks=global_blocks, window_size=window_size, **kwargs)
     apply_attention_backend(net, attention_backend)
@@ -124,6 +118,7 @@ def build_from_cfg(
     net = HercuVitNet(
         backbone,
         token_dim=int(model_cfg["embed_dim"]),
+        decoder_channels=tuple(arch.get("decoder_channels", DEFAULT_DECODER_CHANNELS)),
         n_sem_classes=n_sem_classes,
         mask_dim=mask_dim,
         n_queries=n_queries,

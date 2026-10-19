@@ -1,0 +1,47 @@
+# HercuViT recipe — the `tiny` variant: distilled mid transformer (~13-14M), built by `hercuvit distill` from
+# these encoder numbers. A recipe fully defines the network (see small.yml). Schema:
+# hercunet/hercuvit/train/recipe.py:HercuvitRecipe.
+name: tiny
+variant: tiny
+
+# --- encoder arch (narrower-depth than the teacher; same width) ---
+embed_dim: 288                  # teacher width kept
+depth: 8                        # teacher 10 → 8 transformer blocks
+num_heads: 6
+mlp_ratio: 2.6666666666666665   # hidden 768 / embed 288  (= 8/3)
+global_attention: spatial_reduction
+sr_factor: [2, 2, 2]
+
+# --- shared architecture ---
+window: 128
+global_blocks: [4, 8]           # only blocks 4 & 8 keep global attention; the rest are windowed 8³
+window_size: [8, 8, 8]
+# decoder_channels: unset → (192,128,48,16) default (tiny keeps the full decoder; slim later if wanted)
+n_sem_classes: 2
+mask_dim: 32
+n_queries: 64
+query_dim: 64
+instance_layers: 3
+deep_supervision: true
+learned_queries: true
+add_null_query: true
+
+attention_backend: auto
+
+# --- data ---
+target_voxel_um: 9.6
+augment: true
+batch_size: 1
+
+# --- optimiser / schedule ---
+base_lr: 1.0e-4
+transformer_lr_mult: 0.1
+weight_decay: 0.05
+grad_clip: 1.0
+warmup_steps: 200
+lr_schedule: constant
+
+# --- staged schedule: semantic (frozen) → unfreeze transformer 0.1× → + instance head ---
+semantic_epochs: 50
+unfreeze_epochs: 25
+instance_epochs: 100

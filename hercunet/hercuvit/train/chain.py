@@ -100,11 +100,12 @@ def run_training(
     from . import recipe as _recipe
     from .trainer import HercuvitTrainer
 
-    rec = _recipe.load(recipe_path)
+    # The recipe IS the network definition. With no explicit --recipe, use the shipped recipe for the encoder's
+    # deduced variant (e.g. a distilled nano .pt → recipes/nano.yml: slim decoder + nano heads). An explicit
+    # --recipe wins. The encoder's arch then comes from the .pt and build_hercuvit validates the recipe against it.
+    rec = _recipe.load(recipe_path) if recipe_path else (_recipe.variant_recipe(variant) if variant else _recipe.load(None))
     if attention_backend:                                            # CLI override of the recipe field
         rec = replace(rec, attention_backend=attention_backend)
-    if variant:                                                      # CLI override of the recipe field
-        rec = replace(rec, variant=variant)
     _recipe.set_active(rec)
 
     blob = torch.load(encoder_ckpt, map_location="cpu", weights_only=False)      # model_cfg for the saved checkpoints
@@ -112,7 +113,7 @@ def run_training(
     del blob
     net = netbuild.build(
         encoder_ckpt, device=device, attention_backend=rec.attention_backend,
-        variant=rec.variant, arch_override=rec.arch_override,
+        arch_override=rec.encoder_arch(),                            # the arch assembled FROM the recipe (yaml = net def)
         global_blocks=rec.global_blocks, window_size=rec.window_size,
         n_sem_classes=rec.n_sem_classes, mask_dim=rec.mask_dim, n_queries=rec.n_queries,
         query_dim=rec.query_dim, instance_layers=rec.instance_layers,

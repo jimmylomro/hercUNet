@@ -54,7 +54,9 @@ def test_dataset_getitem_offline(tmp_path, monkeypatch):
         return (mag, lab3, None, None, owner_full) if return_owner_full else (mag, lab3, None, None)
 
     monkeypatch.setattr(DS, "load_sample_bundle", fake_bundle)
-    monkeypatch.setattr(DS, "build_gradphi_edt", fake_edt)
+    # labels are now built by the SHARED hercunet.train.dataset.build_surface_owner, which imports build_gradphi_edt
+    # locally from hercunet.labels.mesh.medial — patch it at the source so the real surf/owner construction runs.
+    monkeypatch.setattr("hercunet.labels.mesh.medial.build_gradphi_edt", fake_edt)
 
     def fake_reader(scroll, level, org, shape):
         return np.random.default_rng(7).normal(100.0, 20.0, tuple(int(s) for s in shape)).astype(np.float32)

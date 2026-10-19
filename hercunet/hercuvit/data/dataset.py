@@ -12,7 +12,8 @@ reimplementation (that was the earlier mistake):
   * :func:`hercunet.train.dataset._weight` → per-voxel confidence weight from the stored ``conf`` channels;
   * :func:`hercunet.train.dataset._build_surface_label` → the 3-class surface ``{0 bg, 1 surface, 2 ignore}``
     (surface = ``|∇φ| >= surface_tau``; **ignore = collapsed-sheet ∪ confidence (weight < 0.5)** — the
-    confidence masking; ``confidence_ignore=True`` here, since the herculabels pseudo-labels are noisy);
+    confidence masking; ``confidence_ignore=False`` to MATCH the released (uncleaned) HercUNet training —
+    the confidence field supervises a confidence head, it does not mask the loss);
   * :func:`hercunet.train.dataset._window_passes` → the window quality gate (``>= gate_count`` sheets ``>=
     gate_score``), applied at load time;
   * the instance owner = ``lab3 + 1`` with ``surf == 2 -> 0`` (ignore excluded from MALIS/M2F), exactly as
@@ -37,10 +38,10 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 
-# --- reused hercunet label pipeline (identical to `hercunet train export-labels`) ---
+# --- reused hercunet label pipeline: the SHARED per-window label builder `export_labels` also uses (one source,
+#     no duplicated orchestration) + the window quality gate ---
 from ...labels.io.bundle import load_sample_bundle
-from ...labels.mesh.medial import build_gradphi_edt
-from ...train.dataset import _build_surface_label, _weight, _window_passes
+from ...train.dataset import _window_passes, build_surface_owner
 from .normalize import dinovol_normalise
 
 #: Dinovol working scale (``docs/hercuvit.md`` §2) — CT + labels are resampled to this voxel size and side.
@@ -126,31 +127,13 @@ def geometric_augment(ct: np.ndarray, labels: dict, rng: np.random.Generator) ->
     return _t(ct), {k: _t(v) for k, v in labels.items()}
 
 
-def build_native_labels(rec: dict, meta: dict, *, surface_tau: float = 0.91, ignore_score: float = 0.80,
-                        confidence_ignore: bool = True) -> tuple[np.ndarray, np.ndarray]:
-    """Build the NATIVE-resolution (pre-resample) surface ``{0 bg, 1 surface, 2 ignore}`` + instance owner
-    (``0 = bg/ignore``, sheet ids ``>=1``) for one herculabels window — identical to ``hercunet train
-    export-labels``. Shared by :meth:`HercuvitDataset.__getitem__` and the training pre-extraction so there is one
-    label definition. Returns ``(surf, inst)`` at the window's native shape; the CT read + resample/augment are the
-    caller's job (labels are mesh-derived and CT-independent)."""
-    shape = tuple(meta["shape"]); vu = float(meta["voxel_um"]); ds = int(meta.get("conf_ds", 4))
-    per_sheet = meta.get("quality", {}).get("per_sheet", {})
-    mag, lab3, _nrm, _w3, owner_full = build_gradphi_edt(rec["meshes"], shape, vu, return_owner_full=True)
-    weight = _weight(rec.get("conf", {}), shape, ds)
-    surf = _build_surface_label(mag, owner_full, weight, per_sheet, surface_tau=surface_tau,
-                                ignore_score=ignore_score, confidence_ignore=confidence_ignore)
-    inst = (lab3.astype(np.int32) + 1)                               # -1 -> 0 (bg), sheet ids -> >=1
-    inst[surf == IGNORE] = 0                                         # ignore excluded from instance pairs
-    return surf, inst
-
-
 # --------------------------------------------------------------------------- dataset
 class HercuvitDataset(Dataset):
     """herculabels corpus → Dinovol-normalised CT + confidence-masked surface ``{0,1,2}`` + instance owner at
     128³ / ~9.6 µm, using the hercunet export-labels pipeline.
 
     Args mirror ``export-labels``' knobs: ``surface_tau`` (|∇φ| threshold), ``ignore_score`` (collapsed-sheet
-    quality cut), ``confidence_ignore`` (mask low-confidence surface voxels to ignore — True here), and the
+    quality cut), ``confidence_ignore`` (mask low-confidence surface voxels to ignore — False, matching hercunet), and the
     window gate ``gate_score`` / ``gate_count``. ``record`` = ``"base"`` (clean) by default.
     """
 
@@ -162,7 +145,7 @@ class HercuvitDataset(Dataset):
         identity_only: bool = True,
         surface_tau: float = 0.91,
         ignore_score: float = 0.80,
-        confidence_ignore: bool = True,
+        confidence_ignore: bool = False,
         gate_score: float = 0.85,
         gate_count: int = 2,
         target_voxel_um: float = TARGET_VOXEL_UM,
@@ -228,9 +211,9 @@ class HercuvitDataset(Dataset):
                 ct, _ = geometric_augment(ct, {}, rng)
             return {"ct": torch.from_numpy(np.ascontiguousarray(ct)).float().unsqueeze(0), "path": path}
 
-        # labels — identical to export-labels (shared native-label builder)
-        surf, inst = build_native_labels(rec, meta, surface_tau=self.surface_tau, ignore_score=self.ignore_score,
-                                         confidence_ignore=self.confidence_ignore)
+        # labels — the SHARED per-window builder `export_labels` also uses (one source, no duplication)
+        surf, inst, _mag = build_surface_owner(rec, meta, surface_tau=self.surface_tau, ignore_score=self.ignore_score,
+                                               confidence_ignore=self.confidence_ignore)
 
         # CT (Dinovol robust norm) then resample CT + labels to 128³ / 9.6 µm
         ct_native = self.ct_reader(meta.get("scroll"), int(meta.get("level", 0)),

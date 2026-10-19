@@ -1,7 +1,7 @@
 """The HercuViT training recipe — the single auditable source of truth for its hyperparameters.
 
-Mirrors ``hercunet/training/recipe.py``: a frozen dataclass schema, the values shipped in a YAML
-(``hercunet/hercuvit/recipes/hercuvit.yml``, installed as package data), and the
+Mirrors ``hercunet/training/recipe.py``: a frozen dataclass schema, the values shipped as per-variant YAMLs
+(``hercunet/hercuvit/recipes/{small,tiny,nano}.yml``, installed as package data; ``small`` is the default), and the
 ``active() / set_active() / load()`` plumbing the trainer reads. No environment variables — every knob is a
 field, overridable with ``hercuvit train fit --recipe <your.yml>`` (omitted fields fall back to the shipped
 value). The trainer logs the resolved recipe at the start of each run (``[recipe] hercuvit: …``).
@@ -10,36 +10,58 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
+from typing import Optional
 
 #: Attention SDPA backends the retrofit may run under (see ``netbuild.apply_attention_backend``). ``auto`` lets
 #: torch pick (flash/efficient/math) — REQUIRED on GPUs with no cuDNN plan for the windowed shapes (e.g. RTX
 #: 4060/8 GB): the Dinovol config pins ``cudnn``, which raises "No execution plans support the graph" there.
 ATTENTION_BACKENDS = ("auto", "flash", "cudnn", "efficient", "math")
 
-#: The three HercuViT architecture variants (``docs/hercuvit.md`` §0/§3): ``small`` = the BUILT ~27 M full-weight
-#: windowed retrofit of Dinovol; ``tiny`` (~13-14 M) / ``nano`` (~6-8 M) = distilled slim transformers (built via
-#: ``hercuvit distill``). The per-variant architecture NUMBERS live in the single source of truth
-#: :data:`hercunet.hercuvit.model.hercuvit_net.VARIANT_ARCH` — this recipe only selects the ``variant`` name and
-#: may carry an ``arch_override`` dict to tweak individual fields over that canonical preset.
+#: The three HercuViT architecture variants (``docs/hercuvit.md`` §0/§3): ``small`` = the full-weight windowed
+#: retrofit of Dinovol; ``tiny`` / ``nano`` = distilled slim transformers (built via ``hercuvit distill``). Each
+#: variant is a SHIPPED RECIPE YAML (``recipes/{small,tiny,nano}.yml``) that fully spells out its architecture —
+#: there is no hidden preset dict; reading the yaml tells you the whole network.
 VARIANTS = ("small", "tiny", "nano")
+
+#: The recipe fields that make up the ENCODER half of the architecture (assembled by :meth:`HercuvitRecipe.encoder_arch`
+#: into the ``arch_override`` dict that ``build_hercuvit`` consumes). ``None`` fields are omitted (taken from the .pt).
+_ENCODER_ARCH_FIELDS = ("embed_dim", "depth", "num_heads", "mlp_ratio",
+                        "global_blocks", "window_size", "global_attention", "sr_factor")
 
 
 @dataclass(frozen=True)
 class HercuvitRecipe:
-    """A HercuViT training recipe. Field values below are the shipped ``hercuvit.yml`` defaults."""
+    """A HercuViT training recipe. Field defaults below are the ``small`` variant; ``recipes/{small,tiny,nano}.yml``
+    each fully spell out their network."""
 
     name: str = "hercuvit"
 
-    #: architecture variant name (small | tiny | nano); the arch numbers come from
-    #: ``hercuvit_net.VARIANT_ARCH[variant]`` (single source of truth).
+    #: architecture variant NAME — a label for this recipe (small | tiny | nano). It no longer *points* at a hidden
+    #: preset: **this recipe IS the network definition** (the ``# --- encoder arch ---`` + decoder/head fields
+    #: below fully specify it). The rule: training FROM SCRATCH, the net comes from these yaml fields; training
+    #: from an ``--encoder`` .pt, the ENCODER comes from the .pt and the yaml's encoder fields are validated
+    #: against it (mismatch = error), while the decoder + heads are still built fresh from the yaml.
     variant: str = "small"
-    #: optional per-field tweaks merged OVER ``VARIANT_ARCH[variant]`` (e.g. {"depth": 9}); empty by default.
+    #: optional ad-hoc per-field tweaks merged OVER the assembled encoder arch (e.g. {"depth": 9}); empty by default.
     arch_override: dict = field(default_factory=dict)
 
-    # --- architecture (must match the pillars / Dinovol config; passed to build_hercuvit) ---
+    # --- encoder arch (the ENCODER half of the network definition; None = "take it from the encoder .pt / teacher",
+    #     which is how `small` works — it is the Dinovol teacher, windowed. nano/tiny spell these out because they
+    #     are SLIMMER than the teacher and are built by `hercuvit distill` from exactly these numbers). ---
+    embed_dim: Optional[int] = None                 # token width (teacher 288; nano 192, tiny 288)
+    depth: Optional[int] = None                     # transformer blocks (teacher 10; nano 6, tiny 8)
+    num_heads: Optional[int] = None                 # attention heads (teacher 6; nano 4, tiny 6)
+    mlp_ratio: Optional[float] = None               # MLP hidden / embed ratio (teacher's; nano 512/192, tiny 768/288)
+    global_attention: str = "full"                  # "full" (small) | "spatial_reduction" (nano/tiny windowed blocks)
+    sr_factor: tuple = (2, 2, 2)                    # spatial-reduction factor for the global blocks (nano/tiny)
+
+    # --- architecture (shared; must match the pillars / Dinovol config; passed to build_hercuvit) ---
     window: int = 128                               # input cube side (voxels) = Dinovol crop
     global_blocks: tuple = (4, 7, 10)               # 1-indexed blocks that keep GLOBAL attention (pillar 1)
     window_size: tuple = (8, 8, 8)                  # windowed-attention window in tokens (8³ → 2×2×2 windows)
+    decoder_channels: Optional[tuple] = None        # pixel-decoder widths (1/8,1/4,1/2,1/1); None = (192,128,48,16).
+                                                    # Only the 1/8 width is free; (1/4,1/2,1/1) are LOCKED to the stem
+                                                    # skips (128,48,16). nano slims the 1/8 to 128.
     n_sem_classes: int = 2                          # background / sheet-surface
     mask_dim: int = 32                              # shared mask-feature width (Dinovol embedding width)
     n_queries: int = 64                             # instance queries
@@ -122,6 +144,22 @@ class HercuvitRecipe:
     distill_steps: int = 100000
     distill_lr: float = 1.0e-4
 
+    def encoder_arch(self) -> dict:
+        """Assemble the encoder-arch ``dict`` that ``build_hercuvit`` consumes (as ``arch_override``) from this
+        recipe's own fields — the yaml IS the definition, no hidden preset. ``None`` encoder dims are omitted (so
+        ``small``, which leaves them None, resolves to the Dinovol teacher's arch on load). ``decoder_channels`` is
+        included when set so the slim decoder rides the same build → checkpoint → inference path. Any explicit
+        ``arch_override`` tweak is merged last."""
+        arch: dict = {}
+        for name in _ENCODER_ARCH_FIELDS:
+            v = getattr(self, name)
+            if v is not None:
+                arch[name] = v
+        if self.decoder_channels is not None:
+            arch["decoder_channels"] = tuple(self.decoder_channels)
+        arch.update(self.arch_override or {})
+        return arch
+
     def n_stages(self) -> int:
         return 3
 
@@ -130,8 +168,8 @@ class HercuvitRecipe:
         return "  ".join(f"{f.name}={getattr(self, f.name)}" for f in fields(self) if f.name != "name")
 
 
-_BUILTIN = "hercuvit"
-_TUPLE_FIELDS = {"global_blocks", "window_size", "deep_sup_weights"}
+_BUILTIN = "small"
+_TUPLE_FIELDS = {"global_blocks", "window_size", "deep_sup_weights", "sr_factor", "decoder_channels"}
 
 
 def _from_yaml(text: str, source: str = "<recipe>") -> HercuvitRecipe:
@@ -165,10 +203,18 @@ def _load_builtin(name: str = _BUILTIN) -> HercuvitRecipe:
 
 
 def load(path=None) -> HercuvitRecipe:
-    """The recipe to train with: the shipped ``hercuvit.yml`` when ``path`` is None, else the variant at ``path``."""
+    """The recipe to train with: the shipped ``small.yml`` default when ``path`` is None, else the recipe at ``path``."""
     if not path:
         return HERCUVIT
     return _from_yaml(Path(path).read_text(), source=str(path))
+
+
+def variant_recipe(name: str) -> HercuvitRecipe:
+    """The shipped full-architecture recipe for a variant (``small`` | ``tiny`` | ``nano``) — ``recipes/<name>.yml``.
+    Used when training/distilling a variant without an explicit ``--recipe``: the yaml IS the net definition."""
+    if name not in VARIANTS:
+        raise SystemExit(f"hercuvit: unknown variant {name!r}; expected one of {VARIANTS}.")
+    return _load_builtin(name)
 
 
 #: The default recipe, loaded from the shipped YAML.

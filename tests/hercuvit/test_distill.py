@@ -6,7 +6,7 @@ locally, not in CI."""
 import pytest
 
 from hercunet.hercuvit.train import distill
-from hercunet.hercuvit.model.hercuvit_net import VARIANT_ARCH
+from hercunet.hercuvit.train.recipe import VARIANTS
 
 
 def test_resolve_scrolls_all_and_comma():
@@ -27,6 +27,6 @@ def test_corpus_mode_requires_its_source():
 
 
 def test_distill_supports_all_variants_and_rejects_unknown():
-    assert {"small", "tiny", "nano"}.issubset(set(VARIANT_ARCH))   # all three are real variants to distil
+    assert {"small", "tiny", "nano"} == set(VARIANTS)               # all three are real variants to distil
     with pytest.raises(ValueError):                                 # guard fires before any ckpt load
         distill.distill(teacher_ckpt="x", student_variant="bogus", steps=1, device="cpu")

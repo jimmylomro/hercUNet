@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import torch
 
-from ..model.hercuvit_net import build_variant, VARIANT_ARCH
+from ..model.hercuvit_net import build_hercuvit
 from ..model.encoder import build_and_load_backbone, DINOVOL_HF_REPO, DINOVOL_CKPT_FILE
 from ..model.distill import DistillProjection, distill_step_losses
 
@@ -422,18 +422,19 @@ def _corpus_crops(mode, n, batch, device, *, scrolls=None, corpus=None, manifest
         raise SystemExit(f"hercuvit distil: unknown --corpus-mode {mode!r} (random|herculabels|m7|labels|scroll).")
 
 
-def _save_distilled(out, student, projection, variant, student_net, teacher_ckpt, model_cfg):
+def _save_distilled(out, student, projection, variant, student_net, teacher_ckpt, model_cfg, arch=None):
     """Save the SELF-CONTAINED distilled encoder: enough to rebuild the exact windowed variant and load the
     trained weights, with NO raw Dinovol needed. ``build_hercuvit`` detects the ``student_backbone`` key, rebuilds
     from ``model_cfg`` + ``variant_cfg`` (the retrofit keys), and loads — so distil / train / infer share ONE
-    encoder, selected by pointing ``--encoder`` at this file (the variant is read back from it)."""
+    encoder, selected by pointing ``--encoder`` at this file (the variant is read back from it). ``arch`` is the
+    recipe-derived encoder arch, stored for reference (the rebuild uses ``model_cfg`` + ``variant_cfg``)."""
     from pathlib import Path as _P
     _P(out).parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {"student_backbone": student.state_dict(), "projection": projection.state_dict(),
          "variant": variant, "model_cfg": dict(model_cfg),
          "variant_cfg": getattr(student_net, "_hercuvit_variant_cfg", {}),
-         "arch": VARIANT_ARCH.get(variant, {}), "teacher_ckpt": teacher_ckpt},
+         "arch": dict(arch or {}), "teacher_ckpt": teacher_ckpt},
         out,
     )
 
@@ -470,8 +471,11 @@ def distill(
     unlabelled CT crops, so the windowed encoder recovers the teacher's token identity. Saves the student encoder
     (reloadable by pointing ``--encoder`` at the saved file — SAME encoder for train + infer). Returns a summary."""
     import time, math
-    if student_variant not in VARIANT_ARCH:
-        raise ValueError(f"unknown variant {student_variant!r}; expected one of {sorted(VARIANT_ARCH)}")
+    from .recipe import VARIANTS, variant_recipe
+    if student_variant not in VARIANTS:
+        raise ValueError(f"unknown variant {student_variant!r}; expected one of {sorted(VARIANTS)}")
+    # the variant's arch comes from its shipped recipe (recipes/<variant>.yml) — the yaml IS the definition.
+    student_arch = variant_recipe(student_variant).encoder_arch()
     ckpt = resolve_dinovol_ckpt(teacher_ckpt)
 
     teacher, t_cfg, _, miss, unexp = build_and_load_backbone(ckpt, device=device, return_embed_skips=False)
@@ -482,20 +486,23 @@ def distill(
         p.requires_grad = False
     _auto_attention_backend(teacher)
 
-    student_net = build_variant(ckpt, student_variant, device=device, with_instance=False, deep_supervision=False)
+    # build the slim student FROM SCRATCH off the teacher, per the recipe's encoder arch (load_matching transfers the
+    # shape-compatible teacher weights, the rest is distilled).
+    student_net = build_hercuvit(ckpt, arch_override=(student_arch or None), device=device,
+                                 with_instance=False, deep_supervision=False)
     student = student_net.backbone
     _auto_attention_backend(student)
     student.train()
     t_dim = int(t_cfg["embed_dim"])
-    s_dim = int(VARIANT_ARCH[student_variant].get("embed_dim", t_dim))   # small = {} → teacher width (identity proj)
+    s_dim = int(student_arch.get("embed_dim", t_dim))   # small = no embed_dim override → teacher width (identity proj)
     projection = DistillProjection(s_dim, t_dim).to(device)
 
-    # full self-contained cfg saved in the encoder (teacher cfg + the variant's Eva overrides) so the ckpt rebuilds
+    # full self-contained cfg saved in the encoder (teacher cfg + the recipe's Eva overrides) so the ckpt rebuilds
     # the exact windowed variant with no raw Dinovol needed.
     model_cfg = dict(t_cfg)
     for k in ("embed_dim", "depth", "num_heads", "mlp_ratio"):
-        if k in VARIANT_ARCH[student_variant]:
-            model_cfg[k] = VARIANT_ARCH[student_variant][k]
+        if k in student_arch:
+            model_cfg[k] = student_arch[k]
 
     params = [p for p in student.parameters() if p.requires_grad] + list(projection.parameters())
     opt = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
@@ -567,11 +574,11 @@ def distill(
             print(f"[distil {student_variant} {step}/{steps}] {msg} cos={cos:.4f} "
                   f"| lr {cur_lr:.1e} {cps:.1f} crop/s ETA {eta_m:.0f}m", flush=True)
         if checkpoint_every and out and step % checkpoint_every == 0:
-            _save_distilled(out, student, projection, student_variant, student_net, ckpt, model_cfg)
+            _save_distilled(out, student, projection, student_variant, student_net, ckpt, model_cfg, arch=student_arch)
             print(f"[distil] checkpoint @ step {step} (cos {cos:.4f}, best {best_cos:.4f}) -> {out}", flush=True)
 
     if out:
-        _save_distilled(out, student, projection, student_variant, student_net, ckpt, model_cfg)
+        _save_distilled(out, student, projection, student_variant, student_net, ckpt, model_cfg, arch=student_arch)
     return {"variant": student_variant, "steps": steps, "final_terms": last, "best_cos": best_cos,
             "final_cos": 1.0 - float(last.get("token", 1.0)), "out": out}
 

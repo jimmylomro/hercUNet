@@ -39,7 +39,8 @@ def _add_train_common(p: argparse.ArgumentParser) -> None:
                    help="checkpoint filename within the HF encoder repo (default: teacher_305k.pt)")
     p.add_argument("--out", required=True, metavar="DIR", help="output dir for checkpoints + logs")
     p.add_argument("--recipe", default=None, metavar="FILE.yml",
-                   help="YAML recipe (copy hercunet/hercuvit/recipes/hercuvit.yml and edit); omit for the default")
+                   help="YAML recipe defining the net (copy recipes/{small,tiny,nano}.yml and edit); omit to use "
+                        "the encoder's variant recipe, or small.yml from scratch")
     p.add_argument("--epochs", type=int, default=None, metavar="N",
                    help="override the total training length (e.g. --epochs 1 for a smoke run)")
     p.add_argument("--device", default="cuda", help="cuda | cpu (default cuda)")

@@ -29,7 +29,7 @@ def test_apply_attention_backend_sets_priority():
 
 def test_recipe_default_and_yaml_roundtrip(tmp_path):
     rec = R.active()
-    assert rec.name == "hercuvit" and rec.variant == "small"
+    assert rec.name == "small" and rec.variant == "small"       # default recipe is now the `small` variant yaml
     assert rec.attention_backend == "auto"
     # a partial YAML override only touches the named fields.
     f = os.path.join(str(tmp_path), "v.yml")
@@ -39,19 +39,22 @@ def test_recipe_default_and_yaml_roundtrip(tmp_path):
     assert r2.base_lr == 2.0e-4 and r2.attention_backend == "math" and r2.semantic_epochs == rec.semantic_epochs
 
 
-def test_variant_source_of_truth_and_resolve():
-    # arch numbers are the single source of truth in hercuvit_net.VARIANT_ARCH; the recipe only selects a name.
-    from hercunet.hercuvit.model.hercuvit_net import VARIANT_ARCH
-    assert set(R.VARIANTS) == {"small", "tiny", "nano"}        # distillable/recipe-selectable variants
-    assert set(VARIANT_ARCH) == {"full", "small", "tiny", "nano"}   # + 'full' = raw Dinovol all-global (load mode)
-    assert VARIANT_ARCH["small"] == {}                         # small = Dinovol-matching defaults
-    assert VARIANT_ARCH["full"] == {"global_blocks": "all"}    # full = window nothing
-    assert VARIANT_ARCH["tiny"]["depth"] == 8 and VARIANT_ARCH["nano"]["embed_dim"] == 192
-    assert R.HERCUVIT.variant == "small" and R.HERCUVIT.arch_override == {}
-    # netbuild.resolve_arch merges the recipe tweak OVER the canonical preset.
-    assert netbuild.resolve_arch("small") == {}
-    merged = netbuild.resolve_arch("tiny", {"depth": 9})
-    assert merged["depth"] == 9 and merged["embed_dim"] == 288 and merged["global_attention"] == "spatial_reduction"
+def test_variant_recipes_define_arch():
+    # Each variant is a FULL recipe YAML — the recipe IS the network definition (no hidden VARIANT_ARCH dict).
+    assert set(R.VARIANTS) == {"small", "tiny", "nano"}
+    nano = R.variant_recipe("nano").encoder_arch()
+    assert nano["embed_dim"] == 192 and nano["depth"] == 6 and nano["num_heads"] == 4
+    assert nano["global_attention"] == "spatial_reduction" and tuple(nano["global_blocks"]) == (3, 6)
+    assert tuple(nano["decoder_channels"]) == (128, 128, 48, 16)        # nano slims the 1/8 decoder width
+    tiny = R.variant_recipe("tiny").encoder_arch()
+    assert tiny["depth"] == 8 and "decoder_channels" not in tiny        # tiny keeps the default decoder
+    small = R.variant_recipe("small").encoder_arch()
+    assert small.get("embed_dim") is None                              # small = teacher dims (come from the .pt)
+    assert small["global_attention"] == "full"
+    assert R.HERCUVIT.variant == "small"                               # small is the shipped default
+    # arch_override still merges OVER the assembled arch
+    from dataclasses import replace
+    assert replace(R.variant_recipe("tiny"), arch_override={"depth": 9}).encoder_arch()["depth"] == 9
 
 
 def test_distill_fields_present():

@@ -7,7 +7,7 @@ a LOCAL cache by **shard PROCESSES** (each its own ``s3fs``, SINGLE-THREADED rea
 and the trainer then reads the local cache — where a ``num_workers > 0`` DataLoader is finally safe.
 
 Unlike distillation (CT only), training needs the labels, so each cached window stores the **native** (pre-resample)
-CT (Dinovol-normalised) **+ surf ``{0,1,2}`` + instance owner**, built with :func:`build_native_labels` (identical
+CT (Dinovol-normalised) **+ surf ``{0,1,2}`` + instance owner**, built with the SHARED :func:`build_surface_owner` (identical
 to ``export-labels``). Caching the *native* window — not the final 128³ crop — keeps the random-crop-offset + flip
 augmentation fully alive: :class:`LocalHercuvitDataset` does the (cheap) resample + augment per epoch at load.
 
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 
 def prep_train_shard(*, corpus_dir, cache_dir, nshards, shard, record="base", identity_only=True,
-                     surface_tau=0.91, ignore_score=0.80, confidence_ignore=True,
+                     surface_tau=0.91, ignore_score=0.80, confidence_ignore=False,
                      gate_score=0.85, gate_count=2, readahead=2):
     """ONE shard of the training pre-extraction (single-threaded reads → no s3fs-concurrency deadlock). Groups this
     shard's windows BY SCROLL, opens each volume ONCE via the shared backend, builds centre-aligned read requests
@@ -35,8 +35,8 @@ def prep_train_shard(*, corpus_dir, cache_dir, nshards, shard, record="base", id
     from ...config import Config
     from ...data import get_backend, iter_windows
     from ...labels.io.bundle import load_sample_bundle
-    from ...train.dataset import _find_scroll, _scroll_of, _window_passes, _window_req
-    from ..data.dataset import HercuvitDataset, build_native_labels
+    from ...train.dataset import _find_scroll, _scroll_of, _window_passes, _window_req, build_surface_owner
+    from ..data.dataset import HercuvitDataset
     from ..data.normalize import dinovol_normalise
 
     os.makedirs(cache_dir, exist_ok=True)
@@ -73,8 +73,8 @@ def prep_train_shard(*, corpus_dir, cache_dir, nshards, shard, record="base", id
             try:
                 full_meta, recs = load_sample_bundle(p)                      # full bundle (meshes) for the labels
                 rec = recs[record]
-                surf, inst = build_native_labels(rec, full_meta, surface_tau=surface_tau,
-                                                 ignore_score=ignore_score, confidence_ignore=confidence_ignore)
+                surf, inst, _mag = build_surface_owner(rec, full_meta, surface_tau=surface_tau,
+                                                       ignore_score=ignore_score, confidence_ignore=confidence_ignore)
                 ct = np.asarray(blk)
                 want = tuple(int(s) for s in full_meta["shape"])
                 if tuple(ct.shape) != want:

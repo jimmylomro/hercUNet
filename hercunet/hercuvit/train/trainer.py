@@ -169,7 +169,7 @@ class HercuvitTrainer:
             "model": self.net.state_dict(),
             "model_cfg": self.model_cfg,
             "recipe": asdict(self.recipe),
-            "arch_override": getattr(self.net, "_hercuvit_arch", {}),   # resolved VARIANT_ARCH + tweak (for infer)
+            "arch_override": getattr(self.net, "_hercuvit_arch", {}),   # encoder arch assembled from the recipe (for infer)
             "variant": self.recipe.variant,
             "global_blocks": list(self.recipe.global_blocks),
             "window_size": list(self.recipe.window_size),

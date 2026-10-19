@@ -93,15 +93,12 @@ def export_labels(*, corpus, out, m7_corpus=None, surface_tau=0.91, ignore_score
             per_sheet = meta.get("quality", {}).get("per_sheet", {})
             if "base" not in recs:
                 continue
-            try:                                                     # base decode → mag + owner_full for the LABEL
-                mag_b, lab3, _nrm, _w3, owner_full = build_gradphi_edt(
-                    recs["base"]["meshes"], shape, vu, return_owner_full=True)
+            try:                                                     # shared per-window label builder (surf + owner + mag)
+                surf, inst, mag_b = build_surface_owner(recs["base"], meta, surface_tau=surface_tau,
+                                                        ignore_score=ignore_score, confidence_ignore=confidence_ignore)
             except Exception as e:                                   # noqa: BLE001  (skip a bad record, keep going)
                 print(f"[export-labels] SKIP {p} [base]: {e}", flush=True)
                 continue
-            weight_b = _weight(recs["base"].get("conf", {}), shape, ds)
-            surf = _build_surface_label(mag_b, owner_full, weight_b, per_sheet, surface_tau=surface_tau,
-                                        ignore_score=ignore_score, confidence_ignore=confidence_ignore).astype(np.uint8)
 
             candidates = [np.clip(mag_b, 0.0, 1.0).astype(np.float32)]   # slot 0 = clean base; rest = aug variants
             for name, r in recs.items():
@@ -121,10 +118,8 @@ def export_labels(*, corpus, out, m7_corpus=None, surface_tau=0.91, ignore_score
             for k in range(K):
                 tifffile.imwrite(os.path.join(images_dir, f"{cid}_{k + 1:04d}.tif"), candidates[k])
             tifffile.imwrite(os.path.join(labels_dir, f"{cid}.tif"), surf)
-            # MALIS instance GT: band-limited owner id (lab3: sheet id in-band / -1 outside) shifted so 0 = bg;
-            # collapsed-sheet ignore(2) → 0 (excluded from MALIS pairs).
-            inst = (lab3.astype(np.int32) + 1)                        # -1 → 0 (bg), sheet ids → >=1
-            inst[surf == 2] = 0
+            # MALIS instance GT (from the shared builder): band-limited owner id shifted so 0 = bg, collapsed-sheet
+            # ignore(2) → 0 (excluded from MALIS pairs).
             tifffile.imwrite(os.path.join(owners_dir, f"{cid}.tif"), inst)
             for jp in (os.path.join(images_dir, f"{cid}.json"), os.path.join(labels_dir, f"{cid}.json")):
                 with open(jp, "w") as f:
@@ -340,6 +335,25 @@ def _build_surface_label(mag, owner_full, weight, per_sheet, *, surface_tau=0.91
     surf[cong] = 2
     surf[conf] = 2
     return surf
+
+
+def build_surface_owner(rec, meta, *, surface_tau=0.91, ignore_score=0.80, confidence_ignore=False):
+    """THE per-window label builder — the single source for both ``export_labels`` (nnU-Net tif cases) and the
+    HercuViT pre-extraction. From one bundle record's meshes it builds the 3-class surface ``{0 bg,1 surface,
+    2 ignore}`` (uint8) + the instance owner (int32, ``0 = bg/ignore``, sheet ids ``>=1``), using the exact gate /
+    ∇φ / confidence pipeline (:func:`build_gradphi_edt`, :func:`_weight`, :func:`_build_surface_label`). Returns
+    ``(surf, inst, mag)`` — ``mag`` = ``|∇φ|`` of this record (slot-0 candidate for ``export_labels``; HercuViT
+    ignores it). ``confidence_ignore`` defaults False to match the released (uncleaned) HercUNet training."""
+    from hercunet.labels.mesh.medial import build_gradphi_edt
+    shape = tuple(meta["shape"]); vu = float(meta["voxel_um"]); ds = int(meta.get("conf_ds", 4))
+    per_sheet = meta.get("quality", {}).get("per_sheet", {})
+    mag, lab3, _nrm, _w3, owner_full = build_gradphi_edt(rec["meshes"], shape, vu, return_owner_full=True)
+    weight = _weight(rec.get("conf", {}), shape, ds)
+    surf = _build_surface_label(mag, owner_full, weight, per_sheet, surface_tau=surface_tau,
+                                ignore_score=ignore_score, confidence_ignore=confidence_ignore).astype(np.uint8)
+    inst = (lab3.astype(np.int32) + 1)                               # -1 → 0 (bg), sheet ids → >=1
+    inst[surf == 2] = 0                                              # ignore excluded from instance pairs
+    return surf, inst, mag
 
 
 def _case_id(path, prefix):

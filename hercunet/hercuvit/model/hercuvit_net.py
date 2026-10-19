@@ -26,6 +26,12 @@ from .windowed import retrofit_windowed, DEFAULT_GLOBAL_BLOCKS, DEFAULT_WINDOW_S
 from .pixel_decoder import PixelDecoder
 from .instance_head import InstanceHead
 
+#: Canonical pixel-decoder widths ``(1/8, 1/4, 1/2, 1/1)``. Only ``d8`` (the 1/8 width) is free — ``(d4,d2,d1)``
+#: are LOCKED to the stem skip channels ``(128,48,16)`` by the additive skips. A slim variant sets a smaller d8 in
+#: its recipe (``decoder_channels``, e.g. nano uses d8=128); it rides the ``arch_override`` dict through
+#: build → checkpoint → inference.
+DEFAULT_DECODER_CHANNELS = (192, 128, 48, 16)
+
 
 class HercuVitNet(nn.Module):
     """Encoder + pixel decoder + semantic / instance heads.
@@ -42,7 +48,7 @@ class HercuVitNet(nn.Module):
         *,
         token_dim: int = 288,
         skip_channels: Sequence[int] = (16, 48, 128),
-        decoder_channels: Sequence[int] = (192, 128, 48, 16),
+        decoder_channels: Sequence[int] = DEFAULT_DECODER_CHANNELS,
         n_sem_classes: int = 2,
         mask_dim: int = 32,
         n_queries: int = 64,
@@ -113,34 +119,41 @@ class HercuVitNet(nn.Module):
         return groups
 
 
-#: Eva-backbone config keys an ``arch_override`` may set (the slim variants change these).
+#: Eva-backbone config keys the encoder arch (from the recipe) may set (the slim variants change these).
 _EVA_ARCH_KEYS = ("embed_dim", "depth", "num_heads", "mlp_ratio")
-#: attention-retrofit keys an ``arch_override`` may set.
+#: attention-retrofit keys the encoder arch may set.
 _RETROFIT_KEYS = ("global_blocks", "window_size", "global_attention", "sr_factor")
 
-#: Canonical architecture presets for the three variants — the SINGLE source of truth (recipe + distill import
-#: this; the recipe may still override individual fields). ``small`` = {} means "dinovol-matching defaults".
-#: ``mlp_ratio`` is the hidden/embed ratio (tiny: hidden 768, nano: hidden 512).
-VARIANT_ARCH: dict[str, dict] = {
-    "full": {"global_blocks": "all"},   # raw Dinovol loaded in full: ALL-global attention, no windowing (the teacher)
-    "small": {},
-    "tiny": {
-        "embed_dim": 288, "depth": 8, "num_heads": 6, "mlp_ratio": 768 / 288,
-        "global_blocks": (4, 8), "global_attention": "spatial_reduction", "sr_factor": (2, 2, 2),
-    },
-    "nano": {
-        "embed_dim": 192, "depth": 6, "num_heads": 4, "mlp_ratio": 512 / 192,
-        "global_blocks": (3, 6), "global_attention": "spatial_reduction", "sr_factor": (2, 2, 2),
-    },
-}
+# NOTE: there is deliberately NO hidden VARIANT_ARCH preset dict any more. Each variant's full architecture lives
+# in its shipped recipe YAML (``recipes/{small,tiny,nano}.yml``) — the recipe IS the network definition. The build
+# takes the assembled ``arch_override`` dict (``HercuvitRecipe.encoder_arch()``); when loading an ``--encoder`` .pt
+# the encoder comes from the file and that dict is VALIDATED against it (``_validate_encoder_arch``).
 
 
-def build_variant(ckpt_path, variant: str = "small", **kwargs) -> HercuVitNet:
-    """Convenience wrapper: build a named variant (``full`` / ``small`` / ``tiny`` / ``nano``) from :data:`VARIANT_ARCH`."""
-    if variant not in VARIANT_ARCH:
-        raise ValueError(f"unknown variant {variant!r}; expected one of {sorted(VARIANT_ARCH)}")
-    arch = VARIANT_ARCH[variant] or None
-    return build_hercuvit(ckpt_path, arch_override=arch, **kwargs)
+def _validate_encoder_arch(arch: dict, cfg: dict, windowed: dict, *, ckpt_path) -> None:
+    """When loading a distilled encoder, the ``.pt`` IS the encoder definition — so any encoder-arch field the
+    recipe states must MATCH it, or we raise (a nano recipe loaded onto a small .pt, say). Decoder/head fields are
+    not checked here (they are built fresh from the recipe)."""
+    mism = []
+    for k in _EVA_ARCH_KEYS:
+        if k in arch and cfg.get(k) is not None and _ne(arch[k], cfg[k]):
+            mism.append(f"{k}: recipe {arch[k]} != encoder .pt {cfg[k]}")
+    for k in ("global_blocks", "window_size", "global_attention", "sr_factor"):
+        if k in arch and k in windowed and _ne(arch[k], windowed[k]):
+            mism.append(f"{k}: recipe {arch[k]} != encoder .pt {windowed[k]}")
+    if mism:
+        raise SystemExit(f"hercuvit: recipe encoder arch disagrees with --encoder {ckpt_path} — the .pt is "
+                         f"authoritative for a loaded encoder. Fix the recipe (or use the matching variant):\n  "
+                         + "\n  ".join(mism))
+
+
+def _ne(a, b) -> bool:
+    """Tolerant inequality: compares sequences elementwise and floats with a small tolerance (mlp_ratio)."""
+    if isinstance(a, (list, tuple)) or isinstance(b, (list, tuple)):
+        return tuple(a) != tuple(b)
+    if isinstance(a, float) or isinstance(b, float):
+        return abs(float(a) - float(b)) > 1e-6
+    return a != b
 
 
 def encoder_variant(ckpt_path) -> str:
@@ -194,6 +207,7 @@ def build_hercuvit(
         vcfg = blob.get("variant_cfg", {})
         backbone = build_dinovol_backbone(cfg)
         backbone.return_embed_skips = True
+        _validate_encoder_arch(arch, cfg, vcfg, ckpt_path=ckpt_path)   # loaded encoder: .pt wins; recipe must agree
         retrofit_windowed(backbone, global_blocks=vcfg.get("global_blocks", global_blocks),
                           window_size=vcfg.get("window_size", window_size),
                           global_attention=vcfg.get("global_attention", global_attention),
@@ -236,6 +250,7 @@ def build_hercuvit(
     net = HercuVitNet(
         backbone,
         token_dim=int(cfg["embed_dim"]),
+        decoder_channels=tuple(arch.get("decoder_channels", DEFAULT_DECODER_CHANNELS)),
         n_sem_classes=n_sem_classes,
         mask_dim=mask_dim,
         n_queries=n_queries,
