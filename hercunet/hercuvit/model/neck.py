@@ -28,7 +28,15 @@ from .instance_head import _coord_grid
 class MSDeformAttn3D(nn.Module):
     """Multi-scale 3-D deformable attention (Deformable-DETR encoder style). Each query predicts ``n_points``
     sampling offsets per (head, scale) around its own reference point and attends over the bilinearly-sampled
-    values, softmax-normalised over all (scale × point) samples. grid_sample-based — torch only, no CUDA kernel."""
+    values, softmax-normalised over all (scale × point) samples.
+
+    Built on :func:`torch.nn.functional.grid_sample` — a first-class CUDA kernel (verified on Blackwell sm_120) —
+    exactly as detectron2/mmcv's ``multi_scale_deformable_attention_pytorch`` reference (there is no fused *3-D*
+    MSDeformAttn kernel; the Deformable-DETR CUDA op is 2-D and sm_120-fragile to compile). Memory-lean: all heads
+    are folded into the batch dim so each scale is ONE grid_sample call, and levels accumulate (no stacked
+    ``(B,N,h,L,k,hd)`` buffer); kept in the autocast dtype (bf16) throughout."""
+
+    offset_scale: float = 0.1                                                     # normalised offset range around ref
 
     def __init__(self, dim: int, n_scales: int, n_heads: int = 4, n_points: int = 4) -> None:
         super().__init__()
@@ -48,21 +56,22 @@ class MSDeformAttn3D(nn.Module):
         """``q`` (B,N,dim) queries; ``ref`` (B,N,3) reference points in [-1,1] (z,y,x); ``value_maps`` list of
         ``(B,dim,d,h,w)`` per scale. Returns ``(B,N,dim)``."""
         B, N, _ = q.shape
-        off = self.sampling_offsets(q).view(B, N, self.h, self.L, self.k, 3)
-        aw = self.attn_weights(q).view(B, N, self.h, self.L * self.k)
-        aw = torch.softmax(aw, dim=-1).view(B, N, self.h, self.L, self.k)         # over all (scale,point)
-        out = q.new_zeros(B, N, self.dim)
+        h, hd, k = self.h, self.hd, self.k
+        off = self.sampling_offsets(q).view(B, N, h, self.L, k, 3)
+        aw = self.attn_weights(q).view(B, N, h, self.L * k)
+        aw = torch.softmax(aw, dim=-1).view(B, N, h, self.L, k)                   # over all (scale,point)
+        acc = q.new_zeros(B * h, hd, N)                                          # (B·h, hd, N) accumulated over levels
         for l, vm in enumerate(value_maps):
             d, hh_, w = vm.shape[2:]
             val = self.value_proj(vm.flatten(2).transpose(1, 2))                  # (B, M, dim)
-            val = val.transpose(1, 2).reshape(B, self.dim, d, hh_, w)
-            loc = ref.view(B, N, 1, 1, 3) + 0.1 * off[:, :, :, l]                 # (B,N,h,k,3) normalised units
-            for hh in range(self.h):
-                vh = val[:, hh * self.hd:(hh + 1) * self.hd]                      # (B,hd,d,h,w)
-                g = loc[:, :, hh].flip(-1).reshape(B, N, self.k, 1, 3)            # grid wants (x,y,z): flip
-                samp = F.grid_sample(vh, g, mode="bilinear", padding_mode="border", align_corners=True)  # (B,hd,N,k,1)
-                samp = samp.squeeze(-1).permute(0, 2, 3, 1)                       # (B,N,k,hd)
-                out[:, :, hh * self.hd:(hh + 1) * self.hd] += (samp * aw[:, :, hh, l].unsqueeze(-1)).sum(dim=2)
+            val = val.view(B, d * hh_ * w, h, hd).permute(0, 2, 3, 1).reshape(B * h, hd, d, hh_, w)  # heads→batch
+            loc = ref.view(B, N, 1, 1, 3) + self.offset_scale * off[:, :, :, l]   # (B,N,h,k,3)
+            grid = loc.permute(0, 2, 1, 3, 4).reshape(B * h, N, k, 1, 3).flip(-1)  # (B·h,N,k,1,3) grid wants (x,y,z)
+            samp = F.grid_sample(val, grid, mode="bilinear", padding_mode="border",
+                                 align_corners=True).squeeze(-1)                  # (B·h, hd, N, k)
+            w_l = aw[:, :, :, l].permute(0, 2, 1, 3).reshape(B * h, 1, N, k)       # (B·h,1,N,k)
+            acc = acc + (samp * w_l).sum(dim=-1)                                  # (B·h, hd, N)
+        out = acc.view(B, h * hd, N).transpose(1, 2)                             # (B, N, dim)
         return self.out_proj(out)
 
 
