@@ -48,8 +48,8 @@ def _add_train_common(p: argparse.ArgumentParser) -> None:
                    help="LP-FT: epochs with the transformer frozen before fine-tuning (default 50; 0 = from step 0)")
     p.add_argument("--batch-size", dest="batch_size", type=int, default=None, metavar="N", help="batch size (default 1)")
     p.add_argument("--base-lr", dest="base_lr", type=float, default=None, metavar="LR", help="base LR (default 1e-4)")
-    p.add_argument("--transformer-lr-mult", dest="transformer_lr_mult", type=float, default=None, metavar="M",
-                   help="LR multiplier for the (unfrozen) transformer blocks (default 0.1)")
+    p.add_argument("--encoder-lr-mult", dest="encoder_lr_mult", type=float, default=None, metavar="M",
+                   help="LR multiplier for the (unfrozen) encoder — stem + transformer (default 0.1)")
     p.add_argument("--weight-decay", dest="weight_decay", type=float, default=None, help="AdamW weight decay (default 0.05)")
     p.add_argument("--grad-clip", dest="grad_clip", type=float, default=None, help="grad-norm clip (default 1.0)")
     p.add_argument("--warmup-steps", dest="warmup_steps", type=int, default=None, help="LR warmup steps (default 200)")

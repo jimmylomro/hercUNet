@@ -17,11 +17,11 @@ from typing import Optional
 #: 4060/8 GB): the Dinovol config pins ``cudnn``, which raises "No execution plans support the graph" there.
 ATTENTION_BACKENDS = ("auto", "flash", "cudnn", "efficient", "math")
 
-#: The three HercuViT architecture variants (``docs/hercuvit.md`` §0/§3): ``small`` = the full-weight windowed
-#: retrofit of Dinovol; ``tiny`` / ``nano`` = distilled slim transformers (built via ``hercuvit distill``). Each
-#: variant is a SHIPPED RECIPE YAML (``recipes/{small,tiny,nano}.yml``) that fully spells out its architecture —
-#: there is no hidden preset dict; reading the yaml tells you the whole network.
-VARIANTS = ("small", "tiny", "nano")
+#: The HercuViT architecture variants (``docs/hercuvit.md`` §0/§3), each a SHIPPED MODEL YAML
+#: (``recipes/<variant>.yml``): ``full`` = raw Dinovol loaded AS IS (all-global attention, no windowing, teacher
+#: size); ``small`` = the full-weight windowed retrofit; ``tiny`` / ``nano`` = distilled slim transformers (built
+#: via ``hercuvit distill``). Reading the yaml tells you the whole network; there is no hidden preset dict.
+VARIANTS = ("full", "small", "tiny", "nano")
 
 #: The recipe fields that make up the ENCODER half of the architecture (assembled by :meth:`HercuvitRecipe.encoder_arch`
 #: into the ``arch_override`` dict that ``build_hercuvit`` consumes). ``None`` fields are omitted (taken from the .pt).
@@ -81,7 +81,7 @@ class HercuvitRecipe:
 
     # --- optimiser / schedule ---
     base_lr: float = 1.0e-4
-    transformer_lr_mult: float = 0.1                # transformer blocks train at 0.1× (after unfreeze)
+    encoder_lr_mult: float = 0.1                    # the whole encoder (stem+transformer) trains at 0.1× (after unfreeze)
     weight_decay: float = 0.05
     grad_clip: float = 1.0
     warmup_steps: int = 200
@@ -89,7 +89,7 @@ class HercuvitRecipe:
 
     # --- schedule: LP-FT (Kumar et al., ICLR 2022) — the transformer is FROZEN for a head warmup (train the
     #     head on the distilled encoder's features so the random head's early gradients don't distort them),
-    #     then fine-tuned at ``transformer_lr_mult`` × LR for the remainder. ---
+    #     then fine-tuned at ``encoder_lr_mult`` × LR for the remainder. ---
     epochs: int = 175                               # total training epochs
     freeze_warmup_epochs: int = 50                  # epochs with the transformer frozen (0 = fine-tune from step 0)
 
@@ -167,7 +167,7 @@ _TUPLE_FIELDS = {"global_blocks", "window_size", "deep_sup_weights", "sr_factor"
 #: is model-from-yaml + training-from-CLI; the split is enforced at the yaml boundary, below.)
 _TRAIN_FIELDS = frozenset({
     "attention_backend", "target_voxel_um", "augment", "batch_size",
-    "base_lr", "transformer_lr_mult", "weight_decay", "grad_clip", "warmup_steps", "lr_schedule",
+    "base_lr", "encoder_lr_mult", "weight_decay", "grad_clip", "warmup_steps", "lr_schedule",
     "epochs", "freeze_warmup_epochs",
     "sem_fg_weight", "w_sem_ce", "w_sem_tversky", "w_sem_skel", "w_sem_sep",
     "tversky_alpha", "tversky_beta", "tversky_gamma", "skel_iters", "sep_radius", "deep_sup_weights",
@@ -201,8 +201,9 @@ def _from_yaml(text: str, source: str = "<recipe>") -> HercuvitRecipe:
         raise SystemExit(f"hercuvit recipe {source}: the model yaml must not set TRAINING config {train_in_yaml} — "
                          f"these are CLI flags (e.g. --epochs, --batch-size, --base-lr). The yaml defines the MODEL only.")
     for k in _TUPLE_FIELDS:
-        if over.get(k) is not None:
-            over[k] = tuple(over[k])
+        v = over.get(k)
+        if v is not None and not (k == "global_blocks" and v == "all"):   # keep the `full` sentinel "all" a string
+            over[k] = tuple(v)
     if over.get("attention_backend") is not None and over["attention_backend"] not in ATTENTION_BACKENDS:
         raise SystemExit(f"hercuvit recipe {source}: attention_backend must be one of {ATTENTION_BACKENDS}.")
     if over.get("variant") is not None and over["variant"] not in VARIANTS:

@@ -9,7 +9,7 @@ Loss: PLAIN Mask2Former on THIN labels every epoch (Hungarian + per-query sigmoi
 objectness against each sheet's thin medial surface), with the OPTIONAL SymSkel (``w_symskel>0``) and AffMALIS
 (``w_malis>0``) add-ons. Schedule: **LP-FT** (Kumar et al., ICLR 2022) — the transformer is FROZEN for the first
 ``freeze_warmup_epochs`` (train the head on the distilled encoder's features so the random head's early gradients
-do not distort them), then fine-tuned at ``transformer_lr_mult`` × LR for the rest. The optimiser is rebuilt on the
+do not distort them), then fine-tuned at ``encoder_lr_mult`` × LR for the rest. The optimiser is rebuilt on the
 freeze→unfreeze transition (the trainable set changes). Checkpoints save model + optimiser + epoch + the Dinovol
 ``model_cfg`` (so inference rebuilds the architecture without the Dinovol ckpt).
 """
@@ -43,22 +43,22 @@ class HercuvitTrainer:
 
     # ---- LP-FT freeze-warmup ----------------------------------------------------------------------
     def _frozen_at(self, ep: int) -> bool:
-        """True while the transformer is frozen — the first ``freeze_warmup_epochs`` (train the head on the
-        distilled encoder's features), then it is fine-tuned at ``transformer_lr_mult`` × LR."""
+        """True while the ENCODER (stem + transformer) is frozen — the first ``freeze_warmup_epochs`` (train the head
+        on the encoder's features), then it is fine-tuned at ``encoder_lr_mult`` × LR."""
         return ep < int(self.recipe.freeze_warmup_epochs)
 
     def _set_frozen(self, frozen: bool) -> None:
         if frozen == self._frozen:
             return
-        self.net.set_transformer_trainable(not frozen)          # freeze only the transformer blocks (stem/head train)
+        self.net.set_encoder_trainable(not frozen)              # freeze the WHOLE encoder (stem + transformer)
         self._build_optimiser()                                 # the trainable set changed → rebuild the optimiser
         self._frozen = frozen
-        print(f"[hercuvit] transformer {'FROZEN (head warmup)' if frozen else 'trainable @ transformer_lr_mult × LR'}",
+        print(f"[hercuvit] encoder {'FROZEN (head warmup)' if frozen else 'trainable @ encoder_lr_mult × LR'}",
               flush=True)
 
     def _build_optimiser(self) -> None:
         groups = self.net.param_groups(base_lr=self.recipe.base_lr,
-                                       transformer_lr_mult=self.recipe.transformer_lr_mult)
+                                       encoder_lr_mult=self.recipe.encoder_lr_mult)
         for g in groups:                                        # remember the base LR to scale by the schedule
             g["base_lr"] = g["lr"]
         self.optim = torch.optim.AdamW(groups, lr=self.recipe.base_lr, weight_decay=self.recipe.weight_decay)

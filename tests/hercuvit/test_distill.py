@@ -27,6 +27,6 @@ def test_corpus_mode_requires_its_source():
 
 
 def test_distill_supports_all_variants_and_rejects_unknown():
-    assert {"small", "tiny", "nano"} == set(VARIANTS)               # all three are real variants to distil
+    assert {"small", "tiny", "nano"}.issubset(set(VARIANTS))       # the distillable students (full = raw teacher, not distilled)
     with pytest.raises(ValueError):                                 # guard fires before any ckpt load
         distill.distill(teacher_ckpt="x", student_variant="bogus", steps=1, device="cpu")

@@ -100,22 +100,24 @@ class HercuVitNet(nn.Module):
         return out
 
     # --- staged training helpers (the trainer drives the schedule; see docs/hercuvit.md §7) ---
-    def set_transformer_trainable(self, flag: bool) -> None:
-        """Freeze/unfreeze the transformer blocks (the stem stays trainable for voxel detail)."""
-        for p in self.backbone.blocks.parameters():
+    def set_encoder_trainable(self, flag: bool) -> None:
+        """Freeze/unfreeze the WHOLE encoder — the stem AND the transformer blocks (and all backbone params).
+        When frozen, only the fresh pixel decoder + heads train."""
+        for p in self.backbone.parameters():
             p.requires_grad = bool(flag)
 
-    def param_groups(self, *, base_lr: float, transformer_lr_mult: float = 0.1) -> list[dict]:
-        """Two LR groups: the transformer blocks at ``transformer_lr_mult`` × ``base_lr``, everything else at ``base_lr``."""
-        block_ids = {id(p) for p in self.backbone.blocks.parameters()}
-        blocks, rest = [], []
+    def param_groups(self, *, base_lr: float, encoder_lr_mult: float = 0.1) -> list[dict]:
+        """Two LR groups: the whole pretrained ENCODER (backbone: stem + transformer) at ``encoder_lr_mult`` ×
+        ``base_lr``, and the fresh decoder + heads at ``base_lr``."""
+        enc_ids = {id(p) for p in self.backbone.parameters()}
+        enc, rest = [], []
         for p in self.parameters():
             if not p.requires_grad:
                 continue
-            (blocks if id(p) in block_ids else rest).append(p)
+            (enc if id(p) in enc_ids else rest).append(p)
         groups = [{"params": rest, "lr": base_lr}]
-        if blocks:
-            groups.append({"params": blocks, "lr": base_lr * transformer_lr_mult})
+        if enc:
+            groups.append({"params": enc, "lr": base_lr * encoder_lr_mult})
         return groups
 
 

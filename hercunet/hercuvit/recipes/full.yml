@@ -1,0 +1,21 @@
+# HercuViT MODEL — the `full` variant: the raw Dinovol teacher loaded AS IS — ALL-global attention, NO windowing,
+# the teacher's exact size. Encoder dims come from the teacher .pt (left unset, like small). Use it to train the
+# decoder + heads on the strongest possible encoder features (e.g. with the encoder fully frozen:
+# --freeze-warmup-epochs == --epochs). A recipe yaml defines THE NETWORK ONLY; training config is CLI flags.
+name: full
+variant: full
+
+# --- encoder arch ---
+global_attention: full          # every block does full global attention
+global_blocks: all              # ALL blocks stay global — no windowed blocks, no spatial reduction
+window: 128                     # input cube side (voxels) = Dinovol crop
+
+# --- decoder + heads ---
+n_sem_classes: 2
+mask_dim: 32
+n_queries: 64
+query_dim: 64
+instance_layers: 3
+deep_supervision: true
+learned_queries: true
+add_null_query: true

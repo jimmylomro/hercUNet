@@ -52,7 +52,9 @@ def test_model_yaml_rejects_training_fields(tmp_path):
 
 def test_variant_recipes_define_arch():
     # Each variant is a FULL recipe YAML — the recipe IS the network definition (no hidden VARIANT_ARCH dict).
-    assert set(R.VARIANTS) == {"small", "tiny", "nano"}
+    assert set(R.VARIANTS) == {"full", "small", "tiny", "nano"}
+    full = R.variant_recipe("full").encoder_arch()
+    assert full["global_blocks"] == "all" and full.get("embed_dim") is None   # raw teacher, all-global, teacher size
     nano = R.variant_recipe("nano").encoder_arch()
     assert nano["embed_dim"] == 192 and nano["depth"] == 6 and nano["num_heads"] == 4
     assert nano["global_attention"] == "spatial_reduction" and tuple(nano["global_blocks"]) == (3, 6)
