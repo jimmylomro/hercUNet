@@ -71,6 +71,8 @@ class HercuvitRecipe:
     learned_queries: bool = True                    # persistent learned queries (DETR-style) — specialise, stable match
     fps_queries: bool = False                       # embedding-FPS anchored query init (§13.3); excludes learned_queries
     cross_attn: str = "deformable"                  # query-decoder cross-attn: "deformable" (anchor) | "masked" (§13.6)
+    mask_mode: str = "sigmoid"                       # mask readout: "sigmoid" (independent M2F masks) | "softmax"
+                                                    # (per-voxel ownership over queries, null=background — exclusive)
     add_null_query: bool = True                     # reserved null/no-sheet query (index 0) for the softmax ownership
 
     # --- attention backend (plumbing; NOT a pillar change — raised via flag, docs §12) ---
@@ -94,6 +96,7 @@ class HercuvitRecipe:
     #     then fine-tuned at ``encoder_lr_mult`` × LR for the remainder. ---
     epochs: int = 175                               # total training epochs
     freeze_warmup_epochs: int = 50                  # epochs with the transformer frozen (0 = fine-tune from step 0)
+    softmax_temp: float = 1.0                        # temperature for the softmax-ownership readout (mask_mode=softmax)
     val_fold: int = 0                               # nnU-Net-consistent 5-fold split (KFold seed 12345): which fold
     val_interval: int = 5                           # validate every N epochs (0 = no validation)
     val_windows: int = 64                           # held-out windows per validation (cap for speed; 0 = all)
@@ -178,7 +181,7 @@ _TUPLE_FIELDS = {"global_blocks", "window_size", "deep_sup_weights", "sr_factor"
 _TRAIN_FIELDS = frozenset({
     "attention_backend", "target_voxel_um", "augment", "batch_size",
     "base_lr", "encoder_lr_mult", "weight_decay", "grad_clip", "warmup_steps", "lr_schedule",
-    "epochs", "freeze_warmup_epochs", "val_fold", "val_interval", "val_windows",
+    "epochs", "freeze_warmup_epochs", "softmax_temp", "val_fold", "val_interval", "val_windows",
     "sem_fg_weight", "w_sem_ce", "w_sem_tversky", "w_sem_skel", "w_sem_sep",
     "tversky_alpha", "tversky_beta", "tversky_gamma", "skel_iters", "sep_radius", "deep_sup_weights",
     "w_symskel", "w_malis", "malis_crop", "malis_offsets",

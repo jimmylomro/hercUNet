@@ -152,7 +152,8 @@ class HercuvitTrainer:
         line and returns the primary score (IoU>0.5 capture rate) used for best-checkpoint selection."""
         from .metrics import coverage_metrics
         mw = int(self.recipe.val_windows) or 10 ** 9                     # 0 => all val windows
-        m = coverage_metrics(self.net, val_loader, self.device, max_windows=mw)
+        m = coverage_metrics(self.net, val_loader, self.device, max_windows=mw,
+                             mask_mode=getattr(self.recipe, "mask_mode", "sigmoid"))
         print(
             f"{_C['sem']}[val ep {epoch}] coverage: IoU mean {m['iou_mean']:.3f} med {m['iou_median']:.3f} "
             f"p90 {m['iou_p90']:.3f} | captured >0.1 {m['cap010']*100:.0f}% >0.5 {m['cap050']*100:.0f}% | "

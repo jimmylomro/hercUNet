@@ -46,6 +46,8 @@ def _add_train_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--epochs", type=int, default=None, metavar="N", help="total training epochs (default 175)")
     p.add_argument("--freeze-warmup-epochs", dest="freeze_warmup_epochs", type=int, default=None, metavar="N",
                    help="LP-FT: epochs with the transformer frozen before fine-tuning (default 50; 0 = from step 0)")
+    p.add_argument("--softmax-temp", dest="softmax_temp", type=float, default=None, metavar="T",
+                   help="temperature for the softmax-ownership readout (mask_mode=softmax; default 1.0)")
     p.add_argument("--val-fold", dest="val_fold", type=int, default=None, metavar="N",
                    help="nnU-Net-consistent 5-fold split (KFold seed 12345): which fold to hold out (default 0)")
     p.add_argument("--val-interval", dest="val_interval", type=int, default=None, metavar="N",

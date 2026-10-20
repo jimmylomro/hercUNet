@@ -14,11 +14,13 @@ from ..model.instance_head import mask_logits_from_embed
 
 @torch.no_grad()
 def coverage_metrics(net, loader, device, *, max_windows: int = 64, prob_thresh: float = 0.5,
-                     fire_thresh: float = 0.5) -> dict:
+                     fire_thresh: float = 0.5, mask_mode: str = "sigmoid") -> dict:
     """Run ``net`` in INFERENCE mode (no denoise group) over up to ``max_windows`` identity windows of ``loader`` and
     return per-sheet coverage. For each GT sheet (thin surface, ``owner & surf``): best-query IoU of the binarised
-    predicted mask ``σ(mask_embed·mask_features) > prob_thresh``. Returns ``{windows, sheets, iou_mean, iou_median,
-    iou_p90, cap010, cap050, fire_mean, fire_min, fire_max}`` (fractions in [0,1]); empty-safe."""
+    predicted instance mask. ``mask_mode="sigmoid"`` → ``σ(mask_embed·mask_features) > prob_thresh`` (independent);
+    ``"softmax"`` → ``argmax_q(mask_embed·mask_features) == q`` excluding the null query 0 (exclusive ownership).
+    Returns ``{windows, sheets, iou_mean, iou_median, iou_p90, cap010, cap050, fire_mean, fire_min, fire_max}``
+    (fractions in [0,1]); empty-safe."""
     was_training = net.training
     net.eval()
     best, fires, n_win = [], [], 0
@@ -35,9 +37,13 @@ def coverage_metrics(net, loader, device, *, max_windows: int = 64, prob_thresh:
             out = net(ct, dn_owner=None)                                   # inference: no denoise queries
         lay = out["instance"]["layers"][-1]
         cls = torch.softmax(lay["class_logits"][0].float(), dim=-1)[:, 1]  # (Q,) P(sheet)
-        masks = torch.sigmoid(mask_logits_from_embed(lay["mask_embed"][0:1].float(),
-                                                     out["mask_features"][0:1].float())[0]) > prob_thresh  # (Q,D,H,W)
-        fires.append(int((cls > fire_thresh).sum()))
+        mlog = mask_logits_from_embed(lay["mask_embed"][0:1].float(), out["mask_features"][0:1].float())[0]  # (Q,D,H,W)
+        if mask_mode == "softmax":                                     # exclusive ownership: argmax query owns the voxel
+            owner_q = mlog.argmax(0)                                   # (D,H,W)
+            masks = torch.stack([(owner_q == q) & (q != 0) for q in range(mlog.shape[0])], 0)  # null (0) = background
+        else:
+            masks = torch.sigmoid(mlog) > prob_thresh                  # (Q,D,H,W) independent
+        fires.append(int((masks.flatten(1).any(1)).sum()) if mask_mode == "softmax" else int((cls > fire_thresh).sum()))
         surf = (sem[0] == 1)
         for sid in ids:
             gt = (owner_thin[0] == sid) & surf

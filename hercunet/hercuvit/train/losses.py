@@ -301,6 +301,70 @@ def _instance_item(layer_out_b, feat_pts, owner_pts, ids, mask_features_b, owner
     return {"class": loss_class, "mask_bce": loss_bce, "mask_dice": loss_dice}
 
 
+def _instance_item_softmax(layer_out_b, feat_pts, owner_pts, ids, mask_features_b, owner_b, valid_b, recipe):
+    """SOFTMAX-OWNERSHIP variant of :func:`_instance_item` (``mask_mode="softmax"``). The ``n_match`` queries'
+    logits are read out as a **per-voxel softmax over queries** (``temp=recipe.softmax_temp``) — each voxel is
+    owned by exactly ONE query (the null query, index 0, is the background class), so queries COMPETE and redundant
+    same-sheet queries are driven to background (the consolidation sigmoid lacks). Hungarian still assigns one query
+    per GT sheet (so each sheet maps to one ownership channel). The ownership CE is **balanced 50/50 foreground/
+    background** (per the author's point-SupCon lesson: a flat background weight lets the >99% background swamp the
+    thin targets). Plus soft-Dice on the matched channels. Returns ``{class, mask_bce, mask_dice}`` (``mask_bce`` =
+    the ownership CE, for log/weight compatibility)."""
+    class_logits = layer_out_b["class_logits"]                         # (Q,2)
+    mask_embed = layer_out_b["mask_embed"]                             # (Q,C)
+    Q = class_logits.shape[0]
+    device = class_logits.device
+    T = float(getattr(recipe, "softmax_temp", 1.0)) or 1.0
+    null = 0                                                           # add_null_query → the background channel
+    mlog = mask_logits_from_embed(mask_embed.unsqueeze(0), mask_features_b.unsqueeze(0))[0] / T   # (Q,D,H,W)
+    if len(ids) == 0:                                                  # no sheets → everything is background (null)
+        cw = torch.tensor([recipe.no_object_weight, 1.0], device=device)
+        loss_class = F.cross_entropy(class_logits, torch.zeros(Q, dtype=torch.long, device=device), weight=cw)
+        tgt = torch.full(owner_b.shape, null, dtype=torch.long, device=device)
+        tgt[~valid_b] = -100
+        ce = F.cross_entropy(mlog.unsqueeze(0), tgt.unsqueeze(0), ignore_index=-100)
+        return {"class": loss_class, "mask_bce": ce, "mask_dice": mask_embed.sum() * 0.0}
+
+    # --- Hungarian assignment (same cheap sampled cost as the sigmoid path) ---
+    pred_pts = mask_logits_at_points(mask_embed.unsqueeze(0), feat_pts.unsqueeze(0))[0]
+    gt_pts = torch.stack([(owner_pts == i).float() for i in ids], 0)
+    with torch.no_grad():
+        cls_prob = torch.softmax(class_logits, dim=-1)
+        cost = (recipe.cost_class * (-cls_prob[:, 1].unsqueeze(1).expand(Q, len(ids)))
+                + recipe.cost_mask_bce * _bce_cost(pred_pts, gt_pts)
+                + recipe.cost_mask_dice * _dice_cost(torch.sigmoid(pred_pts), gt_pts))
+        from scipy.optimize import linear_sum_assignment
+        rows, cols = linear_sum_assignment(cost.detach().float().cpu().numpy())
+    rows_t = torch.as_tensor(rows, dtype=torch.long, device=device)
+    cls_target = torch.zeros(Q, dtype=torch.long, device=device); cls_target[rows_t] = 1
+    cw = torch.tensor([recipe.no_object_weight, 1.0], device=device)
+    loss_class = F.cross_entropy(class_logits, cls_target, weight=cw)
+
+    # --- per-voxel owner target: sheet-surface voxels → their matched query; else → null (background) ---
+    tgt = torch.full(owner_b.shape, null, dtype=torch.long, device=device)
+    for r, c in zip(rows.tolist(), cols.tolist()):
+        tgt[owner_b == int(ids[c])] = int(r)
+    tgt[~valid_b] = -100
+    ce_vox = F.cross_entropy(mlog.unsqueeze(0), tgt.unsqueeze(0), ignore_index=-100, reduction="none")[0]  # (D,H,W)
+    fg = (tgt > 0) & valid_b                                           # thin sheet-surface voxels (non-null)
+    bg = (tgt == null) & valid_b                                       # background → null
+    fg_l = ce_vox[fg].mean() if fg.any() else ce_vox.sum() * 0.0
+    bg_l = ce_vox[bg].mean() if bg.any() else ce_vox.sum() * 0.0
+    loss_ce = 0.5 * fg_l + 0.5 * bg_l                                  # balanced: thin targets can't be swamped
+
+    # --- soft-Dice on the matched ownership channels vs their sheet (thin recall) ---
+    p = torch.softmax(mlog, dim=0)
+    v = valid_b.float()
+    num = den = 0.0
+    for r, c in zip(rows.tolist(), cols.tolist()):
+        gt = (owner_b == int(ids[c])).float()
+        pr = p[int(r)]
+        num = num + (2.0 * (pr * gt * v).sum() + 1.0)
+        den = den + ((pr * v).sum() + (gt * v).sum() + 1.0)
+    loss_dice = (1.0 - num / den) if not isinstance(den, float) else mask_embed.sum() * 0.0
+    return {"class": loss_class, "mask_bce": loss_ce, "mask_dice": loss_dice}
+
+
 def _denoise_item(lay_b, mask_features_b, owner_b, valid_b, dn_sheet_b, dn_valid_b, recipe):
     """DENOISE group losses for ONE item at ONE layer (§13.2): each valid denoise query is FIXED-assigned to its
     sheet ``dn_sheet_b`` (no Hungarian) and supervised to reconstruct that sheet — dense mask BCE+Dice (as the
@@ -374,11 +438,12 @@ def instance_loss(instance: dict, mask_features: torch.Tensor, owner: torch.Tens
         feat_pts = mf_flat[:, pts]                                    # (C,P)
         owner_pts = owner_flat[pts]                                   # (P,)
 
+        item_fn = _instance_item_softmax if getattr(recipe, "mask_mode", "sigmoid") == "softmax" else _instance_item
         for li, lay in enumerate(layers):
             lay_b = {"class_logits": lay["class_logits"][b][:n_match], "mask_embed": lay["mask_embed"][b][:n_match]}
             is_final = (li == len(layers) - 1)
             w = 1.0 if is_final else recipe.aux_weight
-            out = _instance_item(lay_b, feat_pts, owner_pts, ids, mask_features[b], owner[b], valid_b, recipe)
+            out = item_fn(lay_b, feat_pts, owner_pts, ids, mask_features[b], owner[b], valid_b, recipe)
             tot_class = tot_class + w * out["class"]
             tot_bce = tot_bce + w * out["mask_bce"]
             tot_dice = tot_dice + w * out["mask_dice"]
