@@ -237,6 +237,20 @@ class HercuvitDataset(Dataset):
         }
 
 
+def split_cache(cache_dir: str, *, fold: int = 0, n_splits: int = 5, seed: int = 12345):
+    """Train/val split of a window cache, **consistent with hercunet/nnU-Net** — ``KFold(n_splits=5, shuffle=True,
+    random_state=12345)`` over the SORTED ``win_*.npz`` keys, returning the ``fold``-th (train_files, val_files).
+    A plain per-window split (every scroll stays in training; validation is held-out windows, not held-out scrolls),
+    the same convention nnU-Net uses for its 5-fold ``splits_final.json``. Deterministic: same split every run."""
+    from sklearn.model_selection import KFold
+    files = sorted(glob.glob(os.path.join(cache_dir, "win_*.npz")))
+    if not files:
+        raise FileNotFoundError(f"no win_*.npz under {cache_dir!r} — run the training pre-extraction first")
+    splits = list(KFold(n_splits=int(n_splits), shuffle=True, random_state=int(seed)).split(files))
+    tr_idx, va_idx = splits[int(fold) % len(splits)]
+    return [files[i] for i in tr_idx], [files[i] for i in va_idx]
+
+
 class LocalHercuvitDataset(Dataset):
     """Training dataset backed by a LOCAL pre-extracted cache (``train prep-shard`` → native ``.npz`` windows).
 
@@ -251,12 +265,13 @@ class LocalHercuvitDataset(Dataset):
     window — a genuine improvement over the live dataset's ``seed + idx`` seeding, which froze one view per sample."""
 
     def __init__(self, cache_dir: str, *, augment: bool = True, target_voxel_um: float = TARGET_VOXEL_UM,
-                 crop: int = CROP) -> None:
+                 crop: int = CROP, files: "list[str] | None" = None) -> None:
         self.cache_dir = cache_dir
         self.augment = bool(augment)
         self.target_voxel_um = float(target_voxel_um)
         self.crop = int(crop)
-        self.files = sorted(glob.glob(os.path.join(cache_dir, "win_*.npz")))
+        # ``files`` lets the caller pass a train/val SUBSET (see :func:`split_cache`); else use the whole cache.
+        self.files = list(files) if files is not None else sorted(glob.glob(os.path.join(cache_dir, "win_*.npz")))
         if not self.files:
             raise FileNotFoundError(f"no win_*.npz under {cache_dir!r} — run the training pre-extraction first")
 

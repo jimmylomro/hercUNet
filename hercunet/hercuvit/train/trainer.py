@@ -146,15 +146,40 @@ class HercuvitTrainer:
             flush=True,
         )
 
+    # ---- validation (per-sheet coverage, §13.5) ---------------------------------------------------
+    def validate(self, val_loader, epoch: int) -> float:
+        """Per-sheet coverage on the held-out windows (the metric that matters, not mask-Dice). Logs a ``[val epN]``
+        line and returns the primary score (IoU>0.5 capture rate) used for best-checkpoint selection."""
+        from .metrics import coverage_metrics
+        mw = int(self.recipe.val_windows) or 10 ** 9                     # 0 => all val windows
+        m = coverage_metrics(self.net, val_loader, self.device, max_windows=mw)
+        print(
+            f"{_C['sem']}[val ep {epoch}] coverage: IoU mean {m['iou_mean']:.3f} med {m['iou_median']:.3f} "
+            f"p90 {m['iou_p90']:.3f} | captured >0.1 {m['cap010']*100:.0f}% >0.5 {m['cap050']*100:.0f}% | "
+            f"fire {m['fire_mean']:.1f}/{self.recipe.n_queries} [{m['fire_min']}-{m['fire_max']}] "
+            f"({m['sheets']} sheets / {m['windows']} win){_C['r']}",
+            flush=True,
+        )
+        return float(m["cap050"])
+
     # ---- drive ------------------------------------------------------------------------------------
-    def run(self, loader) -> None:
+    def run(self, loader, val_loader=None) -> None:
         self._steps_per_epoch = len(loader) if hasattr(loader, "__len__") else 1
         print(f"[recipe] {self.recipe.name}: {self.recipe.summary()}", flush=True)
         self.net.to(self.device)
+        vi = int(getattr(self.recipe, "val_interval", 0))
+        best = -1.0
         for epoch in range(self.start_epoch, self.num_epochs):
             self._set_frozen(self._frozen_at(epoch))
             self._run_epoch(loader, epoch)
             self.save_checkpoint(epoch, "checkpoint_latest.pth")
+            if val_loader is not None and vi > 0 and ((epoch + 1) % vi == 0 or epoch == self.num_epochs - 1):
+                score = self.validate(val_loader, epoch)
+                if score > best:                                        # best-by-coverage checkpoint
+                    best = score
+                    self.save_checkpoint(epoch, "checkpoint_best.pth")
+                    print(f"[hercuvit] new best coverage (IoU>0.5 {score*100:.0f}%) @ ep {epoch} → checkpoint_best.pth",
+                          flush=True)
         self.save_checkpoint(self.num_epochs - 1, "checkpoint_final.pth")
         print("[hercuvit] training done", flush=True)
 

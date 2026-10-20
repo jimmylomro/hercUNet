@@ -46,6 +46,12 @@ def _add_train_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--epochs", type=int, default=None, metavar="N", help="total training epochs (default 175)")
     p.add_argument("--freeze-warmup-epochs", dest="freeze_warmup_epochs", type=int, default=None, metavar="N",
                    help="LP-FT: epochs with the transformer frozen before fine-tuning (default 50; 0 = from step 0)")
+    p.add_argument("--val-fold", dest="val_fold", type=int, default=None, metavar="N",
+                   help="nnU-Net-consistent 5-fold split (KFold seed 12345): which fold to hold out (default 0)")
+    p.add_argument("--val-interval", dest="val_interval", type=int, default=None, metavar="N",
+                   help="validate per-sheet coverage every N epochs (default 5; 0 = no validation)")
+    p.add_argument("--val-windows", dest="val_windows", type=int, default=None, metavar="N",
+                   help="held-out windows per validation, capped for speed (default 64; 0 = all)")
     p.add_argument("--batch-size", dest="batch_size", type=int, default=None, metavar="N", help="batch size (default 1)")
     p.add_argument("--base-lr", dest="base_lr", type=float, default=None, metavar="LR", help="base LR (default 1e-4)")
     p.add_argument("--encoder-lr-mult", dest="encoder_lr_mult", type=float, default=None, metavar="M",

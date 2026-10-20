@@ -95,7 +95,7 @@ def run_training(
     from torch.utils.data import DataLoader
 
     from .. import netbuild
-    from ..data.dataset import HercuvitDataset, LocalHercuvitDataset, hercuvit_collate
+    from ..data.dataset import HercuvitDataset, LocalHercuvitDataset, hercuvit_collate, split_cache
     from . import recipe as _recipe
     from .trainer import HercuvitTrainer
 
@@ -121,13 +121,24 @@ def run_training(
         fps_queries=rec.fps_queries, cross_attn=rec.cross_attn,
     )
 
+    val_loader = None
     if pre_extract:
         from .preextract import _ensure_train_cache
         cache_dir = train_cache or os.path.join(out, "train_cache")
         _ensure_train_cache(corpus_dir=corpus_dir, cache_dir=cache_dir, nshards=prep_shards,
                             identity_only=identity_only)
-        ds = LocalHercuvitDataset(cache_dir, augment=rec.augment, target_voxel_um=rec.target_voxel_um,
-                                  crop=rec.window)
+        # nnU-Net-consistent per-window 5-fold split (every scroll stays in training; val = held-out windows).
+        if rec.val_interval and rec.val_interval > 0:
+            tr_files, va_files = split_cache(cache_dir, fold=rec.val_fold)
+            ds = LocalHercuvitDataset(cache_dir, augment=rec.augment, target_voxel_um=rec.target_voxel_um,
+                                      crop=rec.window, files=tr_files)
+            val_ds = LocalHercuvitDataset(cache_dir, augment=False, target_voxel_um=rec.target_voxel_um,
+                                          crop=rec.window, files=va_files)
+            val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=max(1, num_workers // 2),
+                                    collate_fn=hercuvit_collate, pin_memory=(device != "cpu"))
+        else:
+            ds = LocalHercuvitDataset(cache_dir, augment=rec.augment, target_voxel_um=rec.target_voxel_um,
+                                      crop=rec.window)
         src = cache_dir
     else:                                                            # live S3 (re-streams every epoch; workers unsafe)
         ds = HercuvitDataset(corpus_dir, augment=rec.augment, target_voxel_um=rec.target_voxel_um,
@@ -135,8 +146,9 @@ def run_training(
         src = corpus_dir
     loader = DataLoader(ds, batch_size=rec.batch_size, shuffle=True, num_workers=num_workers,
                         collate_fn=hercuvit_collate, drop_last=True, pin_memory=(device != "cpu"))
-    print(f"[hercuvit] {src}: {len(ds)} samples; batch {rec.batch_size}; workers {num_workers}; device {device}",
-          flush=True)
+    nval = len(val_loader.dataset) if val_loader is not None else 0
+    print(f"[hercuvit] {src}: {len(ds)} train + {nval} val (fold {rec.val_fold}); batch {rec.batch_size}; "
+          f"workers {num_workers}; device {device}", flush=True)
 
     trainer = HercuvitTrainer(net, rec, out, model_cfg=model_cfg, device=device)
     if continue_training:
@@ -145,11 +157,12 @@ def run_training(
             trainer.load_checkpoint(latest)
         else:
             print("[hercuvit] --continue: no checkpoint_latest.pth found, starting fresh", flush=True)
-    trainer.run(loader)
+    trainer.run(loader, val_loader=val_loader)
 
 
 #: train fields settable on the CLI (the yaml is model-only); unset flags keep the recipe defaults.
-_TRAIN_FLAGS = ("epochs", "freeze_warmup_epochs", "batch_size", "base_lr", "encoder_lr_mult",
+_TRAIN_FLAGS = ("epochs", "freeze_warmup_epochs", "val_fold", "val_interval", "val_windows",
+                "batch_size", "base_lr", "encoder_lr_mult",
                 "weight_decay", "grad_clip", "warmup_steps", "lr_schedule", "augment",
                 "target_voxel_um", "attention_backend", "w_symskel", "w_malis", "denoise", "dn_weight")
 
