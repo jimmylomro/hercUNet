@@ -85,6 +85,7 @@ class HercuvitTrainer:
     def _run_epoch(self, loader, epoch: int) -> None:
         self.net.train()
         acc = {k: 0.0 for k in ("loss", "class", "bce", "dice", "obj", "dn", "symskel", "malis", "surf")}
+        pdc = {k: torch.zeros((), device=self.device) for k in ("tp", "fp", "fn")}  # surface pseudo-Dice (nnU-Net-style)
         n = 0
         amp_dtype = torch.bfloat16
         t0 = time.time()
@@ -138,6 +139,14 @@ class HercuvitTrainer:
             acc["loss"] += float(loss_f.detach())
             if st is not None:
                 acc["surf"] += float(st["sem"].detach())
+                # online surface pseudo-Dice (nnU-Net convention): accumulate TP/FP/FN over the epoch from the
+                # full-res surface argmax vs the thin medial (sem==1), ignoring sem==2 → one epoch micro-Dice.
+                with torch.no_grad():
+                    pr = out["sem_logits"][0].detach().float().argmax(1)   # (B,D,H,W) predicted class
+                    vmask = sem != 2
+                    pm = (pr == 1) & vmask
+                    tm = (sem == 1) & vmask
+                    pdc["tp"] += (pm & tm).sum(); pdc["fp"] += (pm & ~tm).sum(); pdc["fn"] += (~pm & tm).sum()
             if it is not None:
                 acc["class"] += float(it["class"]); acc["bce"] += float(it["mask_bce"])
                 acc["dice"] += float(it["mask_dice"]); acc["obj"] += float(it["obj"])
@@ -148,10 +157,11 @@ class HercuvitTrainer:
                 acc["malis"] += float(mt["malis"])
 
         m = {k: v / max(n, 1) for k, v in acc.items()}
+        pdice = float(2 * pdc["tp"] / (2 * pdc["tp"] + pdc["fp"] + pdc["fn"]).clamp_min(1.0))  # epoch micro pseudo-Dice
         dt = time.time() - t0
         print(
             f"{_C['tot']}[ep {epoch}] loss {m['loss']:.4f}{_C['r']} | "
-            f"{_C['sem']}surf {m['surf']:.3f}{_C['r']} | "
+            f"{_C['sem']}surf {m['surf']:.3f} pdice {pdice:.4f}{_C['r']} | "
             f"{_C['inst']}inst [class {m['class']:.3f} bce {m['bce']:.3f} dice {m['dice']:.3f} obj {m['obj']:.3f} dn {m['dn']:.3f}]{_C['r']} | "
             f"{_C['sem']}symskel {m['symskel']:.3f} malis {m['malis']:.4f}{_C['r']} "
             f"{_C['dim']}| lr {self.optim.param_groups[0]['lr']:.2e} {'frozen' if self._frozen else 'ft'} {dt:.0f}s{_C['r']}",
