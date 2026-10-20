@@ -84,7 +84,7 @@ class HercuvitTrainer:
     # ---- one epoch --------------------------------------------------------------------------------
     def _run_epoch(self, loader, epoch: int) -> None:
         self.net.train()
-        acc = {k: 0.0 for k in ("loss", "class", "bce", "dice", "obj", "symskel", "malis")}
+        acc = {k: 0.0 for k in ("loss", "class", "bce", "dice", "obj", "dn", "symskel", "malis")}
         n = 0
         amp_dtype = torch.bfloat16
         t0 = time.time()
@@ -97,8 +97,9 @@ class HercuvitTrainer:
 
             lr = self._apply_lr()
             self.optim.zero_grad(set_to_none=True)
+            dn_owner = owner_thin if self.recipe.denoise else None    # mask-denoising query group (§13.2), train-only
             with torch.autocast(device_type=self.device.type, dtype=amp_dtype):
-                out = self.net(ct)
+                out = self.net(ct, dn_owner=dn_owner)
                 inst = out["instance"]
                 # DEFAULT: PLAIN Mask2Former on THIN labels — Hungarian + per-query sigmoid mask BCE+Dice (+token
                 # objectness) against each sheet's THIN medial surface (owner & sem==1), ignore-masked. Each matched
@@ -129,6 +130,7 @@ class HercuvitTrainer:
             acc["loss"] += float(loss_f.detach())
             acc["class"] += float(it["class"]); acc["bce"] += float(it["mask_bce"])
             acc["dice"] += float(it["mask_dice"]); acc["obj"] += float(it["obj"])
+            acc["dn"] += float(it.get("dn", 0.0))
             if skt is not None:
                 acc["symskel"] += float(skt["tversky"])
             if mt is not None:
@@ -138,7 +140,7 @@ class HercuvitTrainer:
         dt = time.time() - t0
         print(
             f"{_C['tot']}[ep {epoch}] loss {m['loss']:.4f}{_C['r']} | "
-            f"{_C['inst']}inst [class {m['class']:.3f} bce {m['bce']:.3f} dice {m['dice']:.3f} obj {m['obj']:.3f}]{_C['r']} | "
+            f"{_C['inst']}inst [class {m['class']:.3f} bce {m['bce']:.3f} dice {m['dice']:.3f} obj {m['obj']:.3f} dn {m['dn']:.3f}]{_C['r']} | "
             f"{_C['sem']}symskel {m['symskel']:.3f} malis {m['malis']:.4f}{_C['r']} "
             f"{_C['dim']}| lr {self.optim.param_groups[0]['lr']:.2e} {'frozen' if self._frozen else 'ft'} {dt:.0f}s{_C['r']}",
             flush=True,

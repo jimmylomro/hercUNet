@@ -69,6 +69,8 @@ class HercuvitRecipe:
     instance_layers: int = 3                        # query-decoder layers
     deep_supervision: bool = True
     learned_queries: bool = True                    # persistent learned queries (DETR-style) — specialise, stable match
+    fps_queries: bool = False                       # embedding-FPS anchored query init (§13.3); excludes learned_queries
+    cross_attn: str = "deformable"                  # query-decoder cross-attn: "deformable" (anchor) | "masked" (§13.6)
     add_null_query: bool = True                     # reserved null/no-sheet query (index 0) for the softmax ownership
 
     # --- attention backend (plumbing; NOT a pillar change — raised via flag, docs §12) ---
@@ -135,6 +137,11 @@ class HercuvitRecipe:
     oversample_ratio: float = 3.0
     importance_ratio: float = 0.75
 
+    # --- mask denoising (§13.2 / docs/dinovol_sheet_architecture.md): a train-only fixed-assignment query group
+    #     that reconstructs each GT sheet, bypassing Hungarian. The standard DETR fix for query under-specialisation. ---
+    denoise: bool = False                           # add the denoise query group during training (default off)
+    dn_weight: float = 1.0                          # weight of the denoise-group loss in the total
+
     # NOTE: distillation (teacher, steps, lr, loss weights) is configured on the ``hercuvit distill`` CLI, NOT in
     # this recipe — a training recipe defines the SUPERVISED net + schedule only.
 
@@ -175,6 +182,7 @@ _TRAIN_FIELDS = frozenset({
     "w_class", "w_mask_bce", "w_mask_dice", "w_objectness",
     "cost_class", "cost_mask_bce", "cost_mask_dice", "no_object_weight", "aux_weight",
     "point_sample", "oversample_ratio", "importance_ratio",
+    "denoise", "dn_weight",
 })
 #: MODEL fields — the only keys a recipe yaml may set (everything that is not training).
 _MODEL_FIELDS = frozenset(f.name for f in fields(HercuvitRecipe)) - _TRAIN_FIELDS

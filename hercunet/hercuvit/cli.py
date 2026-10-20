@@ -65,6 +65,10 @@ def _add_train_common(p: argparse.ArgumentParser) -> None:
                    help="weight of the optional per-query SymSkel thin-surface loss (default 0 = off)")
     p.add_argument("--w-malis", dest="w_malis", type=float, default=None,
                    help="weight of the optional AffMALIS separation loss (default 0 = off)")
+    p.add_argument("--denoise", dest="denoise", default=None, action=argparse.BooleanOptionalAction,
+                   help="mask denoising: a train-only fixed-assignment query group per GT sheet (default off)")
+    p.add_argument("--dn-weight", dest="dn_weight", type=float, default=None,
+                   help="weight of the denoise-group loss (default 1.0)")
     p.add_argument("--variant", default=None, choices=_VARIANTS,
                    help="FROM-SCRATCH training of this variant (no encoder) — mutually exclusive with --encoder; "
                         "NOT supported yet (raises). Normal training deduces the variant from --encoder.")

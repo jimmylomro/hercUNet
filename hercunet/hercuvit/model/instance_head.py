@@ -122,14 +122,25 @@ class QuerySelector(nn.Module):
 
 
 class QueryDecoderLayer(nn.Module):
-    """Self-attn among queries + multi-scale deformable cross-attn around anchors + FFN + anchor refinement."""
+    """Self-attn among queries + multi-scale cross-attn + FFN + anchor refinement. Two cross-attention modes:
+
+    * ``"deformable"`` — DETR/DINO-style: each query samples ``n_points`` around its **anchor** (``DeformableCrossAttn``).
+    * ``"masked"`` — Mask2Former-style: full multi-head cross-attn over the feature tokens, **masked to the query's
+      own predicted-mask foreground** (``cross_masks`` built by the caller from the previous layer's mask). Anchor-free
+      localisation — the right fit for shapeless, window-spanning sheets (docs §13.6). The anchor is still carried +
+      refined (for logging / FPS init) but does not drive attention in this mode."""
 
     def __init__(self, dim: int, n_heads: int, n_points: int, n_scales: int, mlp_ratio: int = 4,
-                 anchor_step: float = 0.25) -> None:
+                 anchor_step: float = 0.25, cross_attn: str = "deformable") -> None:
         super().__init__()
+        self.cross_attn = cross_attn
+        self.n_heads = int(n_heads)
         self.anchor_step = float(anchor_step)
         self.self_attn = nn.MultiheadAttention(dim, n_heads, batch_first=True)
-        self.cross = nn.ModuleList([DeformableCrossAttn(dim, n_heads, n_points) for _ in range(n_scales)])
+        if cross_attn == "deformable":
+            self.cross = nn.ModuleList([DeformableCrossAttn(dim, n_heads, n_points) for _ in range(n_scales)])
+        else:                                                           # masked: one MHA per scale over feature tokens
+            self.cross = nn.ModuleList([nn.MultiheadAttention(dim, n_heads, batch_first=True) for _ in range(n_scales)])
         self.mlp = nn.Sequential(nn.Linear(dim, dim * mlp_ratio), nn.GELU(), nn.Linear(dim * mlp_ratio, dim))
         self.n1 = nn.LayerNorm(dim)
         self.n2 = nn.LayerNorm(dim)
@@ -138,11 +149,19 @@ class QueryDecoderLayer(nn.Module):
         nn.init.zeros_(self.anchor_mlp.weight)
         nn.init.zeros_(self.anchor_mlp.bias)
 
-    def forward(self, q: torch.Tensor, anchors: torch.Tensor, feats: Sequence[torch.Tensor]):
+    def forward(self, q: torch.Tensor, anchors: torch.Tensor, feats: Sequence[torch.Tensor],
+                attn_mask: torch.Tensor | None = None, cross_masks: Sequence | None = None):
         s = self.n1(q)
-        q = q + self.self_attn(s, s, s, need_weights=False)[0]
+        q = q + self.self_attn(s, s, s, need_weights=False, attn_mask=attn_mask)[0]
         qn = self.n2(q)
-        cross = sum(c(qn, anchors, f) for c, f in zip(self.cross, feats))
+        if self.cross_attn == "deformable":
+            cross = sum(c(qn, anchors, f) for c, f in zip(self.cross, feats))
+        else:                                                           # masked cross-attn over flattened scale tokens
+            cross = qn.new_zeros(qn.shape)
+            for i, (c, f) in enumerate(zip(self.cross, feats)):
+                kv = f.flatten(2).transpose(1, 2)                       # (B,N,dim) keys/values at this scale
+                m = cross_masks[i] if cross_masks is not None else None  # (B·heads,Q,N) bool; None => attend all
+                cross = cross + c(qn, kv, kv, need_weights=False, attn_mask=m)[0]
         q = q + cross
         q = q + self.mlp(self.n3(q))
         anchors = (anchors + self.anchor_step * torch.tanh(self.anchor_mlp(q))).clamp(-1.0, 1.0)
@@ -175,10 +194,18 @@ class InstanceHead(nn.Module):
         mask_dim: int = 32,
         add_null: bool = False,
         learned_queries: bool = False,
+        fps_queries: bool = False,
+        cross_attn: str = "deformable",
     ) -> None:
         super().__init__()
         self.add_null = bool(add_null)
         self.learned_queries = bool(learned_queries)
+        self.fps_queries = bool(fps_queries)                   # option 2 (§13.3): embedding-FPS anchored query init
+        self.cross_attn = str(cross_attn)                      # "deformable" | "masked" (Mask2Former, docs §13.6)
+        if self.cross_attn not in ("deformable", "masked"):
+            raise ValueError(f"cross_attn must be 'deformable' or 'masked', got {cross_attn!r}.")
+        if self.learned_queries and self.fps_queries:
+            raise ValueError("learned_queries and fps_queries are mutually exclusive query-init modes.")
         if self.add_null:
             # reserved learned NULL / no-sheet query (index 0), HercUNet sheet-seg convention: excluded from the
             # Hungarian match, used as the background (owner==0) CE target so off-sheet voxels drain to null.
@@ -192,14 +219,128 @@ class InstanceHead(nn.Module):
         self.selector = QuerySelector(token_dim, dim, n_queries)
         self.proj8 = nn.Conv3d(token_dim, dim, kernel_size=1)   # 1/8 token grid -> query width
         self.proj4 = nn.Conv3d(feat_14_dim, dim, kernel_size=1)  # 1/4 decoder features -> query width
+        self.dn_content = nn.Linear(token_dim, dim)             # denoise query content from pooled sheet tokens (§13.2)
         self.layers = nn.ModuleList(
-            [QueryDecoderLayer(dim, n_heads, n_points, n_scales=2) for _ in range(int(n_layers))]
+            [QueryDecoderLayer(dim, n_heads, n_points, n_scales=2, cross_attn=self.cross_attn)
+             for _ in range(int(n_layers))]
         )
         self.class_head = nn.Linear(dim, 2)        # sheet vs no-object
         self.mask_embed = nn.Linear(dim, int(mask_dim))
+        self.token_dim = int(token_dim)
+        self.dim = int(dim)
+        self.n_heads = int(n_heads)
+        self.mask_dim = int(mask_dim)
 
-    def forward(self, tokens_grid: torch.Tensor, feat_14: torch.Tensor) -> dict:
-        """``tokens_grid`` (B, token_dim, 16,16,16); ``feat_14`` (B, feat_14_dim, 32,32,32)."""
+    @staticmethod
+    def _fps_indices(feat_n: torch.Tensor, k: int) -> torch.Tensor:
+        """Pure-torch farthest-point sampling (§13.4) on L2-normalised features ``feat_n`` (B,G,d) → ``idx`` (B,K)
+        long. Greedy: seed = the highest-norm... here features are unit, so seed = token farthest from the batch-item
+        mean (most distinctive); then repeatedly add the point maximising the min distance to the chosen set. Squared
+        euclidean on unit vectors == 2−2·cos, so this hops between cosine clusters → ≈ one seed per sheet. NON-
+        differentiable (argmax over distances); run detached, like a top-K. In-graph on GPU (short serial loop)."""
+        B, G, _ = feat_n.shape
+        k = min(int(k), G)
+        dev = feat_n.device
+        idx = torch.zeros(B, k, dtype=torch.long, device=dev)
+        # seed: farthest token from the per-item mean direction (deterministic, train/infer identical)
+        mean = feat_n.mean(dim=1, keepdim=True)                              # (B,1,d)
+        d0 = ((feat_n - mean) ** 2).sum(-1)                                  # (B,G)
+        last = d0.argmax(dim=1)                                              # (B,)
+        idx[:, 0] = last
+        min_d = feat_n.new_full((B, G), float("inf"))
+        bar = torch.arange(B, device=dev)
+        for i in range(1, k):
+            cur = feat_n[bar, last]                                         # (B,d) last chosen
+            d = ((feat_n - cur.unsqueeze(1)) ** 2).sum(-1)                  # (B,G) sq-dist to last
+            min_d = torch.minimum(min_d, d)
+            last = min_d.argmax(dim=1)                                      # farthest from the chosen set
+            idx[:, i] = last
+        return idx
+
+    def _fps_select(self, tokens_seq: torch.Tensor, coords: torch.Tensor):
+        """Embedding-FPS anchored query init (§13.3): pick ``n_queries`` token cells by FPS in NORMALISED-embedding
+        (cosine) space — one anchor per sheet cluster — then DIFFERENTIABLY gather each one's content (token embed →
+        query width) + anchor (cell centre). GT-free: identical at train and inference. Returns
+        ``(content (B,Q,dim), anchors (B,Q,3), objectness (B,G) zeros, idx (B,Q))`` to match the selector."""
+        B, G, _ = tokens_seq.shape
+        with torch.no_grad():                                               # selection is non-differentiable (detached)
+            feat_n = F.normalize(tokens_seq.float(), dim=-1)                # cosine ⇒ sq-euclidean on unit vectors
+            idx = self._fps_indices(feat_n, self.selector.n_queries)       # (B,Q)
+        gather = idx.unsqueeze(-1).expand(-1, -1, tokens_seq.shape[-1])
+        content = self.selector.content(torch.gather(tokens_seq, 1, gather))            # (B,Q,dim) differentiable gather
+        anchors = coords.unsqueeze(0).expand(B, -1, -1).gather(1, idx.unsqueeze(-1).expand(-1, -1, 3))  # (B,Q,3)
+        objectness = tokens_seq.new_zeros(B, G)                             # unused (no two-stage objectness)
+        return content, anchors, objectness, idx
+
+    def _build_denoise(self, tokens_seq, coords, dn_owner, *, n_groups=2, content_noise=0.3, anchor_jitter=0.15):
+        """Build a TRAIN-ONLY denoise query group (§13.2): one anchored query per GT sheet, × ``n_groups`` noised
+        copies, initialised from that sheet's pooled token embedding (→ ``dn_content``) + its token centroid, with
+        Gaussian content noise + anchor jitter. Returns ``(content (B,n_dn,dim), anchors (B,n_dn,3), valid (B,n_dn)
+        bool, sheet (B,n_dn) long)`` or ``None`` if the batch has no sheets. Each denoise query is FIXED-assigned to
+        its sheet in the loss — a direct 'reconstruct this sheet' signal that bypasses Hungarian."""
+        B, G, _ = tokens_seq.shape
+        side = round(G ** (1.0 / 3.0))
+        k = max(1, dn_owner.shape[-1] // side)
+        tok_owner = F.max_pool3d(dn_owner.float()[:, None], kernel_size=k, stride=k)[:, 0].reshape(B, G).long()  # (B,G)
+        per_item = [torch.unique(tok_owner[b][tok_owner[b] > 0]) for b in range(B)]
+        max_s = max((int(s.numel()) for s in per_item), default=0)
+        if max_s == 0:
+            return None
+        n_dn = max_s * int(n_groups)
+        dev = tokens_seq.device
+        content = tokens_seq.new_zeros(B, n_dn, self.dim)
+        anchors = tokens_seq.new_zeros(B, n_dn, 3)
+        valid = torch.zeros(B, n_dn, dtype=torch.bool, device=dev)
+        sheet = torch.zeros(B, n_dn, dtype=torch.long, device=dev)
+        for b in range(B):
+            for si, s in enumerate(per_item[b]):
+                cells = tok_owner[b] == s
+                pooled = tokens_seq[b][cells].mean(0)                       # (token_dim,) sheet token centroid-embed
+                cen = coords[cells].mean(0)                                 # (3,) sheet token-space centroid
+                c = self.dn_content(pooled)                                 # (dim,)
+                cstd = c.detach().std().clamp_min(1e-4)
+                for g in range(int(n_groups)):
+                    slot = si * int(n_groups) + g
+                    content[b, slot] = c + content_noise * cstd * torch.randn_like(c)
+                    anchors[b, slot] = (cen + anchor_jitter * (torch.rand(3, device=dev) * 2 - 1)).clamp(-1.0, 1.0)
+                    valid[b, slot] = True
+                    sheet[b, slot] = int(s)
+        return content, anchors, valid, sheet
+
+    def _pool_mask_features(self, mask_features: torch.Tensor, sides: Sequence[int]):
+        """Avg-pool the full-res ``mask_features`` (B, mask_dim, D,H,W) down to each attention scale's ``side`` →
+        list of (B, mask_dim, N_s) flattened low-res pixel-embeddings — the keys for the Mask2Former attention mask
+        (so it never materialises a full-res 128³ mask just to gate attention; §13.6)."""
+        D = mask_features.shape[-1]
+        out = []
+        for side in sides:
+            k = max(1, D // int(side))
+            out.append(F.avg_pool3d(mask_features, kernel_size=k, stride=k).flatten(2))   # (B,mask_dim,N_s)
+        return out
+
+    def _cross_masks(self, mask_embed_q: torch.Tensor, mf_scales: Sequence[torch.Tensor]):
+        """Masked-attention masks (Mask2Former) from the current queries' predicted mask: block a (query, token) pair
+        wherever the query's low-res mask prob < 0.5. ``mask_embed_q`` (B,Q,mask_dim); ``mf_scales`` list of
+        (B,mask_dim,N_s). Returns list of ``(B·heads, Q, N_s)`` bool masks (True = blocked). Detached (a gate, not a
+        gradient path); a fully-blocked query falls back to attend-all (no NaN softmax), as in Mask2Former."""
+        masks = []
+        h = self.n_heads
+        for mf in mf_scales:
+            with torch.no_grad():
+                logits = torch.einsum("bqc,bcn->bqn", mask_embed_q.float(), mf.float())   # (B,Q,N_s) low-res mask
+                block = torch.sigmoid(logits) < 0.5                      # True = background => not attended
+                block = block & ~block.all(dim=-1, keepdim=True)         # empty mask => attend everywhere
+            B, Q, N = block.shape
+            masks.append(block.unsqueeze(1).expand(B, h, Q, N).reshape(B * h, Q, N))
+        return masks
+
+    def forward(self, tokens_grid: torch.Tensor, feat_14: torch.Tensor,
+                mask_features: torch.Tensor | None = None, dn_owner: torch.Tensor | None = None) -> dict:
+        """``tokens_grid`` (B, token_dim, 16,16,16); ``feat_14`` (B, feat_14_dim, 32,32,32); ``mask_features``
+        (B, mask_dim, 128³) — REQUIRED for ``cross_attn="masked"`` (it gates each query's cross-attention by its own
+        predicted mask; §13.6), unused for ``"deformable"``. ``dn_owner`` (B,D,H,W) thin-surface owner ids — TRAIN
+        ONLY: appends a fixed-assignment denoise query group (§13.2), isolated in the self-attention; ``None`` at
+        inference (no denoise group)."""
         B, C, dz, dy, dx = tokens_grid.shape
         tokens_seq = tokens_grid.flatten(2).transpose(1, 2)                 # (B, G, token_dim), raster (z,y,x)
         coords = _coord_grid((dz, dy, dx), tokens_grid.device, tokens_grid.dtype)
@@ -208,6 +349,8 @@ class InstanceHead(nn.Module):
             anchors = self.query_ref.clamp(-1.0, 1.0).to(tokens_seq.dtype).expand(B, -1, -1)
             objectness = tokens_grid.new_zeros(B, dz * dy * dx)              # unused (no two-stage selection)
             idx = torch.full((B, self.selector.n_queries), -1, dtype=torch.long, device=tokens_grid.device)
+        elif self.fps_queries:                                              # option 2 (§13.3): embedding-FPS init
+            content, anchors, objectness, idx = self._fps_select(tokens_seq, coords)
         else:
             content, anchors, objectness, idx = self.selector(tokens_seq, coords)
         if self.add_null:                                                   # prepend the reserved null query (index 0)
@@ -215,16 +358,34 @@ class InstanceHead(nn.Module):
             anchors = torch.cat([self.null_anchor.to(anchors.dtype).expand(B, 1, -1), anchors], dim=1)
             idx = torch.cat([idx.new_full((B, 1), -1), idx], dim=1)         # null has no source token
 
-        feats = [self.proj8(tokens_grid), self.proj4(feat_14)]              # multi-scale deformable keys/values
+        n_match = content.shape[1]                                          # matching (+ null) queries
+        dn = self._build_denoise(tokens_seq, coords, dn_owner) if (dn_owner is not None and self.training) else None
+        attn_mask = None
+        if dn is not None:                                                  # append the denoise group, isolate it
+            dn_content, dn_anchors, dn_valid, dn_sheet = dn
+            content = torch.cat([content, dn_content.to(content.dtype)], dim=1)
+            anchors = torch.cat([anchors, dn_anchors.to(anchors.dtype)], dim=1)
+            L = content.shape[1]
+            attn_mask = torch.zeros(L, L, dtype=torch.bool, device=content.device)
+            attn_mask[:n_match, n_match:] = True                            # matching can't see denoise
+            attn_mask[n_match:, :n_match] = True                            # denoise can't see matching
+
+        feats = [self.proj8(tokens_grid), self.proj4(feat_14)]              # multi-scale keys/values (16³, 32³)
+        masked = self.cross_attn == "masked"
+        if masked:
+            if mask_features is None:
+                raise ValueError("cross_attn='masked' needs mask_features (the pixel decoder's full-res embeddings).")
+            mf_scales = self._pool_mask_features(mask_features, (dz, feat_14.shape[-1]))   # low-res keys for the mask
         q = content
         layers_out = []
         for layer in self.layers:
-            q, anchors = layer(q, anchors, feats)
+            # masked mode (§13.6): gate THIS layer's cross-attn by the current queries' predicted-mask foreground.
+            cross_masks = self._cross_masks(self.mask_embed(q), mf_scales) if masked else None
+            q, anchors = layer(q, anchors, feats, attn_mask=attn_mask, cross_masks=cross_masks)
             layers_out.append(
-                {
-                    "class_logits": self.class_head(q),
-                    "mask_embed": self.mask_embed(q),
-                    "anchors": anchors,
-                }
+                {"class_logits": self.class_head(q), "mask_embed": self.mask_embed(q), "anchors": anchors}
             )
-        return {"objectness": objectness, "query_idx": idx, "layers": layers_out}
+        out = {"objectness": objectness, "query_idx": idx, "layers": layers_out, "n_match": n_match}
+        if dn is not None:
+            out["dn_valid"], out["dn_sheet"] = dn_valid, dn_sheet
+        return out

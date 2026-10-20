@@ -301,6 +301,33 @@ def _instance_item(layer_out_b, feat_pts, owner_pts, ids, mask_features_b, owner
     return {"class": loss_class, "mask_bce": loss_bce, "mask_dice": loss_dice}
 
 
+def _denoise_item(lay_b, mask_features_b, owner_b, valid_b, dn_sheet_b, dn_valid_b, recipe):
+    """DENOISE group losses for ONE item at ONE layer (§13.2): each valid denoise query is FIXED-assigned to its
+    sheet ``dn_sheet_b`` (no Hungarian) and supervised to reconstruct that sheet — dense mask BCE+Dice (as the
+    matched loss) + class = sheet. ``lay_b`` holds ONLY the denoise queries' ``class_logits (n_dn,2)`` /
+    ``mask_embed (n_dn,C)``. Returns ``{class, mask_bce, mask_dice}`` (grad-connected zeros if no valid query)."""
+    device = lay_b["class_logits"].device
+    vq = dn_valid_b.nonzero(as_tuple=False).squeeze(1)
+    if vq.numel() == 0:
+        z = lay_b["mask_embed"].sum() * 0.0
+        return {"class": lay_b["class_logits"].sum() * 0.0, "mask_bce": z, "mask_dice": z}
+    cls = lay_b["class_logits"][vq]                                    # (M,2) — target: all sheet
+    me = lay_b["mask_embed"][vq]                                       # (M,C)
+    sheets = dn_sheet_b[vq].tolist()
+    cw = torch.tensor([recipe.no_object_weight, 1.0], device=device)
+    loss_class = F.cross_entropy(cls, torch.ones(len(vq), dtype=torch.long, device=device), weight=cw)
+    mlog = mask_logits_from_embed(me.unsqueeze(0), mask_features_b.unsqueeze(0))[0]       # (M,D,H,W)
+    gt = torch.stack([(owner_b == int(s)).float() for s in sheets], 0)                    # (M,D,H,W)
+    v = valid_b.float().unsqueeze(0)
+    bce = F.binary_cross_entropy_with_logits(mlog, gt, reduction="none")
+    loss_bce = (bce * v).sum() / (v.sum() * mlog.shape[0]).clamp_min(1.0)
+    p = torch.sigmoid(mlog)
+    num = 2.0 * (p * gt * v).sum(dim=(1, 2, 3)) + 1.0
+    den = (p * v).sum(dim=(1, 2, 3)) + (gt * v).sum(dim=(1, 2, 3)) + 1.0
+    loss_dice = (1.0 - num / den).mean()
+    return {"class": loss_class, "mask_bce": loss_bce, "mask_dice": loss_dice}
+
+
 def instance_loss(instance: dict, mask_features: torch.Tensor, owner: torch.Tensor,
                   has_identity, recipe, *, ignore: torch.Tensor | None = None, seed: int = 0) -> dict:
     """Mask2Former set-prediction + objectness loss over the batch. Returns ``{inst, class, mask_bce, mask_dice,
@@ -312,6 +339,10 @@ def instance_loss(instance: dict, mask_features: torch.Tensor, owner: torch.Tens
     C = mask_features.shape[1]
     layers = instance["layers"]
     objectness = instance["objectness"]                               # (B,G_tok)
+    n_match = instance.get("n_match")                                 # matching(+null) queries; rest are denoise (§13.2)
+    dn_valid = instance.get("dn_valid")
+    dn_sheet = instance.get("dn_sheet")
+    has_dn = dn_valid is not None
     device = mask_features.device
     rng = torch.Generator(device=device)
     rng.manual_seed(int(seed))
@@ -320,6 +351,7 @@ def instance_loss(instance: dict, mask_features: torch.Tensor, owner: torch.Tens
     tot_bce = mask_features.new_zeros(())
     tot_dice = mask_features.new_zeros(())
     tot_obj = mask_features.new_zeros(())
+    tot_dn = mask_features.new_zeros(())                              # denoise-group loss (class + mask, fixed-assigned)
     n_ident = 0
 
     for b in range(B):
@@ -343,13 +375,18 @@ def instance_loss(instance: dict, mask_features: torch.Tensor, owner: torch.Tens
         owner_pts = owner_flat[pts]                                   # (P,)
 
         for li, lay in enumerate(layers):
-            lay_b = {"class_logits": lay["class_logits"][b], "mask_embed": lay["mask_embed"][b]}
+            lay_b = {"class_logits": lay["class_logits"][b][:n_match], "mask_embed": lay["mask_embed"][b][:n_match]}
             is_final = (li == len(layers) - 1)
-            out = _instance_item(lay_b, feat_pts, owner_pts, ids, mask_features[b], owner[b], valid_b, recipe)
             w = 1.0 if is_final else recipe.aux_weight
+            out = _instance_item(lay_b, feat_pts, owner_pts, ids, mask_features[b], owner[b], valid_b, recipe)
             tot_class = tot_class + w * out["class"]
             tot_bce = tot_bce + w * out["mask_bce"]
             tot_dice = tot_dice + w * out["mask_dice"]
+            if has_dn:                                                # fixed-assignment denoise group (§13.2)
+                dn_b = {"class_logits": lay["class_logits"][b][n_match:], "mask_embed": lay["mask_embed"][b][n_match:]}
+                dn_out = _denoise_item(dn_b, mask_features[b], owner[b], valid_b, dn_sheet[b], dn_valid[b], recipe)
+                tot_dn = tot_dn + w * (recipe.w_class * dn_out["class"] + recipe.w_mask_bce * dn_out["mask_bce"]
+                                       + recipe.w_mask_dice * dn_out["mask_dice"])
 
         # token objectness: 16³ cell is positive iff a sheet voxel falls in it; cells that are >=50% ignore are
         # excluded from the objectness BCE (not forced to either class).
@@ -362,12 +399,14 @@ def instance_loss(instance: dict, mask_features: torch.Tensor, owner: torch.Tens
         tot_obj = tot_obj + (obj_bce * obj_valid).sum() / obj_valid.sum().clamp_min(1.0)
 
     denom = max(n_ident, 1)
+    dn_w = float(getattr(recipe, "dn_weight", 1.0))                   # scales the whole denoise block (§13.2)
     inst = (recipe.w_class * tot_class + recipe.w_mask_bce * tot_bce
-            + recipe.w_mask_dice * tot_dice + recipe.w_objectness * tot_obj) / denom
+            + recipe.w_mask_dice * tot_dice + recipe.w_objectness * tot_obj + dn_w * tot_dn) / denom
     return {
         "inst": inst,
         "class": (tot_class / denom).detach(),
         "mask_bce": (tot_bce / denom).detach(),
         "mask_dice": (tot_dice / denom).detach(),
         "obj": (tot_obj / denom).detach(),
+        "dn": (tot_dn / denom).detach(),
     }

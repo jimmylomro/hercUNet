@@ -58,6 +58,8 @@ class HercuVitNet(nn.Module):
         with_instance: bool = True,
         add_null_query: bool = False,
         learned_queries: bool = False,
+        fps_queries: bool = False,
+        cross_attn: str = "deformable",
     ) -> None:
         super().__init__()
         self.backbone = backbone
@@ -81,11 +83,13 @@ class HercuVitNet(nn.Module):
                 mask_dim=mask_dim,
                 add_null=add_null_query,
                 learned_queries=learned_queries,
+                fps_queries=fps_queries,
+                cross_attn=cross_attn,
             )
         else:
             self.instance_head = None
 
-    def forward(self, x: torch.Tensor) -> dict:
+    def forward(self, x: torch.Tensor, dn_owner: torch.Tensor | None = None) -> dict:
         feats = self.backbone.forward_features(x, view_kind="global")
         tokens_seq = feats["x_norm_patchtokens"]                     # (B, G, token_dim)
         skips = feats["embed_skips"]                                 # [s0@128³, s1@64³, s2@32³]
@@ -96,7 +100,8 @@ class HercuVitNet(nn.Module):
         dec = self.pixel_decoder(tokens_grid, skips)
         out = {"sem_logits": dec["sem_logits"], "mask_features": dec["mask_features"], "instance": None}
         if self.instance_head is not None:
-            out["instance"] = self.instance_head(tokens_grid, dec["feat_14"])
+            out["instance"] = self.instance_head(tokens_grid, dec["feat_14"],
+                                                 mask_features=dec["mask_features"], dn_owner=dn_owner)
         return out
 
     # --- staged training helpers (the trainer drives the schedule; see docs/hercuvit.md §7) ---
@@ -186,6 +191,8 @@ def build_hercuvit(
     with_instance: bool = True,
     add_null_query: bool = False,
     learned_queries: bool = False,
+    fps_queries: bool = False,
+    cross_attn: str = "deformable",
     strict_load: bool = True,
 ) -> HercuVitNet:
     """Build **any** HercuViT variant from an encoder ``.pt`` — one config-driven path that DETECTS the kind:
@@ -262,6 +269,8 @@ def build_hercuvit(
         with_instance=with_instance,
         add_null_query=add_null_query,
         learned_queries=learned_queries,
+        fps_queries=fps_queries,
+        cross_attn=cross_attn,
     )
     net = net.to(device)
     net._hercuvit_fresh_params = fresh      # params left for distillation (empty for small)

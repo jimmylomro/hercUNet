@@ -118,6 +118,7 @@ def run_training(
         query_dim=rec.query_dim, instance_layers=rec.instance_layers,
         deep_supervision=rec.deep_supervision, with_instance=True,
         add_null_query=rec.add_null_query, learned_queries=rec.learned_queries,
+        fps_queries=rec.fps_queries, cross_attn=rec.cross_attn,
     )
 
     if pre_extract:
@@ -150,7 +151,7 @@ def run_training(
 #: train fields settable on the CLI (the yaml is model-only); unset flags keep the recipe defaults.
 _TRAIN_FLAGS = ("epochs", "freeze_warmup_epochs", "batch_size", "base_lr", "encoder_lr_mult",
                 "weight_decay", "grad_clip", "warmup_steps", "lr_schedule", "augment",
-                "target_voxel_um", "attention_backend", "w_symskel", "w_malis")
+                "target_voxel_um", "attention_backend", "w_symskel", "w_malis", "denoise", "dn_weight")
 
 
 def _run_from_args(args) -> None:

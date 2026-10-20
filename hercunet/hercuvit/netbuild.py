@@ -93,6 +93,8 @@ def build_from_cfg(
     with_instance: bool = True,
     add_null_query: bool = False,
     learned_queries: bool = False,
+    fps_queries: bool = False,
+    cross_attn: str = "deformable",
 ) -> HercuVitNet:
     """Rebuild the HercuViT architecture from a stored Dinovol ``model_cfg`` (NO Dinovol weights loaded).
 
@@ -128,6 +130,8 @@ def build_from_cfg(
         with_instance=with_instance,
         add_null_query=add_null_query,
         learned_queries=learned_queries,
+        fps_queries=fps_queries,
+        cross_attn=cross_attn,
     ).to(device)
     apply_attention_backend(net, attention_backend)
     return net
