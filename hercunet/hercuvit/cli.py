@@ -71,6 +71,12 @@ def _add_train_common(p: argparse.ArgumentParser) -> None:
                    help="resample working scale µm (default 9.6)")
     p.add_argument("--attention-backend", dest="attention_backend", default=None, choices=_BACKENDS,
                    help="SDPA kernel auto|flash|cudnn|efficient|math (default auto; hardware, not model)")
+    p.add_argument("--w-surface", dest="w_surface", type=float, default=None,
+                   help="weight of the surface/semantic BCE stack on the pixel-decoder surface head (default 0 = off; "
+                        "author-style direct thin-surface supervision)")
+    p.add_argument("--surface-only", dest="surface_only", default=None, action=argparse.BooleanOptionalAction,
+                   help="design-B stage 1: train ONLY the surface head (skip the instance head) — replicate the "
+                        "author's surface predictor first (default off)")
     p.add_argument("--w-symskel", dest="w_symskel", type=float, default=None,
                    help="weight of the optional per-query SymSkel thin-surface loss (default 0 = off)")
     p.add_argument("--w-malis", dest="w_malis", type=float, default=None,

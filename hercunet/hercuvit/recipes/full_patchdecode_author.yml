@@ -1,0 +1,31 @@
+# HercuViT MODEL — AUTHOR-REPLICATION baseline: design B with the deformable neck OFF (neck: none), so the surface
+# head is the Dinovol author's exact surface predictor — the frozen all-global encoder → skipless PatchDecode
+# ConvTranspose upsample to 1/1 → surface head, supervised DIRECTLY with BCE (his "surfaces" task, ~1500 steps
+# batch16). Run with `--surface-only --w-surface 1.0` to train ONLY the surface head and reproduce his result on the
+# (smaller) herculabels corpus before adding the neck + turning on the instance head. The instance head is still
+# built + wired (connected, ready) — just not supervised here. A recipe yaml defines THE NETWORK ONLY.
+name: full_patchdecode_author
+variant: full
+
+# --- encoder arch ---
+global_attention: full
+global_blocks: all
+window: 128
+
+# --- pixel decoder (design B, neck disabled = author-exact PatchDecode) ---
+decoder: patchdecode
+neck: none
+surface_gate: true
+
+# --- heads ---
+n_sem_classes: 2
+mask_dim: 16
+n_queries: 64
+query_dim: 64
+instance_layers: 3
+deep_supervision: true
+learned_queries: false
+fps_queries: true
+cross_attn: masked
+mask_mode: softmax
+add_null_query: true

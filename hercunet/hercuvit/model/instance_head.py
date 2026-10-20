@@ -196,6 +196,7 @@ class InstanceHead(nn.Module):
         learned_queries: bool = False,
         fps_queries: bool = False,
         cross_attn: str = "deformable",
+        gated_kv: bool = False,
     ) -> None:
         super().__init__()
         self.add_null = bool(add_null)
@@ -216,10 +217,19 @@ class InstanceHead(nn.Module):
             # (each query owns a sheet across steps) for stable Hungarian, instead of per-forward top-K selection.
             self.query_embed = nn.Parameter(torch.randn(int(n_queries), dim) * 0.02)
             self.query_ref = nn.Parameter(torch.rand(int(n_queries), 3) * 2 - 1)   # spread in [-1,1]
+        self.gated_kv = bool(gated_kv)                         # design B: K/V + FPS seeds from surface-GATED features
+        emb_dim = int(mask_dim) if self.gated_kv else int(token_dim)   # the FPS/denoise/content embedding source width
         self.selector = QuerySelector(token_dim, dim, n_queries)
-        self.proj8 = nn.Conv3d(token_dim, dim, kernel_size=1)   # 1/8 token grid -> query width
-        self.proj4 = nn.Conv3d(feat_14_dim, dim, kernel_size=1)  # 1/4 decoder features -> query width
-        self.dn_content = nn.Linear(token_dim, dim)             # denoise query content from pooled sheet tokens (§13.2)
+        if self.gated_kv:
+            # K/V + FPS seeds come from the surface-gated mask features (NOT raw frozen tokens — the bypass that made
+            # queries lean on unadaptable frozen features; docs/dinovol_sheet_architecture.md §3 design B).
+            self.kv_proj8 = nn.Conv3d(int(mask_dim), dim, kernel_size=1)   # gated feats @1/8 -> query width
+            self.kv_proj4 = nn.Conv3d(int(mask_dim), dim, kernel_size=1)   # gated feats @1/4 -> query width
+            self.gated_content = nn.Linear(int(mask_dim), dim)            # FPS query content from gated embeddings
+        else:
+            self.proj8 = nn.Conv3d(token_dim, dim, kernel_size=1)   # 1/8 token grid -> query width
+            self.proj4 = nn.Conv3d(feat_14_dim, dim, kernel_size=1)  # 1/4 decoder features -> query width
+        self.dn_content = nn.Linear(emb_dim, dim)              # denoise query content from pooled sheet embeddings (§13.2)
         self.layers = nn.ModuleList(
             [QueryDecoderLayer(dim, n_heads, n_points, n_scales=2, cross_attn=self.cross_attn)
              for _ in range(int(n_layers))]
@@ -257,19 +267,20 @@ class InstanceHead(nn.Module):
             idx[:, i] = last
         return idx
 
-    def _fps_select(self, tokens_seq: torch.Tensor, coords: torch.Tensor):
-        """Embedding-FPS anchored query init (§13.3): pick ``n_queries`` token cells by FPS in NORMALISED-embedding
-        (cosine) space — one anchor per sheet cluster — then DIFFERENTIABLY gather each one's content (token embed →
-        query width) + anchor (cell centre). GT-free: identical at train and inference. Returns
+    def _fps_select(self, emb_seq: torch.Tensor, coords: torch.Tensor, content_proj):
+        """Embedding-FPS anchored query init (§13.3): pick ``n_queries`` cells by FPS in NORMALISED-embedding
+        (cosine) space — one anchor per sheet cluster — then DIFFERENTIABLY gather each one's content (``content_proj``:
+        embed → query width) + anchor (cell centre). ``emb_seq`` is the raw frozen tokens (default) or the pooled
+        surface-gated features (design B). GT-free: identical at train and inference. Returns
         ``(content (B,Q,dim), anchors (B,Q,3), objectness (B,G) zeros, idx (B,Q))`` to match the selector."""
-        B, G, _ = tokens_seq.shape
+        B, G, _ = emb_seq.shape
         with torch.no_grad():                                               # selection is non-differentiable (detached)
-            feat_n = F.normalize(tokens_seq.float(), dim=-1)                # cosine ⇒ sq-euclidean on unit vectors
+            feat_n = F.normalize(emb_seq.float(), dim=-1)                   # cosine ⇒ sq-euclidean on unit vectors
             idx = self._fps_indices(feat_n, self.selector.n_queries)       # (B,Q)
-        gather = idx.unsqueeze(-1).expand(-1, -1, tokens_seq.shape[-1])
-        content = self.selector.content(torch.gather(tokens_seq, 1, gather))            # (B,Q,dim) differentiable gather
+        gather = idx.unsqueeze(-1).expand(-1, -1, emb_seq.shape[-1])
+        content = content_proj(torch.gather(emb_seq, 1, gather))            # (B,Q,dim) differentiable gather
         anchors = coords.unsqueeze(0).expand(B, -1, -1).gather(1, idx.unsqueeze(-1).expand(-1, -1, 3))  # (B,Q,3)
-        objectness = tokens_seq.new_zeros(B, G)                             # unused (no two-stage objectness)
+        objectness = emb_seq.new_zeros(B, G)                               # unused (no two-stage objectness)
         return content, anchors, objectness, idx
 
     def _build_denoise(self, tokens_seq, coords, dn_owner, *, n_groups=2, content_noise=0.3, anchor_jitter=0.15):
@@ -344,13 +355,29 @@ class InstanceHead(nn.Module):
         B, C, dz, dy, dx = tokens_grid.shape
         tokens_seq = tokens_grid.flatten(2).transpose(1, 2)                 # (B, G, token_dim), raster (z,y,x)
         coords = _coord_grid((dz, dy, dx), tokens_grid.device, tokens_grid.dtype)
+        # Embedding source for FPS/denoise/content + the cross-attn K/V: the surface-GATED mask features (design B,
+        # pooled to 1/8 + 1/4) or the raw frozen tokens + 1/4 decoder features (default).
+        if self.gated_kv:
+            if mask_features is None:
+                raise ValueError("gated_kv needs mask_features (the surface-gated pixel-decoder features).")
+            D = mask_features.shape[-1]
+            k8, k4 = max(1, D // dz), max(1, D // (dz * 2))
+            g8 = F.avg_pool3d(mask_features, kernel_size=k8, stride=k8)      # (B,mask_dim,16³)
+            g4 = F.avg_pool3d(mask_features, kernel_size=k4, stride=k4)      # (B,mask_dim,32³)
+            emb_seq = g8.flatten(2).transpose(1, 2)                         # (B,G,mask_dim)
+            content_proj = self.gated_content
+            feats = [self.kv_proj8(g8), self.kv_proj4(g4)]                   # multi-scale K/V from gated features
+        else:
+            emb_seq = tokens_seq
+            content_proj = self.selector.content
+            feats = [self.proj8(tokens_grid), self.proj4(feat_14)]          # multi-scale K/V (16³ tokens, 32³ feat_14)
         if self.learned_queries:                                            # option 1: fixed learned queries
             content = self.query_embed.to(tokens_seq.dtype).expand(B, -1, -1)
             anchors = self.query_ref.clamp(-1.0, 1.0).to(tokens_seq.dtype).expand(B, -1, -1)
             objectness = tokens_grid.new_zeros(B, dz * dy * dx)              # unused (no two-stage selection)
             idx = torch.full((B, self.selector.n_queries), -1, dtype=torch.long, device=tokens_grid.device)
         elif self.fps_queries:                                              # option 2 (§13.3): embedding-FPS init
-            content, anchors, objectness, idx = self._fps_select(tokens_seq, coords)
+            content, anchors, objectness, idx = self._fps_select(emb_seq, coords, content_proj)
         else:
             content, anchors, objectness, idx = self.selector(tokens_seq, coords)
         if self.add_null:                                                   # prepend the reserved null query (index 0)
@@ -359,7 +386,7 @@ class InstanceHead(nn.Module):
             idx = torch.cat([idx.new_full((B, 1), -1), idx], dim=1)         # null has no source token
 
         n_match = content.shape[1]                                          # matching (+ null) queries
-        dn = self._build_denoise(tokens_seq, coords, dn_owner) if (dn_owner is not None and self.training) else None
+        dn = self._build_denoise(emb_seq, coords, dn_owner) if (dn_owner is not None and self.training) else None
         attn_mask = None
         if dn is not None:                                                  # append the denoise group, isolate it
             dn_content, dn_anchors, dn_valid, dn_sheet = dn
@@ -370,12 +397,12 @@ class InstanceHead(nn.Module):
             attn_mask[:n_match, n_match:] = True                            # matching can't see denoise
             attn_mask[n_match:, :n_match] = True                            # denoise can't see matching
 
-        feats = [self.proj8(tokens_grid), self.proj4(feat_14)]              # multi-scale keys/values (16³, 32³)
         masked = self.cross_attn == "masked"
         if masked:
             if mask_features is None:
                 raise ValueError("cross_attn='masked' needs mask_features (the pixel decoder's full-res embeddings).")
-            mf_scales = self._pool_mask_features(mask_features, (dz, feat_14.shape[-1]))   # low-res keys for the mask
+            sides = [int(f.shape[-1]) for f in feats]                         # scale sides from the K/V maps (16³, 32³)
+            mf_scales = self._pool_mask_features(mask_features, sides)        # low-res keys for the mask
         q = content
         layers_out = []
         for layer in self.layers:

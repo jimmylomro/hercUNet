@@ -119,6 +119,8 @@ def run_training(
         deep_supervision=rec.deep_supervision, with_instance=True,
         add_null_query=rec.add_null_query, learned_queries=rec.learned_queries,
         fps_queries=rec.fps_queries, cross_attn=rec.cross_attn,
+        decoder=rec.decoder, neck=rec.neck, neck_layers=rec.neck_layers,
+        neck_heads=rec.neck_heads, neck_points=rec.neck_points, surface_gate=rec.surface_gate,
     )
 
     val_loader = None
@@ -165,7 +167,8 @@ _TRAIN_FLAGS = ("epochs", "freeze_warmup_epochs", "softmax_temp", "mask_loss_chu
                 "val_fold", "val_interval", "val_windows",
                 "batch_size", "base_lr", "encoder_lr_mult",
                 "weight_decay", "grad_clip", "warmup_steps", "lr_schedule", "augment",
-                "target_voxel_um", "attention_backend", "w_symskel", "w_malis", "denoise", "dn_weight")
+                "target_voxel_um", "attention_backend", "w_symskel", "w_malis", "denoise", "dn_weight",
+                "w_surface", "surface_only")
 
 
 def _run_from_args(args) -> None:

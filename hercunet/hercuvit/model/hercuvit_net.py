@@ -24,6 +24,7 @@ from .encoder import (  # noqa: F401 (re-export)
 )
 from .windowed import retrofit_windowed, DEFAULT_GLOBAL_BLOCKS, DEFAULT_WINDOW_SIZE
 from .pixel_decoder import PixelDecoder
+from .patch_decoder import PatchDecoder
 from .instance_head import InstanceHead
 
 #: Canonical pixel-decoder widths ``(1/8, 1/4, 1/2, 1/1)``. Only ``d8`` (the 1/8 width) is free — ``(d4,d2,d1)``
@@ -60,18 +61,41 @@ class HercuVitNet(nn.Module):
         learned_queries: bool = False,
         fps_queries: bool = False,
         cross_attn: str = "deformable",
+        decoder: str = "unet",
+        neck: str = "none",
+        neck_layers: int = 6,
+        neck_heads: int = 4,
+        neck_points: int = 4,
+        surface_gate: bool = True,
     ) -> None:
         super().__init__()
         self.backbone = backbone
         self.backbone.return_embed_skips = True
-        self.pixel_decoder = PixelDecoder(
-            token_dim=token_dim,
-            skip_channels=skip_channels,
-            decoder_channels=decoder_channels,
-            n_sem_classes=n_sem_classes,
-            mask_dim=mask_dim,
-            deep_supervision=deep_supervision,
-        )
+        self.decoder_kind = str(decoder)
+        if self.decoder_kind == "patchdecode":                              # design B: deformable neck + PatchDecode tail
+            self.pixel_decoder = PatchDecoder(
+                token_dim=token_dim,
+                s2_dim=int(skip_channels[2]),
+                mask_dim=mask_dim,
+                n_sem_classes=n_sem_classes,
+                neck=neck, neck_layers=neck_layers, neck_heads=neck_heads, neck_points=neck_points,
+                surface_gate=surface_gate,
+                deep_supervision=deep_supervision,
+            )
+        elif self.decoder_kind == "unet":
+            self.pixel_decoder = PixelDecoder(
+                token_dim=token_dim,
+                skip_channels=skip_channels,
+                decoder_channels=decoder_channels,
+                n_sem_classes=n_sem_classes,
+                mask_dim=mask_dim,
+                deep_supervision=deep_supervision,
+            )
+        else:
+            raise ValueError(f"decoder must be 'unet' or 'patchdecode', got {decoder!r}.")
+        # design B gates the mask features by σ(surface) and feeds those gated features to the instance head's K/V +
+        # FPS seeds (so the queries reason on surface-aware features, not raw frozen tokens).
+        self._gated_kv = (self.decoder_kind == "patchdecode" and bool(surface_gate))
         self.with_instance = bool(with_instance)
         if self.with_instance:
             self.instance_head = InstanceHead(
@@ -85,11 +109,14 @@ class HercuVitNet(nn.Module):
                 learned_queries=learned_queries,
                 fps_queries=fps_queries,
                 cross_attn=cross_attn,
+                gated_kv=self._gated_kv,
             )
         else:
             self.instance_head = None
 
-    def forward(self, x: torch.Tensor, dn_owner: torch.Tensor | None = None) -> dict:
+    def forward(self, x: torch.Tensor, dn_owner: torch.Tensor | None = None, run_instance: bool = True) -> dict:
+        """``run_instance=False`` skips the instance head entirely (surface-only training/validation) — the net then
+        computes just the pixel decoder + surface head."""
         feats = self.backbone.forward_features(x, view_kind="global")
         tokens_seq = feats["x_norm_patchtokens"]                     # (B, G, token_dim)
         skips = feats["embed_skips"]                                 # [s0@128³, s1@64³, s2@32³]
@@ -97,11 +124,17 @@ class HercuVitNet(nn.Module):
         side = round(G ** (1 / 3))
         tokens_grid = tokens_seq.transpose(1, 2).reshape(B, C, side, side, side)  # (B, C, 16,16,16)
 
-        dec = self.pixel_decoder(tokens_grid, skips)
-        out = {"sem_logits": dec["sem_logits"], "mask_features": dec["mask_features"], "instance": None}
-        if self.instance_head is not None:
-            out["instance"] = self.instance_head(tokens_grid, dec["feat_14"],
-                                                 mask_features=dec["mask_features"], dn_owner=dn_owner)
+        if self.decoder_kind == "patchdecode":
+            dec = self.pixel_decoder(tokens_grid, skips[2])          # the neck consumes the 1/4 stem skip (s2)
+            mf_inst = dec.get("gated_features", dec["mask_features"])  # instance head reasons on surface-gated features
+            feat_14 = None                                           # design B: no 1/4 decoder feat (gated-K/V instead)
+        else:
+            dec = self.pixel_decoder(tokens_grid, skips)
+            mf_inst = dec["mask_features"]
+            feat_14 = dec["feat_14"]
+        out = {"sem_logits": dec["sem_logits"], "mask_features": mf_inst, "instance": None}
+        if self.instance_head is not None and run_instance:
+            out["instance"] = self.instance_head(tokens_grid, feat_14, mask_features=mf_inst, dn_owner=dn_owner)
         return out
 
     # --- staged training helpers (the trainer drives the schedule; see docs/hercuvit.md §7) ---
@@ -193,6 +226,12 @@ def build_hercuvit(
     learned_queries: bool = False,
     fps_queries: bool = False,
     cross_attn: str = "deformable",
+    decoder: str = "unet",
+    neck: str = "none",
+    neck_layers: int = 6,
+    neck_heads: int = 4,
+    neck_points: int = 4,
+    surface_gate: bool = True,
     strict_load: bool = True,
 ) -> HercuVitNet:
     """Build **any** HercuViT variant from an encoder ``.pt`` — one config-driven path that DETECTS the kind:
@@ -271,6 +310,9 @@ def build_hercuvit(
         learned_queries=learned_queries,
         fps_queries=fps_queries,
         cross_attn=cross_attn,
+        decoder=decoder,
+        neck=neck, neck_layers=neck_layers, neck_heads=neck_heads, neck_points=neck_points,
+        surface_gate=surface_gate,
     )
     net = net.to(device)
     net._hercuvit_fresh_params = fresh      # params left for distillation (empty for small)

@@ -75,6 +75,17 @@ class HercuvitRecipe:
                                                     # (per-voxel ownership over queries, null=background — exclusive)
     add_null_query: bool = True                     # reserved null/no-sheet query (index 0) for the softmax ownership
 
+    # --- pixel decoder (design B, docs/dinovol_sheet_architecture.md §3) ---
+    decoder: str = "unet"                           # "unet" (lean additive-skip UNet) | "patchdecode" (deformable neck
+                                                    #   + author-style PatchDecode upsample + surface gate = design B)
+    neck: str = "none"                              # patchdecode only: "deformable" (6× MS-deformable-attn over
+                                                    #   {1/8,1/4}, part A) | "none" (author-exact: tokens → upsample)
+    neck_layers: int = 6                            # deformable-neck layers
+    neck_heads: int = 4                             # deformable-neck attention heads
+    neck_points: int = 4                            # deformable-neck sampling points per (head, scale)
+    surface_gate: bool = True                       # patchdecode: gate mask features by σ(surface) → the instance head
+                                                    #   reasons on surface-aware features (K/V + FPS seeds)
+
     # --- attention backend (plumbing; NOT a pillar change — raised via flag, docs §12) ---
     attention_backend: str = "auto"
 
@@ -102,6 +113,12 @@ class HercuvitRecipe:
     val_fold: int = 0                               # nnU-Net-consistent 5-fold split (KFold seed 12345): which fold
     val_interval: int = 5                           # validate every N epochs (0 = no validation)
     val_windows: int = 64                           # held-out windows per validation (cap for speed; 0 = all)
+
+    # --- surface (semantic) supervision. w_surface>0 wires the thin medial-surface BCE stack onto the pixel
+    #     decoder's surface head (author-style direct supervision). surface_only trains ONLY the surface head
+    #     (instance head skipped) — the design-B staging: replicate the author's surface predictor first. ---
+    w_surface: float = 0.0       # weight on the surface/semantic loss (0 = off; the instance-only legacy default)
+    surface_only: bool = False   # train ONLY the surface head (skip the instance head forward + loss)
 
     # --- semantic loss (thin medial-surface stack, ported from HercUNet — see train/surface_loss.py) ---
     sem_fg_weight: float = 5.0   # foreground CE weight — medial surfaces are ~0.1-0.3% of voxels; unweighted CE
@@ -185,6 +202,7 @@ _TRAIN_FIELDS = frozenset({
     "base_lr", "encoder_lr_mult", "weight_decay", "grad_clip", "warmup_steps", "lr_schedule",
     "epochs", "freeze_warmup_epochs", "softmax_temp", "mask_loss_chunks",
     "val_fold", "val_interval", "val_windows",
+    "w_surface", "surface_only",
     "sem_fg_weight", "w_sem_ce", "w_sem_tversky", "w_sem_skel", "w_sem_sep",
     "tversky_alpha", "tversky_beta", "tversky_gamma", "skel_iters", "sep_radius", "deep_sup_weights",
     "w_symskel", "w_malis", "malis_crop", "malis_offsets",

@@ -95,6 +95,12 @@ def build_from_cfg(
     learned_queries: bool = False,
     fps_queries: bool = False,
     cross_attn: str = "deformable",
+    decoder: str = "unet",
+    neck: str = "none",
+    neck_layers: int = 6,
+    neck_heads: int = 4,
+    neck_points: int = 4,
+    surface_gate: bool = True,
 ) -> HercuVitNet:
     """Rebuild the HercuViT architecture from a stored Dinovol ``model_cfg`` (NO Dinovol weights loaded).
 
@@ -136,6 +142,9 @@ def build_from_cfg(
         learned_queries=learned_queries,
         fps_queries=fps_queries,
         cross_attn=cross_attn,
+        decoder=decoder,
+        neck=neck, neck_layers=neck_layers, neck_heads=neck_heads, neck_points=neck_points,
+        surface_gate=surface_gate,
     ).to(device)
     apply_attention_backend(net, attention_backend)
     return net

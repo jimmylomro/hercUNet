@@ -84,7 +84,7 @@ class HercuvitTrainer:
     # ---- one epoch --------------------------------------------------------------------------------
     def _run_epoch(self, loader, epoch: int) -> None:
         self.net.train()
-        acc = {k: 0.0 for k in ("loss", "class", "bce", "dice", "obj", "dn", "symskel", "malis")}
+        acc = {k: 0.0 for k in ("loss", "class", "bce", "dice", "obj", "dn", "symskel", "malis", "surf")}
         n = 0
         amp_dtype = torch.bfloat16
         t0 = time.time()
@@ -97,28 +97,36 @@ class HercuvitTrainer:
 
             lr = self._apply_lr()
             self.optim.zero_grad(set_to_none=True)
-            dn_owner = owner_thin if self.recipe.denoise else None    # mask-denoising query group (§13.2), train-only
+            surface_only = bool(self.recipe.surface_only)             # design-B stage 1: train ONLY the surface head
+            run_instance = not surface_only
+            dn_owner = owner_thin if (self.recipe.denoise and run_instance) else None  # denoise group (§13.2), train-only
             with torch.autocast(device_type=self.device.type, dtype=amp_dtype):
-                out = self.net(ct, dn_owner=dn_owner)
-                inst = out["instance"]
-                # DEFAULT: PLAIN Mask2Former on THIN labels — Hungarian + per-query sigmoid mask BCE+Dice (+token
-                # objectness) against each sheet's THIN medial surface (owner & sem==1), ignore-masked. Each matched
-                # mask IS a thin sheet and its query index IS the membership; the readout max_q[P(sheet_q)·σ(mask_q)]
-                # is thin for free. On the overfit windows this matched the full old-HercUNet machinery, so it's the
-                # baseline. SymSkel (per-query thinness) and AffMALIS (separation) are OPTIONAL add-ons — enabled by
-                # recipe w_symskel / w_malis > 0 — for A/B at corpus scale, where near-identical compressed sheets
-                # actually stress separation. (The intermediate node/edge ownership head is gone.)
-                it = L.instance_loss(inst, out["mask_features"], owner_thin, has_id, self.recipe,
-                                     ignore=(sem == 2), seed=self.global_step)
-                loss = it["inst"]
-                skt = mt = None
-                if self.recipe.w_symskel > 0 and inst is not None:
-                    sk, skt = L.m2f_symskel_mask_loss(inst, out["mask_features"], sem, owner, has_id, self.recipe,
-                                                      seed=self.global_step, use_softmax=False)
-                    loss = loss + self.recipe.w_symskel * sk
-                if self.recipe.w_malis > 0 and inst is not None:
-                    ml, mt = L.affinity_malis_loss(inst, out["mask_features"], owner, has_id, self.recipe)
-                    loss = loss + self.recipe.w_malis * ml
+                out = self.net(ct, dn_owner=dn_owner, run_instance=run_instance)
+                # SURFACE head (author-style, direct): the thin medial-surface stack (fg-weighted CE + Focal-Tversky +
+                # clDice skel-recall + separation) on owner_thin's medial (sem==1), deep-supervised. w_surface>0 or
+                # surface_only wires it (otherwise the surface head is unsupervised, the legacy instance-only default).
+                st = None
+                loss = None
+                if self.recipe.w_surface > 0 or surface_only:
+                    st = L.semantic_loss(out["sem_logits"], sem, self.recipe)
+                    w_surf = self.recipe.w_surface if self.recipe.w_surface > 0 else 1.0
+                    loss = w_surf * st["sem"]
+                it = skt = mt = None
+                if run_instance:
+                    inst = out["instance"]
+                    # PLAIN Mask2Former on THIN labels — Hungarian + per-query mask BCE+Dice (+token objectness) against
+                    # each sheet's THIN medial surface (owner & sem==1), ignore-masked. SymSkel / AffMALIS are optional
+                    # add-ons (w_symskel / w_malis > 0). In design B the readout uses the surface-GATED mask features.
+                    it = L.instance_loss(inst, out["mask_features"], owner_thin, has_id, self.recipe,
+                                         ignore=(sem == 2), seed=self.global_step)
+                    loss = it["inst"] if loss is None else loss + it["inst"]
+                    if self.recipe.w_symskel > 0 and inst is not None:
+                        sk, skt = L.m2f_symskel_mask_loss(inst, out["mask_features"], sem, owner, has_id, self.recipe,
+                                                          seed=self.global_step, use_softmax=False)
+                        loss = loss + self.recipe.w_symskel * sk
+                    if self.recipe.w_malis > 0 and inst is not None:
+                        ml, mt = L.affinity_malis_loss(inst, out["mask_features"], owner, has_id, self.recipe)
+                        loss = loss + self.recipe.w_malis * ml
             loss_f = loss.float()
             loss_f.backward()
             if self.recipe.grad_clip:
@@ -128,9 +136,12 @@ class HercuvitTrainer:
 
             n += 1
             acc["loss"] += float(loss_f.detach())
-            acc["class"] += float(it["class"]); acc["bce"] += float(it["mask_bce"])
-            acc["dice"] += float(it["mask_dice"]); acc["obj"] += float(it["obj"])
-            acc["dn"] += float(it.get("dn", 0.0))
+            if st is not None:
+                acc["surf"] += float(st["sem"])
+            if it is not None:
+                acc["class"] += float(it["class"]); acc["bce"] += float(it["mask_bce"])
+                acc["dice"] += float(it["mask_dice"]); acc["obj"] += float(it["obj"])
+                acc["dn"] += float(it.get("dn", 0.0))
             if skt is not None:
                 acc["symskel"] += float(skt["tversky"])
             if mt is not None:
@@ -140,6 +151,7 @@ class HercuvitTrainer:
         dt = time.time() - t0
         print(
             f"{_C['tot']}[ep {epoch}] loss {m['loss']:.4f}{_C['r']} | "
+            f"{_C['sem']}surf {m['surf']:.3f}{_C['r']} | "
             f"{_C['inst']}inst [class {m['class']:.3f} bce {m['bce']:.3f} dice {m['dice']:.3f} obj {m['obj']:.3f} dn {m['dn']:.3f}]{_C['r']} | "
             f"{_C['sem']}symskel {m['symskel']:.3f} malis {m['malis']:.4f}{_C['r']} "
             f"{_C['dim']}| lr {self.optim.param_groups[0]['lr']:.2e} {'frozen' if self._frozen else 'ft'} {dt:.0f}s{_C['r']}",
@@ -174,7 +186,10 @@ class HercuvitTrainer:
             self._set_frozen(self._frozen_at(epoch))
             self._run_epoch(loader, epoch)
             self.save_checkpoint(epoch, "checkpoint_latest.pth")
-            if val_loader is not None and vi > 0 and ((epoch + 1) % vi == 0 or epoch == self.num_epochs - 1):
+            # coverage validation is instance-specific; in surface-only training the instance head is untrained, so
+            # skip it (the surface loss trend + checkpoint_latest are the signal). Re-enabled once instance is on.
+            if (val_loader is not None and vi > 0 and not bool(getattr(self.recipe, "surface_only", False))
+                    and ((epoch + 1) % vi == 0 or epoch == self.num_epochs - 1)):
                 score = self.validate(val_loader, epoch)
                 if score > best:                                        # best-by-coverage checkpoint
                     best = score
