@@ -76,6 +76,9 @@ def load_hercuvit(model=None, *, model_hf=None, ckpt="checkpoint_best.pth", devi
         n_sem_classes=recipe.n_sem_classes, mask_dim=recipe.mask_dim, n_queries=recipe.n_queries,
         query_dim=recipe.query_dim, instance_layers=recipe.instance_layers,
         deep_supervision=recipe.deep_supervision, with_instance=with_instance,
+        # the query-head architecture must match what was trained, or the state_dict mismatches (§13).
+        add_null_query=recipe.add_null_query, learned_queries=recipe.learned_queries,
+        fps_queries=recipe.fps_queries, cross_attn=recipe.cross_attn,
     )
     missing, unexpected = net.load_state_dict(ck["model"], strict=False)
     # When loading a full (instance) checkpoint into a semantic-only net, the instance_head.* keys are expected to

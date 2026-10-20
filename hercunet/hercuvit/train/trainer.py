@@ -193,7 +193,9 @@ class HercuvitTrainer:
             "recipe": asdict(self.recipe),
             "arch_override": getattr(self.net, "_hercuvit_arch", {}),   # encoder arch assembled from the recipe (for infer)
             "variant": self.recipe.variant,
-            "global_blocks": list(self.recipe.global_blocks),
+            # keep the `full` variant's "all" sentinel a string (list("all") would mangle it to ['a','l','l']).
+            "global_blocks": self.recipe.global_blocks if isinstance(self.recipe.global_blocks, str)
+                             else list(self.recipe.global_blocks),
             "window_size": list(self.recipe.window_size),
             "epoch": epoch,
             "global_step": self.global_step,

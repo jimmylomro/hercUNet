@@ -110,6 +110,10 @@ def build_from_cfg(
         if key in arch:
             cfg[key] = arch[key]
     gblocks = arch.get("global_blocks", global_blocks)
+    # the `full` variant's "all" sentinel (every block global, no windowing) — may arrive mangled to ('a','l','l')
+    # by a checkpoint that stored list("all"); expand either form to all blocks, matching build_hercuvit.
+    if gblocks == "all" or (not isinstance(gblocks, str) and "".join(map(str, gblocks)) == "all"):
+        gblocks = tuple(range(1, int(cfg["depth"]) + 1))
     win = arch.get("window_size", window_size)
     gattn = arch.get("global_attention", "full")      # tiny/nano train with spatial_reduction — reconstruct it
     srf = arch.get("sr_factor", (2, 2, 2))            # so inference runs the SAME attention pattern as training
