@@ -22,7 +22,8 @@ import torch
 
 from ..model.hercuvit_net import build_hercuvit
 from ..model.encoder import build_and_load_backbone, DINOVOL_HF_REPO, DINOVOL_CKPT_FILE
-from ..model.distill import DistillProjection, distill_step_losses
+from ..model.distill import (DistillProjection, HintProjections, distill_step_losses, hint_block_pairs,
+                             hint_token_loss)
 
 
 def _auto_attention_backend(module: torch.nn.Module) -> None:
@@ -449,6 +450,8 @@ def distill(
     token_weight: float = 1.0,
     gram_weight: float = 1.0,
     cls_weight: float = 0.5,
+    hint_weight: float = 0.5,
+    hint_fractions: tuple = (0.33, 0.66),
     gram_n_sample: int = 512,
     batch: int = 1,
     device: str = "cuda",
@@ -504,7 +507,24 @@ def distill(
         if k in student_arch:
             model_cfg[k] = student_arch[k]
 
-    params = [p for p in student.parameters() if p.requires_grad] + list(projection.parameters())
+    # intermediate-block (hint) distillation: depth-aligned teacher↔student blocks (single-scale ViT → by depth, not
+    # resolution; docs §13.7). Forward hooks capture each hinted block's output; a per-hint projection matches width.
+    hint_pairs = hint_block_pairs(len(teacher.blocks), len(student.blocks), hint_fractions) if hint_weight > 0 else []
+    hint_proj = HintProjections(len(hint_pairs), s_dim, t_dim).to(device)
+    _t_store, _s_store, _hooks = {}, {}, []
+
+    def _mk_hook(store, rank):
+        def _h(_m, _i, out):
+            store[rank] = out[0] if isinstance(out, tuple) else out
+        return _h
+    for rank, (ti, si) in enumerate(hint_pairs):
+        _hooks.append(teacher.blocks[ti].register_forward_hook(_mk_hook(_t_store, rank)))
+        _hooks.append(student.blocks[si].register_forward_hook(_mk_hook(_s_store, rank)))
+    if hint_pairs:
+        print(f"[distil] hint layers (teacher→student block): {hint_pairs}  w={hint_weight}", flush=True)
+
+    params = ([p for p in student.parameters() if p.requires_grad]
+              + list(projection.parameters()) + list(hint_proj.parameters()))
     opt = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
 
     def _lr_at(step):                                   # linear warmup → cosine decay to 0 (serious runs), or constant
@@ -558,6 +578,12 @@ def distill(
                 token_weight=token_weight, gram_weight=gram_weight, cls_weight=cls_weight,
                 gram_n_sample=gram_n_sample,
             )
+            if hint_pairs:                                              # intermediate-block token-cosine hints
+                l_hint = hint_token_loss([_s_store[r] for r in range(len(hint_pairs))],
+                                         [_t_store[r] for r in range(len(hint_pairs))],
+                                         hint_proj, int(teacher.num_prefix_tokens))
+                loss = loss + hint_weight * l_hint
+                terms["hint"] = float(l_hint.detach())
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(params, 1.0)
@@ -577,6 +603,8 @@ def distill(
             _save_distilled(out, student, projection, student_variant, student_net, ckpt, model_cfg, arch=student_arch)
             print(f"[distil] checkpoint @ step {step} (cos {cos:.4f}, best {best_cos:.4f}) -> {out}", flush=True)
 
+    for h in _hooks:                                            # drop the hint forward hooks
+        h.remove()
     if out:
         _save_distilled(out, student, projection, student_variant, student_net, ckpt, model_cfg, arch=student_arch)
     return {"variant": student_variant, "steps": steps, "final_terms": last, "best_cos": best_cos,
@@ -614,6 +642,8 @@ def run(args) -> dict:
         token_weight=float(g("token_weight", 1.0)),
         gram_weight=float(g("gram_weight", 1.0)),
         cls_weight=float(g("cls_weight", 0.5)),
+        hint_weight=float(g("hint_weight", 0.5)),
+        hint_fractions=(tuple(float(f) for f in str(g("hint_fractions", "0.33,0.66")).split(",") if f.strip())),
         batch=int(g("batch", 1)),
         device=g("device", "cuda"),
         smoke=smoke,

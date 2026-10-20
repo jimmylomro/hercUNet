@@ -95,3 +95,44 @@ def distill_step_losses(
 
     terms["total"] = float(loss.detach())
     return loss, terms
+
+
+# --------------------------------------------------------------------------- intermediate-block (hint) distillation
+class HintProjections(nn.Module):
+    """One student→teacher-width projection per hint layer (identity when widths match), for intermediate-feature
+    (FitNets-style) distillation. Separate from :class:`DistillProjection` so each depth gets its own map."""
+
+    def __init__(self, n_hints: int, student_dim: int, teacher_dim: int) -> None:
+        super().__init__()
+        self.projs = nn.ModuleList([
+            nn.Identity() if student_dim == teacher_dim else nn.Linear(student_dim, teacher_dim)
+            for _ in range(int(n_hints))
+        ])
+
+    def forward(self, i: int, x: torch.Tensor) -> torch.Tensor:
+        return self.projs[i](x)
+
+
+def hint_block_pairs(teacher_depth: int, student_depth: int, fractions) -> list:
+    """Depth-aligned hint layers: for each relative depth ``f`` in ``fractions`` (0,1), the ``(teacher_block,
+    student_block)`` at the SAME fractional depth. Our transformer is single-scale (every block at 1/8), so hints
+    align by DEPTH, not resolution — see ``docs/dinovol_sheet_architecture.md`` §13.7. ``f=1.0`` (the final layer)
+    is already supervised by the ``x_norm_patchtokens`` term, so pass intermediate fractions only (e.g. 0.33, 0.66).
+    De-duplicated, sorted by teacher depth."""
+    pairs = {}
+    for f in fractions:
+        ti = max(0, min(int(teacher_depth) - 1, round(float(f) * teacher_depth) - 1))
+        si = max(0, min(int(student_depth) - 1, round(float(f) * student_depth) - 1))
+        pairs[ti] = si                                                   # de-dup on teacher block
+    return sorted(pairs.items())
+
+
+def hint_token_loss(student_hints, teacher_hints, projections: HintProjections, num_prefix: int) -> torch.Tensor:
+    """Mean per-hint token-cosine between the student's and teacher's intermediate PATCH tokens (prefix stripped),
+    the student projected to the teacher width. ``*_hints`` are lists of ``(B, prefix+N, C)`` block outputs."""
+    if not teacher_hints:
+        return teacher_hints[0].new_zeros(()) if teacher_hints else torch.zeros(())
+    total = 0.0
+    for r, (s, t) in enumerate(zip(student_hints, teacher_hints)):
+        total = total + token_cosine_loss(projections(r, s[:, num_prefix:]), t[:, num_prefix:])
+    return total / len(teacher_hints)

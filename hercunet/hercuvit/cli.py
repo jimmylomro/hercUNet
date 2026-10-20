@@ -165,6 +165,10 @@ def _add_distill(p: argparse.ArgumentParser) -> None:
     p.add_argument("--gram-weight", dest="gram_weight", type=float, default=None, help="Gram distillation weight")
     p.add_argument("--token-weight", dest="token_weight", type=float, default=None, help="per-token distil weight")
     p.add_argument("--cls-weight", dest="cls_weight", type=float, default=None, help="cls/register distil weight")
+    p.add_argument("--hint-weight", dest="hint_weight", type=float, default=None,
+                   help="intermediate-block (depth-aligned) distillation weight (default 0.5; 0 = final-layer only)")
+    p.add_argument("--hint-fractions", dest="hint_fractions", default=None,
+                   help="comma-separated relative depths for hint layers (default 0.33,0.66)")
     p.add_argument("--distill-lr", dest="distill_lr", type=float, default=None, help="peak distillation LR")
     p.add_argument("--warmup", type=int, default=0, metavar="N", help="linear LR warmup steps (serious runs: ~5%)")
     p.add_argument("--lr-schedule", dest="lr_schedule", default="cosine", choices=("cosine", "constant"),
