@@ -160,10 +160,20 @@ class HercuvitTrainer:
 
     # ---- validation (per-sheet coverage, §13.5) ---------------------------------------------------
     def validate(self, val_loader, epoch: int) -> float:
-        """Per-sheet coverage on the held-out windows (the metric that matters, not mask-Dice). Logs a ``[val epN]``
-        line and returns the primary score (IoU>0.5 capture rate) used for best-checkpoint selection."""
-        from .metrics import coverage_metrics
+        """Validation on the held-out fold. In **surface-only** training the instance head is untrained, so score the
+        surface head (foreground Dice + tolerant surface Dice); otherwise score per-sheet instance coverage (§13.5).
+        Logs a ``[val epN]`` line and returns the primary score for best-checkpoint selection."""
         mw = int(self.recipe.val_windows) or 10 ** 9                     # 0 => all val windows
+        if bool(getattr(self.recipe, "surface_only", False)):
+            from .metrics import surface_metrics
+            m = surface_metrics(self.net, val_loader, self.device, max_windows=mw)
+            print(
+                f"{_C['sem']}[val ep {epoch}] surface: fg-Dice {m['fg_dice']:.3f} | tol±1 Dice {m['sdice_tol1']:.3f} "
+                f"(P {m['precision']:.3f} R {m['recall']:.3f}) | {m['nfg']}/{m['windows']} win w/ surface{_C['r']}",
+                flush=True,
+            )
+            return float(m["sdice_tol1"])
+        from .metrics import coverage_metrics
         m = coverage_metrics(self.net, val_loader, self.device, max_windows=mw,
                              mask_mode=getattr(self.recipe, "mask_mode", "sigmoid"))
         print(
@@ -186,16 +196,15 @@ class HercuvitTrainer:
             self._set_frozen(self._frozen_at(epoch))
             self._run_epoch(loader, epoch)
             self.save_checkpoint(epoch, "checkpoint_latest.pth")
-            # coverage validation is instance-specific; in surface-only training the instance head is untrained, so
-            # skip it (the surface loss trend + checkpoint_latest are the signal). Re-enabled once instance is on.
-            if (val_loader is not None and vi > 0 and not bool(getattr(self.recipe, "surface_only", False))
+            # validation: surface-head Dice in surface-only mode, instance coverage otherwise (validate() branches).
+            if (val_loader is not None and vi > 0
                     and ((epoch + 1) % vi == 0 or epoch == self.num_epochs - 1)):
                 score = self.validate(val_loader, epoch)
-                if score > best:                                        # best-by-coverage checkpoint
+                if score > best:                                        # best-by-validation-score checkpoint
                     best = score
+                    metric = "surface tol±1 Dice" if bool(getattr(self.recipe, "surface_only", False)) else "coverage IoU>0.5"
                     self.save_checkpoint(epoch, "checkpoint_best.pth")
-                    print(f"[hercuvit] new best coverage (IoU>0.5 {score*100:.0f}%) @ ep {epoch} → checkpoint_best.pth",
-                          flush=True)
+                    print(f"[hercuvit] new best {metric} ({score:.3f}) @ ep {epoch} → checkpoint_best.pth", flush=True)
         self.save_checkpoint(self.num_epochs - 1, "checkpoint_final.pth")
         print("[hercuvit] training done", flush=True)
 

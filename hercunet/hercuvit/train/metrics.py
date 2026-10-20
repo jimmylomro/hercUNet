@@ -8,8 +8,51 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from ..model.instance_head import mask_logits_from_embed
+
+
+@torch.no_grad()
+def surface_metrics(net, loader, device, *, max_windows: int = 64) -> dict:
+    """Surface-head validation (surface-only training): run ``net`` with the instance head OFF over up to
+    ``max_windows`` windows and score the predicted thin surface (``argmax`` of the full-res surface logits == 1)
+    against the GT thin medial (``sem==1``), ignoring ``sem==2``. Reports the author-style **foreground Dice**
+    (``2·TP/(P+T)``, per-window mean) plus a **1-voxel-tolerant surface Dice** (F1 of ±1-dilated precision/recall)
+    — fairer to 1-voxel medials where strict Dice is punished by sub-voxel misalignment. Returns
+    ``{windows, fg_dice, sdice_tol1, precision, recall, nfg}`` (windows with any GT surface)."""
+    was_training = net.training
+    net.eval()
+    dt = device.type if hasattr(device, "type") else "cuda"
+    dices, tol1s, precs, recs, n_win = [], [], [], [], 0
+    for b in loader:
+        ct = b["ct"].to(device); sem = b["sem"].to(device)
+        with torch.autocast(device_type=dt, dtype=torch.bfloat16):
+            out = net(ct, dn_owner=None, run_instance=False)               # surface forward only (no instance head)
+        pred = out["sem_logits"][0].float().argmax(1)                      # (B,D,H,W) argmax class
+        for i in range(pred.shape[0]):
+            valid = sem[i] != 2
+            p = (pred[i] == 1) & valid                                     # predicted surface
+            t = (sem[i] == 1) & valid                                      # GT thin medial
+            ps, ts, tp = p.sum().float(), t.sum().float(), (p & t).sum().float()
+            if float(ts) == 0:                                            # no GT surface here → Dice undefined
+                continue
+            dices.append(float(2 * tp / (ps + ts).clamp_min(1.0)))
+            dil_t = F.max_pool3d(t[None, None].float(), 3, 1, 1)[0, 0] > 0.5   # ±1-voxel tolerance band
+            dil_p = F.max_pool3d(p[None, None].float(), 3, 1, 1)[0, 0] > 0.5
+            prec = float((p & dil_t).sum().float() / ps.clamp_min(1.0))
+            rec = float((t & dil_p).sum().float() / ts.clamp_min(1.0))
+            precs.append(prec); recs.append(rec)
+            tol1s.append(2 * prec * rec / max(prec + rec, 1e-6))
+        n_win += 1
+        if n_win >= int(max_windows):
+            break
+    if was_training:
+        net.train()
+    if not dices:
+        return {"windows": n_win, "fg_dice": 0.0, "sdice_tol1": 0.0, "precision": 0.0, "recall": 0.0, "nfg": 0}
+    return {"windows": n_win, "fg_dice": float(np.mean(dices)), "sdice_tol1": float(np.mean(tol1s)),
+            "precision": float(np.mean(precs)), "recall": float(np.mean(recs)), "nfg": len(dices)}
 
 
 @torch.no_grad()
