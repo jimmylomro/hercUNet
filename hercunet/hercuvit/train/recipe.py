@@ -97,6 +97,8 @@ class HercuvitRecipe:
     epochs: int = 175                               # total training epochs
     freeze_warmup_epochs: int = 50                  # epochs with the transformer frozen (0 = fine-tune from step 0)
     softmax_temp: float = 1.0                        # temperature for the softmax-ownership readout (mask_mode=softmax)
+    mask_loss_chunks: int = 1                        # split the dense mask loss into N spatial chunks (checkpointed)
+                                                    # so the full (Q,128³) logits are never materialised (1 = dense)
     val_fold: int = 0                               # nnU-Net-consistent 5-fold split (KFold seed 12345): which fold
     val_interval: int = 5                           # validate every N epochs (0 = no validation)
     val_windows: int = 64                           # held-out windows per validation (cap for speed; 0 = all)
@@ -181,7 +183,8 @@ _TUPLE_FIELDS = {"global_blocks", "window_size", "deep_sup_weights", "sr_factor"
 _TRAIN_FIELDS = frozenset({
     "attention_backend", "target_voxel_um", "augment", "batch_size",
     "base_lr", "encoder_lr_mult", "weight_decay", "grad_clip", "warmup_steps", "lr_schedule",
-    "epochs", "freeze_warmup_epochs", "softmax_temp", "val_fold", "val_interval", "val_windows",
+    "epochs", "freeze_warmup_epochs", "softmax_temp", "mask_loss_chunks",
+    "val_fold", "val_interval", "val_windows",
     "sem_fg_weight", "w_sem_ce", "w_sem_tversky", "w_sem_skel", "w_sem_sep",
     "tversky_alpha", "tversky_beta", "tversky_gamma", "skel_iters", "sep_radius", "deep_sup_weights",
     "w_symskel", "w_malis", "malis_crop", "malis_offsets",
