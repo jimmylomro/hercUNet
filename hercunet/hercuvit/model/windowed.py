@@ -2,7 +2,11 @@
 
 The 10 Dinovol blocks are retrofitted so a subset keep **global** attention and the rest use
 **non-overlapping windows** of ``window_size`` tokens (default 8³ → 2×2×2 = 8 windows over the 16³ token grid).
-Interleaved global blocks propagate information across windows; there are **no shifted windows**.
+By default (``retrofit_windowed(shifted=True)``) alternating windowed blocks are **Swin-shifted** by ``window//2``
+(regular, shifted, regular, …), so the window boundary moves between consecutive blocks and there is no *fixed*
+seam; interleaved global blocks additionally propagate information across windows. Pass ``shifted=False`` for the
+plain ViTDet no-shift behaviour. (The windows are still non-overlapping *within* a block — shifted ≠ overlapping;
+NA-style overlapping sliding windows would be a different mechanism.)
 
 Design invariants (``docs/hercuvit.md`` §1, §6.1), all preserved here:
 
