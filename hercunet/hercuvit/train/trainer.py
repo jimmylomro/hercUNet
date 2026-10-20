@@ -137,7 +137,7 @@ class HercuvitTrainer:
             n += 1
             acc["loss"] += float(loss_f.detach())
             if st is not None:
-                acc["surf"] += float(st["sem"])
+                acc["surf"] += float(st["sem"].detach())
             if it is not None:
                 acc["class"] += float(it["class"]); acc["bce"] += float(it["mask_bce"])
                 acc["dice"] += float(it["mask_dice"]); acc["obj"] += float(it["obj"])
