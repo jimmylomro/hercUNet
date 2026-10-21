@@ -91,6 +91,9 @@ def _add_train_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--num-workers", dest="num_workers", type=int, default=4, help="DataLoader workers (default 4)")
     p.add_argument("--continue", dest="continue_", action="store_true",
                    help="resume from {out}/checkpoint_latest.pth instead of warm-starting fresh")
+    p.add_argument("--init-from", dest="init_from", default=None, metavar="CKPT",
+                   help="WARM-START: load model weights only (not optimiser/epoch) from this checkpoint before "
+                        "training — e.g. carry a surface-only run's decoder into an instance-active run")
     # pre-extraction (default ON): pull the gated training set (CT+labels) to a LOCAL cache via shard processes,
     # then train from local — the live S3 path deadlocks under worker concurrency + re-streams every epoch.
     p.add_argument("--train-cache", dest="train_cache", default=None, metavar="DIR",

@@ -80,6 +80,7 @@ def run_training(
     train_cache: str | None = None,
     prep_shards: int = 8,
     train_overrides: dict | None = None,
+    init_from: str | None = None,
 ) -> None:
     """Build HercuViT from an encoder checkpoint (``encoder_ckpt`` — a distilled encoder or a raw Dinovol teacher;
     ``build_hercuvit`` detects which + the windowed retrofit) and fit on the herculabels corpus. ``variant`` is the
@@ -122,6 +123,17 @@ def run_training(
         decoder=rec.decoder, neck=rec.neck, neck_layers=rec.neck_layers,
         neck_heads=rec.neck_heads, neck_points=rec.neck_points, surface_gate=rec.surface_gate,
     )
+
+    if init_from:                                                    # WARM-START: load model weights only (fresh
+        blob = torch.load(init_from, map_location="cpu", weights_only=False)   # schedule/optimiser), e.g. a
+        sd = blob["model"] if isinstance(blob, dict) and "model" in blob else blob   # surface-only run → M2F-active run.
+        missing, unexpected = net.load_state_dict(sd, strict=False)
+        missing = [m for m in missing if "num_batches_tracked" not in m]
+        unexpected = [u for u in unexpected if "num_batches_tracked" not in u]
+        print(f"[hercuvit] warm-started from {init_from}: loaded {len(sd)} tensors "
+              f"(missing {len(missing)}, unexpected {len(unexpected)})", flush=True)
+        if missing[:5] or unexpected[:5]:
+            print(f"  missing[:5]={missing[:5]}\n  unexpected[:5]={unexpected[:5]}", flush=True)
 
     val_loader = None
     if pre_extract:
@@ -182,7 +194,8 @@ def _run_from_args(args) -> None:
                  pre_extract=not getattr(args, "no_pre_extract", False),
                  train_cache=getattr(args, "train_cache", None),
                  prep_shards=int(getattr(args, "prep_shards", 8)),
-                 train_overrides=train_overrides)
+                 train_overrides=train_overrides,
+                 init_from=getattr(args, "init_from", None))
 
 
 def fit(args) -> None:
