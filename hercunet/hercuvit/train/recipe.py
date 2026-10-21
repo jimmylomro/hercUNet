@@ -107,6 +107,9 @@ class HercuvitRecipe:
     #     then fine-tuned at ``encoder_lr_mult`` × LR for the remainder. ---
     epochs: int = 175                               # total training epochs
     freeze_warmup_epochs: int = 50                  # epochs with the transformer frozen (0 = fine-tune from step 0)
+    freeze_decoder_epochs: int = 0                  # epochs with the warm-started decoder TRUNK + surface head frozen
+                                                    # (mask head + instance head still train) — instance-head warmup
+                                                    # against a fixed surface gate after a surface-only warm-start
     softmax_temp: float = 1.0                        # temperature for the softmax-ownership readout (mask_mode=softmax)
     mask_loss_chunks: int = 1                        # split the dense mask loss into N spatial chunks (checkpointed)
                                                     # so the full (Q,128³) logits are never materialised (1 = dense)
@@ -200,7 +203,7 @@ _TUPLE_FIELDS = {"global_blocks", "window_size", "deep_sup_weights", "sr_factor"
 _TRAIN_FIELDS = frozenset({
     "attention_backend", "target_voxel_um", "augment", "batch_size",
     "base_lr", "encoder_lr_mult", "weight_decay", "grad_clip", "warmup_steps", "lr_schedule",
-    "epochs", "freeze_warmup_epochs", "softmax_temp", "mask_loss_chunks",
+    "epochs", "freeze_warmup_epochs", "freeze_decoder_epochs", "softmax_temp", "mask_loss_chunks",
     "val_fold", "val_interval", "val_windows",
     "w_surface", "surface_only",
     "sem_fg_weight", "w_sem_ce", "w_sem_tversky", "w_sem_skel", "w_sem_sep",

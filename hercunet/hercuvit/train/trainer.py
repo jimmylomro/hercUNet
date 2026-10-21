@@ -39,6 +39,7 @@ class HercuvitTrainer:
         self.start_epoch = 0
         self.global_step = 0
         self._frozen = None
+        self._dec_frozen = None
         self.optim = None
 
     # ---- LP-FT freeze-warmup ----------------------------------------------------------------------
@@ -47,14 +48,26 @@ class HercuvitTrainer:
         on the encoder's features), then it is fine-tuned at ``encoder_lr_mult`` × LR."""
         return ep < int(self.recipe.freeze_warmup_epochs)
 
-    def _set_frozen(self, frozen: bool) -> None:
-        if frozen == self._frozen:
-            return
-        self.net.set_encoder_trainable(not frozen)              # freeze the WHOLE encoder (stem + transformer)
-        self._build_optimiser()                                 # the trainable set changed → rebuild the optimiser
-        self._frozen = frozen
-        print(f"[hercuvit] encoder {'FROZEN (head warmup)' if frozen else 'trainable @ encoder_lr_mult × LR'}",
-              flush=True)
+    def _decoder_frozen_at(self, ep: int) -> bool:
+        """True while the warm-started decoder TRUNK + surface head are frozen — the first ``freeze_decoder_epochs``
+        (instance-head warmup against a fixed surface gate); the mask head + instance head always train."""
+        return ep < int(getattr(self.recipe, "freeze_decoder_epochs", 0) or 0)
+
+    def _apply_freezing(self, ep: int) -> None:
+        """Apply the encoder (LP-FT) and decoder-trunk (instance-warmup) freeze states for epoch ``ep``; rebuild the
+        optimiser once if the trainable set changed."""
+        enc_f, dec_f = self._frozen_at(ep), self._decoder_frozen_at(ep)
+        changed = False
+        if enc_f != self._frozen:
+            self.net.set_encoder_trainable(not enc_f)           # freeze the WHOLE encoder (stem + transformer)
+            self._frozen = enc_f; changed = True
+        if dec_f != self._dec_frozen:
+            self.net.set_decoder_trunk_trainable(not dec_f)     # freeze neck + upsample tail + surface head
+            self._dec_frozen = dec_f; changed = True
+        if changed:
+            self._build_optimiser()                             # the trainable set changed → rebuild the optimiser
+            print(f"[hercuvit] encoder {'FROZEN' if enc_f else 'trainable@×LR'} | decoder-trunk "
+                  f"{'FROZEN (instance warmup)' if dec_f else 'trainable'}", flush=True)
 
     def _build_optimiser(self) -> None:
         groups = self.net.param_groups(base_lr=self.recipe.base_lr,
@@ -106,9 +119,11 @@ class HercuvitTrainer:
                 # SURFACE head (author-style, direct): the thin medial-surface stack (fg-weighted CE + Focal-Tversky +
                 # clDice skel-recall + separation) on owner_thin's medial (sem==1), deep-supervised. w_surface>0 or
                 # surface_only wires it (otherwise the surface head is unsupervised, the legacy instance-only default).
+                surface_in_play = (self.recipe.w_surface > 0 or surface_only)
+                do_surface = surface_in_play and not bool(self._dec_frozen)  # surface head frozen in warmup → no loss
                 st = None
                 loss = None
-                if self.recipe.w_surface > 0 or surface_only:
+                if do_surface:
                     st = L.semantic_loss(out["sem_logits"], sem, self.recipe)
                     w_surf = self.recipe.w_surface if self.recipe.w_surface > 0 else 1.0
                     loss = w_surf * st["sem"]
@@ -139,8 +154,10 @@ class HercuvitTrainer:
             acc["loss"] += float(loss_f.detach())
             if st is not None:
                 acc["surf"] += float(st["sem"].detach())
+            if surface_in_play:
                 # online surface pseudo-Dice (nnU-Net convention): accumulate TP/FP/FN over the epoch from the
                 # full-res surface argmax vs the thin medial (sem==1), ignoring sem==2 → one epoch micro-Dice.
+                # Logged even while the surface head is frozen (monitors that the warm-started head stays good).
                 with torch.no_grad():
                     pr = out["sem_logits"][0].detach().float().argmax(1)   # (B,D,H,W) predicted class
                     vmask = sem != 2
@@ -203,7 +220,7 @@ class HercuvitTrainer:
         vi = int(getattr(self.recipe, "val_interval", 0))
         best = -1.0
         for epoch in range(self.start_epoch, self.num_epochs):
-            self._set_frozen(self._frozen_at(epoch))
+            self._apply_freezing(epoch)
             self._run_epoch(loader, epoch)
             self.save_checkpoint(epoch, "checkpoint_latest.pth")
             # validation: surface-head Dice in surface-only mode, instance coverage otherwise (validate() branches).
@@ -244,7 +261,7 @@ class HercuvitTrainer:
         self.start_epoch = int(ck.get("epoch", -1)) + 1
         self.global_step = int(ck.get("global_step", 0))
         # rebuild the optimiser for the resumed freeze state, then load its state
-        self._set_frozen(self._frozen_at(self.start_epoch))
+        self._apply_freezing(self.start_epoch)
         if ck.get("optim") is not None:
             try:
                 self.optim.load_state_dict(ck["optim"])

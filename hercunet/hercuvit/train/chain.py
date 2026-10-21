@@ -175,7 +175,7 @@ def run_training(
 
 
 #: train fields settable on the CLI (the yaml is model-only); unset flags keep the recipe defaults.
-_TRAIN_FLAGS = ("epochs", "freeze_warmup_epochs", "softmax_temp", "mask_loss_chunks",
+_TRAIN_FLAGS = ("epochs", "freeze_warmup_epochs", "freeze_decoder_epochs", "softmax_temp", "mask_loss_chunks",
                 "val_fold", "val_interval", "val_windows",
                 "batch_size", "base_lr", "encoder_lr_mult",
                 "weight_decay", "grad_clip", "warmup_steps", "lr_schedule", "augment",

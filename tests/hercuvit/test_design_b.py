@@ -40,6 +40,31 @@ def test_patchdecoder_shapes_and_gate():
         assert (out["gated_features"].abs() <= out["mask_features"].abs() + 1e-6).all()
 
 
+def test_decoder_trunk_freeze_keeps_mask_head_trainable():
+    """set_decoder_trunk_trainable(False) freezes neck + upsample tail + surface head, but the mask head (untrained
+    after a surface-only warm-start) stays trainable, as does the instance head."""
+    import torch.nn as nn
+    from hercunet.hercuvit.model.hercuvit_net import HercuVitNet
+    from hercunet.hercuvit.model.patch_decoder import PatchDecoder
+
+    class _Stub(nn.Module):  # a tiny backbone stub so HercuVitNet builds without the real encoder
+        def __init__(self): super().__init__(); self.p = nn.Parameter(torch.zeros(1)); self.return_embed_skips = True
+    net = HercuVitNet(_Stub(), token_dim=288, decoder="patchdecode", neck="deformable", neck_layers=1,
+                      mask_dim=16, surface_gate=True, with_instance=True, fps_queries=True, cross_attn="masked",
+                      add_null_query=True)
+    net.set_decoder_trunk_trainable(False)
+    pd = net.pixel_decoder
+    assert isinstance(pd, PatchDecoder)
+    assert all(not p.requires_grad for p in pd.neck.parameters())          # neck frozen
+    assert all(not p.requires_grad for p in pd.surface_head.parameters())  # surface head frozen
+    assert all(not p.requires_grad for p in pd.up4.parameters())           # upsample tail frozen
+    assert all(p.requires_grad for p in pd.mask_head.parameters())         # mask head STILL trainable
+    assert all(p.requires_grad for p in net.instance_head.parameters())    # instance head trainable
+    net.set_decoder_trunk_trainable(True)                                   # unfreeze → all back on
+    assert all(p.requires_grad for p in pd.neck.parameters())
+    assert all(p.requires_grad for p in pd.surface_head.parameters())
+
+
 def test_gated_instance_head_disconnects_raw_tokens():
     """Design B: the instance head reasons on the gated features only — raw tokens carry no gradient to it."""
     side8 = 4

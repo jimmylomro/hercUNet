@@ -144,6 +144,24 @@ class HercuVitNet(nn.Module):
         for p in self.backbone.parameters():
             p.requires_grad = bool(flag)
 
+    def set_decoder_trunk_trainable(self, flag: bool) -> None:
+        """Freeze/unfreeze the WARM-STARTED decoder trunk — the deformable neck + PatchDecode upsample tail + the
+        **surface head** — while keeping the (fresh, untrained) **mask-feature head** trainable. For an instance-head
+        warmup after a surface-only warm-start: the instance head then learns against a FIXED good surface gate
+        (``mask_feat · σ(surface)``), and the big early instance gradients cannot drag the trunk or surface head off
+        their trained optimum, while the mask features (never trained in the surface-only run) still adapt. The
+        surface head and mask head are sibling 1×1 convs off the same tail features, so freezing one leaves the other
+        free. patchdecode decoder only (no-op for the UNet decoder)."""
+        pd = getattr(self, "pixel_decoder", None)
+        if not isinstance(pd, PatchDecoder):
+            return
+        keep = {id(p) for p in pd.mask_head.parameters()}        # mask head stays trainable (it is untrained)
+        for p in pd.parameters():
+            if id(p) not in keep:
+                p.requires_grad = bool(flag)
+        for p in pd.mask_head.parameters():
+            p.requires_grad = True
+
     def param_groups(self, *, base_lr: float, encoder_lr_mult: float = 0.1) -> list[dict]:
         """Two LR groups: the whole pretrained ENCODER (backbone: stem + transformer) at ``encoder_lr_mult`` ×
         ``base_lr``, and the fresh decoder + heads at ``base_lr``."""

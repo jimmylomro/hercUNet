@@ -46,6 +46,9 @@ def _add_train_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--epochs", type=int, default=None, metavar="N", help="total training epochs (default 175)")
     p.add_argument("--freeze-warmup-epochs", dest="freeze_warmup_epochs", type=int, default=None, metavar="N",
                    help="LP-FT: epochs with the transformer frozen before fine-tuning (default 50; 0 = from step 0)")
+    p.add_argument("--freeze-decoder-epochs", dest="freeze_decoder_epochs", type=int, default=None, metavar="N",
+                   help="instance-head warmup: epochs with the warm-started decoder trunk + surface head frozen "
+                        "(mask head + instance head still train), then unfreeze for joint fine-tuning (default 0)")
     p.add_argument("--softmax-temp", dest="softmax_temp", type=float, default=None, metavar="T",
                    help="temperature for the softmax-ownership readout (mask_mode=softmax; default 1.0)")
     p.add_argument("--mask-loss-chunks", dest="mask_loss_chunks", type=int, default=None, metavar="N",
