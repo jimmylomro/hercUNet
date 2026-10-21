@@ -100,6 +100,7 @@ class HercuvitTrainer:
         acc = {k: 0.0 for k in ("loss", "class", "bce", "dice", "obj", "dn", "symskel", "malis", "surf")}
         pdc = {k: torch.zeros((), device=self.device) for k in ("tp", "fp", "fn")}  # surface pseudo-Dice (nnU-Net-style)
         n = 0
+        nan_skips = 0
         amp_dtype = torch.bfloat16
         t0 = time.time()
         for bi, batch in enumerate(loader):
@@ -144,9 +145,17 @@ class HercuvitTrainer:
                         ml, mt = L.affinity_malis_loss(inst, out["mask_features"], owner, has_id, self.recipe)
                         loss = loss + self.recipe.w_malis * ml
             loss_f = loss.float()
+            if not torch.isfinite(loss_f):                             # NaN/Inf guard: drop the batch, never step on it
+                self.optim.zero_grad(set_to_none=True)
+                nan_skips += 1; self.global_step += 1
+                continue
             loss_f.backward()
-            if self.recipe.grad_clip:
-                torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.recipe.grad_clip)
+            gnorm = torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.recipe.grad_clip) \
+                if self.recipe.grad_clip else None
+            if gnorm is not None and not torch.isfinite(gnorm):        # non-finite grads → skip (don't poison weights)
+                self.optim.zero_grad(set_to_none=True)
+                nan_skips += 1; self.global_step += 1
+                continue
             self.optim.step()
             self.global_step += 1
 
@@ -181,7 +190,8 @@ class HercuvitTrainer:
             f"{_C['sem']}surf {m['surf']:.3f} pdice {pdice:.4f}{_C['r']} | "
             f"{_C['inst']}inst [class {m['class']:.3f} bce {m['bce']:.3f} dice {m['dice']:.3f} obj {m['obj']:.3f} dn {m['dn']:.3f}]{_C['r']} | "
             f"{_C['sem']}symskel {m['symskel']:.3f} malis {m['malis']:.4f}{_C['r']} "
-            f"{_C['dim']}| lr {self.optim.param_groups[0]['lr']:.2e} {'frozen' if self._frozen else 'ft'} {dt:.0f}s{_C['r']}",
+            f"{_C['dim']}| lr {self.optim.param_groups[0]['lr']:.2e} {'frozen' if self._frozen else 'ft'}"
+            f"{f' skip {nan_skips}' if nan_skips else ''} {dt:.0f}s{_C['r']}",
             flush=True,
         )
 

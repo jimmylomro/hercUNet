@@ -308,6 +308,8 @@ def _softmax_ownership_terms(mask_embed, mask_features_b, tgt, valid_b, matched_
     the loss value are IDENTICAL to the dense path (``chunks=1`` == dense). ``tgt`` (D,H,W long): -100 ignore, 0
     background (null), ``r`` = the matched query that owns a voxel. Returns ``(ce, dice)``."""
     import torch.utils.checkpoint as _ckpt
+    mask_embed = mask_embed.float()                                   # fp32 loss math — bf16 softmax/CE of fresh-head
+    mask_features_b = mask_features_b.float()                         # logits is numerically unstable (NaN pitfall)
     C = mask_features_b.shape[0]
     mf_flat = mask_features_b.reshape(C, -1)                           # (C,N)
     tgt_flat = tgt.reshape(-1)                                         # (N,)
@@ -354,8 +356,9 @@ def _instance_item_softmax(layer_out_b, feat_pts, owner_pts, ids, mask_features_
     background** (per the author's point-SupCon lesson: a flat background weight lets the >99% background swamp the
     thin targets). Plus soft-Dice on the matched channels. The dense masks are streamed in ``recipe.mask_loss_chunks``
     checkpointed spatial chunks (never the full ``Q×128³`` at once). Returns ``{class, mask_bce, mask_dice}``."""
-    class_logits = layer_out_b["class_logits"]                         # (Q,2)
-    mask_embed = layer_out_b["mask_embed"]                             # (Q,C)
+    class_logits = layer_out_b["class_logits"].float()                 # (Q,2) — fp32 loss math (bf16 is NaN-prone)
+    mask_embed = layer_out_b["mask_embed"].float()                     # (Q,C)
+    mask_features_b = mask_features_b.float()
     Q = class_logits.shape[0]
     device = class_logits.device
     T = float(getattr(recipe, "softmax_temp", 1.0)) or 1.0
@@ -405,8 +408,9 @@ def _denoise_item(lay_b, mask_features_b, owner_b, valid_b, dn_sheet_b, dn_valid
     if vq.numel() == 0:
         z = lay_b["mask_embed"].sum() * 0.0
         return {"class": lay_b["class_logits"].sum() * 0.0, "mask_bce": z, "mask_dice": z}
-    cls = lay_b["class_logits"][vq]                                    # (M,2) — target: all sheet
-    me = lay_b["mask_embed"][vq]                                       # (M,C)
+    cls = lay_b["class_logits"][vq].float()                           # (M,2) — target: all sheet; fp32 loss math
+    me = lay_b["mask_embed"][vq].float()                              # (M,C)
+    mask_features_b = mask_features_b.float()
     sheets = dn_sheet_b[vq].tolist()
     cw = torch.tensor([recipe.no_object_weight, 1.0], device=device)
     loss_class = F.cross_entropy(cls, torch.ones(len(vq), dtype=torch.long, device=device), weight=cw)
