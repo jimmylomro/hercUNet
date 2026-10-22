@@ -19,12 +19,46 @@ import os
 import time
 
 import torch
+import torch.nn.functional as F
 
 from . import losses as L
 
 
 # ANSI colours, matching the hercunet trainer's per-term log line.
 _C = dict(tot="\033[1;97m", sem="\033[36m", inst="\033[35m", dim="\033[2m", r="\033[0m")
+
+
+@torch.no_grad()
+def _fps_sheet_coverage(query_idx, owner_thin, has_id, *, side: int = 16):
+    k = max(1, owner_thin.shape[-1] // int(side))
+    """FPS seed coverage over GT sheets: fraction of GT sheets that have >=1 FPS seed landing in their 1/8 cell.
+
+    ``query_idx`` (B, 1+Q) are the FPS-selected 1/8 token indices (null = -1), ``owner_thin`` (B,D,H,W) the thin GT
+    sheet ids. For each seed, its 8³ cell's GT sheet ids count as "covered". Returns ``(covered, total)`` summed
+    over the batch (micro-average numerator/denominator), so the epoch coverage is Σcovered / Σsheets. Cheap:
+    ~64 small ``unique`` calls per item, detached — a diagnostic of whether the query init even reaches every sheet."""
+    B = owner_thin.shape[0]
+    covered_tot = 0
+    sheet_tot = 0
+    qi = query_idx.detach()
+    for b in range(B):
+        if not bool(has_id[b]):
+            continue
+        ob = owner_thin[b]
+        ids = torch.unique(ob); ids = ids[ids > 0]
+        if ids.numel() == 0:
+            continue
+        seeds = qi[b]; seeds = seeds[seeds >= 0].tolist()             # drop the null query (-1); -> python ints
+        covered: set[int] = set()
+        for s in seeds:
+            tz, ty, tx = s // (side * side), (s // side) % side, s % side
+            blk = ob[tz * k:(tz + 1) * k, ty * k:(ty + 1) * k, tx * k:(tx + 1) * k]
+            u = torch.unique(blk); u = u[u > 0]
+            if u.numel():
+                covered.update(int(x) for x in u.tolist())
+        covered_tot += len(set(int(x) for x in ids.tolist()) & covered)
+        sheet_tot += int(ids.numel())
+    return covered_tot, sheet_tot
 
 
 class HercuvitTrainer:
@@ -97,8 +131,12 @@ class HercuvitTrainer:
     # ---- one epoch --------------------------------------------------------------------------------
     def _run_epoch(self, loader, epoch: int) -> None:
         self.net.train()
-        acc = {k: 0.0 for k in ("loss", "class", "bce", "dice", "obj", "dn", "symskel", "malis", "surf")}
+        # accumulate on-GPU as tensors (one .item() per epoch at print time, NOT ~8 float() syncs/step — §profiling)
+        acc = {k: torch.zeros((), device=self.device) for k in ("loss", "class", "own", "dn", "symskel", "malis", "surf", "fire", "share")}
+        n_share = 0                                                    # count of steps that reported surf_share (subspace split)
         pdc = {k: torch.zeros((), device=self.device) for k in ("tp", "fp", "fn")}  # surface pseudo-Dice (nnU-Net-style)
+        own = {"correct": torch.zeros((), device=self.device), "fg": torch.zeros((), device=self.device)}
+        fpsc = {"cov": 0.0, "n": 0.0}                                  # FPS seed coverage (diagnostic; sampled every 25 steps)
         n = 0
         nan_skips = 0
         amp_dtype = torch.bfloat16
@@ -134,8 +172,16 @@ class HercuvitTrainer:
                     # PLAIN Mask2Former on THIN labels — Hungarian + per-query mask BCE+Dice (+token objectness) against
                     # each sheet's THIN medial surface (owner & sem==1), ignore-masked. SymSkel / AffMALIS are optional
                     # add-ons (w_symskel / w_malis > 0). In design B the readout uses the surface-GATED mask features.
-                    it = L.instance_loss(inst, out["mask_features"], owner_thin, has_id, self.recipe,
-                                         ignore=(sem == 2), seed=self.global_step)
+                    # design C: mask_features live at 1/4, so match the thin owner + ignore mask to that resolution
+                    mf = out["mask_features"]
+                    if mf.shape[-1] != owner_thin.shape[-1]:
+                        r = owner_thin.shape[-1] // mf.shape[-1]
+                        owner_i = F.max_pool3d(owner_thin.float()[:, None], r, r)[:, 0].long()
+                        ignore_i = F.max_pool3d((sem == 2).float()[:, None], r, r)[:, 0] > 0.5
+                    else:
+                        owner_i, ignore_i = owner_thin, (sem == 2)
+                    it = L.instance_loss(inst, mf, owner_i, has_id, self.recipe,
+                                         ignore=ignore_i, seed=self.global_step)
                     loss = it["inst"] if loss is None else loss + it["inst"]
                     if self.recipe.w_symskel > 0 and inst is not None:
                         sk, skt = L.m2f_symskel_mask_loss(inst, out["mask_features"], sem, owner, has_id, self.recipe,
@@ -160,9 +206,11 @@ class HercuvitTrainer:
             self.global_step += 1
 
             n += 1
-            acc["loss"] += float(loss_f.detach())
+            acc["loss"] += loss_f.detach()
+            if "surf_share" in out:
+                acc["share"] += out["surf_share"].detach(); n_share += 1
             if st is not None:
-                acc["surf"] += float(st["sem"].detach())
+                acc["surf"] += st["sem"].detach()
             if surface_in_play:
                 # online surface pseudo-Dice (nnU-Net convention): accumulate TP/FP/FN over the epoch from the
                 # full-res surface argmax vs the thin medial (sem==1), ignoring sem==2 → one epoch micro-Dice.
@@ -174,26 +222,42 @@ class HercuvitTrainer:
                     tm = (sem == 1) & vmask
                     pdc["tp"] += (pm & tm).sum(); pdc["fp"] += (pm & ~tm).sum(); pdc["fn"] += (~pm & tm).sum()
             if it is not None:
-                acc["class"] += float(it["class"]); acc["bce"] += float(it["mask_bce"])
-                acc["dice"] += float(it["mask_dice"]); acc["obj"] += float(it["obj"])
-                acc["dn"] += float(it.get("dn", 0.0))
+                acc["class"] += it["class"]; acc["own"] += it["mask_bce"]
+                acc["dn"] += it["dn"]; acc["fire"] += it["n_fire"]
+                own["correct"] += it["own_correct"]; own["fg"] += it["own_fg"]
+                inst_out = out.get("instance")
+                if inst_out is not None and inst_out.get("query_idx") is not None and (bi % 25 == 0):
+                    c, ntot = _fps_sheet_coverage(inst_out["query_idx"], owner_thin, has_id,
+                                                  side=int(inst_out.get("seed_grid", 16)))
+                    fpsc["cov"] += c; fpsc["n"] += ntot
             if skt is not None:
                 acc["symskel"] += float(skt["tversky"])
             if mt is not None:
                 acc["malis"] += float(mt["malis"])
 
-        m = {k: v / max(n, 1) for k, v in acc.items()}
+        m = {k: float(v) / max(n, 1) for k, v in acc.items()}         # tensor → float: ~8 syncs ONCE per epoch
+        share_val = float(acc["share"]) / max(n_share, 1)             # mean ‖f[0:surf_dim]‖² (subspace norm share)
         pdice = float(2 * pdc["tp"] / (2 * pdc["tp"] + pdc["fp"] + pdc["fn"]).clamp_min(1.0))  # epoch micro pseudo-Dice
+        own_acc = float(own["correct"]) / max(float(own["fg"]), 1.0)   # frac of sheet voxels owned by their matched query
+        fps_cov = fpsc["cov"] / max(fpsc["n"], 1.0)                    # frac of GT sheets reached by >=1 FPS seed
         dt = time.time() - t0
-        print(
-            f"{_C['tot']}[ep {epoch}] loss {m['loss']:.4f}{_C['r']} | "
-            f"{_C['sem']}surf {m['surf']:.3f} pdice {pdice:.4f}{_C['r']} | "
-            f"{_C['inst']}inst [class {m['class']:.3f} bce {m['bce']:.3f} dice {m['dice']:.3f} obj {m['obj']:.3f} dn {m['dn']:.3f}]{_C['r']} | "
-            f"{_C['sem']}symskel {m['symskel']:.3f} malis {m['malis']:.4f}{_C['r']} "
-            f"{_C['dim']}| lr {self.optim.param_groups[0]['lr']:.2e} {'frozen' if self._frozen else 'ft'}"
-            f"{f' skip {nan_skips}' if nan_skips else ''} {dt:.0f}s{_C['r']}",
-            flush=True,
-        )
+        run_instance = not bool(self.recipe.surface_only)
+        share_str = f" share {share_val:.3f}" if n_share > 0 else ""   # subspace norm share (≈0.19; →1 = collapse)
+        parts = [f"{_C['tot']}[ep {epoch}] loss {m['loss']:.4f}{_C['r']}",
+                 f"{_C['sem']}surf {m['surf']:.3f} pdice {pdice:.4f}{share_str}{_C['r']}"]
+        if run_instance:
+            # own-acc = ownership quality (↑ = masks carve the surface into their matched sheets); fire = queries used
+            parts.append(f"{_C['inst']}inst [class {m['class']:.3f} own-ce {m['own']:.3f} dn {m['dn']:.3f}] "
+                         f"own-acc {own_acc:.3f} fire {m['fire']:.1f}/{int(self.recipe.n_queries)} "
+                         f"fps-cov {fps_cov:.2f}{_C['r']}")
+            extra = []
+            if self.recipe.w_symskel > 0: extra.append(f"symskel {m['symskel']:.3f}")
+            if self.recipe.w_malis > 0: extra.append(f"malis {m['malis']:.4f}")
+            if extra:
+                parts.append(f"{_C['sem']}{' '.join(extra)}{_C['r']}")
+        tail = (f"{_C['dim']}lr {self.optim.param_groups[0]['lr']:.2e} {'frozen' if self._frozen else 'ft'}"
+                f"{f' skip {nan_skips}' if nan_skips else ''} {dt:.0f}s{_C['r']}")
+        print(" | ".join(parts) + " | " + tail, flush=True)
 
     # ---- validation (per-sheet coverage, §13.5) ---------------------------------------------------
     def validate(self, val_loader, epoch: int) -> float:

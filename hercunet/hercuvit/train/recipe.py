@@ -167,7 +167,7 @@ class HercuvitRecipe:
 
     # --- mask denoising (§13.2 / docs/dinovol_sheet_architecture.md): a train-only fixed-assignment query group
     #     that reconstructs each GT sheet, bypassing Hungarian. The standard DETR fix for query under-specialisation. ---
-    denoise: bool = False                           # add the denoise query group during training (default off)
+    denoise: bool = True                            # add the denoise query group during training (default ON; §6)
     dn_weight: float = 1.0                          # weight of the denoise-group loss in the total
 
     # NOTE: distillation (teacher, steps, lr, loss weights) is configured on the ``hercuvit distill`` CLI, NOT in

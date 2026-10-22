@@ -127,9 +127,17 @@ def run_training(
     if init_from:                                                    # WARM-START: load model weights only (fresh
         blob = torch.load(init_from, map_location="cpu", weights_only=False)   # schedule/optimiser), e.g. a
         sd = blob["model"] if isinstance(blob, dict) and "model" in blob else blob   # surface-only run → M2F-active run.
+        # SHAPE-FILTER: a warm-start may cross an architecture change (e.g. the design-B surface-concat widens the
+        # instance head mask_dim→n_sem+mask_dim). Keep only tensors whose shape matches the current model; the rest
+        # (re-shaped / fresh) train from init. strict=False ignores missing/unexpected but NOT size mismatches.
+        cur = net.state_dict()
+        skipped = [k for k, v in sd.items() if k in cur and tuple(cur[k].shape) != tuple(v.shape)]
+        sd = {k: v for k, v in sd.items() if k not in skipped}
         missing, unexpected = net.load_state_dict(sd, strict=False)
         missing = [m for m in missing if "num_batches_tracked" not in m]
         unexpected = [u for u in unexpected if "num_batches_tracked" not in u]
+        if skipped:
+            print(f"[hercuvit] warm-start shape-skipped {len(skipped)} tensors (arch change): {skipped[:6]}", flush=True)
         print(f"[hercuvit] warm-started from {init_from}: loaded {len(sd)} tensors "
               f"(missing {len(missing)}, unexpected {len(unexpected)})", flush=True)
         if missing[:5] or unexpected[:5]:
@@ -180,7 +188,7 @@ _TRAIN_FLAGS = ("epochs", "freeze_warmup_epochs", "freeze_decoder_epochs", "soft
                 "batch_size", "base_lr", "encoder_lr_mult",
                 "weight_decay", "grad_clip", "warmup_steps", "lr_schedule", "augment",
                 "target_voxel_um", "attention_backend", "w_symskel", "w_malis", "denoise", "dn_weight",
-                "w_surface", "surface_only")
+                "w_mask_bce", "w_mask_dice", "w_surface", "surface_only")
 
 
 def _run_from_args(args) -> None:

@@ -192,6 +192,7 @@ class InstanceHead(nn.Module):
         n_heads: int = 4,
         n_points: int = 8,
         mask_dim: int = 32,
+        feat_dim: int | None = None,
         add_null: bool = False,
         learned_queries: bool = False,
         fps_queries: bool = False,
@@ -199,6 +200,11 @@ class InstanceHead(nn.Module):
         gated_kv: bool = False,
     ) -> None:
         super().__init__()
+        # per-voxel feature width the head reads/writes: mask_dim, or (concat, design B) n_sem+mask_dim. The FIRST
+        # ``n_sem`` dims are the surface-prob concat (sheet/no-sheet DIRECTION); the rest are the mask-feat IDENTITY
+        # direction. FPS seeds on the identity dims only; the single null query keys on the surface dims.
+        self.feat_dim = int(feat_dim) if feat_dim is not None else int(mask_dim)
+        self.n_sem = self.feat_dim - int(mask_dim)
         self.add_null = bool(add_null)
         self.learned_queries = bool(learned_queries)
         self.fps_queries = bool(fps_queries)                   # option 2 (§13.3): embedding-FPS anchored query init
@@ -208,8 +214,9 @@ class InstanceHead(nn.Module):
         if self.learned_queries and self.fps_queries:
             raise ValueError("learned_queries and fps_queries are mutually exclusive query-init modes.")
         if self.add_null:
-            # reserved learned NULL / no-sheet query (index 0), HercUNet sheet-seg convention: excluded from the
-            # Hungarian match, used as the background (owner==0) CE target so off-sheet voxels drain to null.
+            # reserved learned NULL / no-sheet query (index 0), excluded from the Hungarian match and used as the
+            # background (owner==0) CE target. With the surface CONCAT it keys on the shared bg-direction (p_bg≈1 on
+            # every gap, heterogeneous encoder embeddings notwithstanding) — so ONE null query suffices (§3).
             self.null_query = nn.Parameter(torch.zeros(dim))
             self.null_anchor = nn.Parameter(torch.zeros(3))
         if self.learned_queries:
@@ -217,15 +224,15 @@ class InstanceHead(nn.Module):
             # (each query owns a sheet across steps) for stable Hungarian, instead of per-forward top-K selection.
             self.query_embed = nn.Parameter(torch.randn(int(n_queries), dim) * 0.02)
             self.query_ref = nn.Parameter(torch.rand(int(n_queries), 3) * 2 - 1)   # spread in [-1,1]
-        self.gated_kv = bool(gated_kv)                         # design B: K/V + FPS seeds from surface-GATED features
-        emb_dim = int(mask_dim) if self.gated_kv else int(token_dim)   # the FPS/denoise/content embedding source width
+        self.gated_kv = bool(gated_kv)                         # design B: K/V + FPS seeds from surface-CONCAT features
+        emb_dim = self.feat_dim if self.gated_kv else int(token_dim)   # the FPS/denoise/content embedding source width
         self.selector = QuerySelector(token_dim, dim, n_queries)
         if self.gated_kv:
-            # K/V + FPS seeds come from the surface-gated mask features (NOT raw frozen tokens — the bypass that made
+            # K/V + FPS seeds come from the surface-concat mask features (NOT raw frozen tokens — the bypass that made
             # queries lean on unadaptable frozen features; docs/dinovol_sheet_architecture.md §3 design B).
-            self.kv_proj8 = nn.Conv3d(int(mask_dim), dim, kernel_size=1)   # gated feats @1/8 -> query width
-            self.kv_proj4 = nn.Conv3d(int(mask_dim), dim, kernel_size=1)   # gated feats @1/4 -> query width
-            self.gated_content = nn.Linear(int(mask_dim), dim)            # FPS query content from gated embeddings
+            self.kv_proj8 = nn.Conv3d(self.feat_dim, dim, kernel_size=1)   # concat feats @1/8 -> query width
+            self.kv_proj4 = nn.Conv3d(self.feat_dim, dim, kernel_size=1)   # concat feats @1/4 -> query width
+            self.gated_content = nn.Linear(self.feat_dim, dim)            # FPS query content from concat embeddings
         else:
             self.proj8 = nn.Conv3d(token_dim, dim, kernel_size=1)   # 1/8 token grid -> query width
             self.proj4 = nn.Conv3d(feat_14_dim, dim, kernel_size=1)  # 1/4 decoder features -> query width
@@ -235,26 +242,37 @@ class InstanceHead(nn.Module):
              for _ in range(int(n_layers))]
         )
         self.class_head = nn.Linear(dim, 2)        # sheet vs no-object
-        self.mask_embed = nn.Linear(dim, int(mask_dim))
+        self.mask_embed = nn.Linear(dim, self.feat_dim)   # query → per-voxel feature space (concat width)
         self.token_dim = int(token_dim)
         self.dim = int(dim)
         self.n_heads = int(n_heads)
         self.mask_dim = int(mask_dim)
 
     @staticmethod
-    def _fps_indices(feat_n: torch.Tensor, k: int) -> torch.Tensor:
+    def _fps_indices(feat_n: torch.Tensor, k: int, valid: torch.Tensor | None = None) -> torch.Tensor:
         """Pure-torch farthest-point sampling (§13.4) on L2-normalised features ``feat_n`` (B,G,d) → ``idx`` (B,K)
         long. Greedy: seed = the highest-norm... here features are unit, so seed = token farthest from the batch-item
         mean (most distinctive); then repeatedly add the point maximising the min distance to the chosen set. Squared
         euclidean on unit vectors == 2−2·cos, so this hops between cosine clusters → ≈ one seed per sheet. NON-
-        differentiable (argmax over distances); run detached, like a top-K. In-graph on GPU (short serial loop)."""
+        differentiable (argmax over distances); run detached, like a top-K. In-graph on GPU (short serial loop).
+        ``valid`` (B,G bool), when given, restricts the candidate pool (seeds land on sheet tokens); if an item has
+        fewer than ``k`` valid tokens the pool falls back to all tokens so ``k`` queries are always returned."""
         B, G, _ = feat_n.shape
         k = min(int(k), G)
         dev = feat_n.device
         idx = torch.zeros(B, k, dtype=torch.long, device=dev)
+        if valid is not None:
+            # fall back to the full pool for any item with too few sheet tokens (keeps k queries well-defined)
+            valid = valid.clone()
+            valid[valid.sum(dim=1) < k] = True
+            neg = ~valid                                                    # (B,G) never-chosen mask
+        else:
+            neg = None
         # seed: farthest token from the per-item mean direction (deterministic, train/infer identical)
         mean = feat_n.mean(dim=1, keepdim=True)                              # (B,1,d)
         d0 = ((feat_n - mean) ** 2).sum(-1)                                  # (B,G)
+        if neg is not None:
+            d0 = d0.masked_fill(neg, float("-inf"))
         last = d0.argmax(dim=1)                                              # (B,)
         idx[:, 0] = last
         min_d = feat_n.new_full((B, G), float("inf"))
@@ -263,20 +281,25 @@ class InstanceHead(nn.Module):
             cur = feat_n[bar, last]                                         # (B,d) last chosen
             d = ((feat_n - cur.unsqueeze(1)) ** 2).sum(-1)                  # (B,G) sq-dist to last
             min_d = torch.minimum(min_d, d)
-            last = min_d.argmax(dim=1)                                      # farthest from the chosen set
+            sel = min_d.masked_fill(neg, float("-inf")) if neg is not None else min_d
+            last = sel.argmax(dim=1)                                        # farthest from the chosen set (within pool)
             idx[:, i] = last
         return idx
 
-    def _fps_select(self, emb_seq: torch.Tensor, coords: torch.Tensor, content_proj):
+    def _fps_select(self, emb_seq: torch.Tensor, coords: torch.Tensor, content_proj,
+                    select_feat: torch.Tensor | None = None, valid: torch.Tensor | None = None):
         """Embedding-FPS anchored query init (§13.3): pick ``n_queries`` cells by FPS in NORMALISED-embedding
         (cosine) space — one anchor per sheet cluster — then DIFFERENTIABLY gather each one's content (``content_proj``:
         embed → query width) + anchor (cell centre). ``emb_seq`` is the raw frozen tokens (default) or the pooled
-        surface-gated features (design B). GT-free: identical at train and inference. Returns
+        surface-concat features (design B); ``select_feat`` (default ``emb_seq``) is the subspace FPS runs on — the
+        mask-feat IDENTITY dims only, so seeds spread over INSTANCES not sheet-vs-bg — and ``valid`` restricts the
+        pool to sheet tokens. GT-free: identical at train and inference. Returns
         ``(content (B,Q,dim), anchors (B,Q,3), objectness (B,G) zeros, idx (B,Q))`` to match the selector."""
         B, G, _ = emb_seq.shape
+        sel = select_feat if select_feat is not None else emb_seq
         with torch.no_grad():                                               # selection is non-differentiable (detached)
-            feat_n = F.normalize(emb_seq.float(), dim=-1)                   # cosine ⇒ sq-euclidean on unit vectors
-            idx = self._fps_indices(feat_n, self.selector.n_queries)       # (B,Q)
+            feat_n = F.normalize(sel.float(), dim=-1)                       # cosine ⇒ sq-euclidean on unit vectors
+            idx = self._fps_indices(feat_n, self.selector.n_queries, valid=valid)   # (B,Q)
         gather = idx.unsqueeze(-1).expand(-1, -1, emb_seq.shape[-1])
         content = content_proj(torch.gather(emb_seq, 1, gather))            # (B,Q,dim) differentiable gather
         anchors = coords.unsqueeze(0).expand(B, -1, -1).gather(1, idx.unsqueeze(-1).expand(-1, -1, 3))  # (B,Q,3)
@@ -362,22 +385,31 @@ class InstanceHead(nn.Module):
                 raise ValueError("gated_kv needs mask_features (the surface-gated pixel-decoder features).")
             D = mask_features.shape[-1]
             k8, k4 = max(1, D // dz), max(1, D // (dz * 2))
-            g8 = F.avg_pool3d(mask_features, kernel_size=k8, stride=k8)      # (B,mask_dim,16³)
-            g4 = F.avg_pool3d(mask_features, kernel_size=k4, stride=k4)      # (B,mask_dim,32³)
-            emb_seq = g8.flatten(2).transpose(1, 2)                         # (B,G,mask_dim)
+            g8 = F.avg_pool3d(mask_features, kernel_size=k8, stride=k8)      # (B,feat_dim,16³)
+            g4 = F.avg_pool3d(mask_features, kernel_size=k4, stride=k4)      # (B,feat_dim,32³)
+            emb_seq = g8.flatten(2).transpose(1, 2)                         # (B,G,feat_dim) = [surface | mask-feat]
             content_proj = self.gated_content
-            feats = [self.kv_proj8(g8), self.kv_proj4(g4)]                   # multi-scale K/V from gated features
+            feats = [self.kv_proj8(g8), self.kv_proj4(g4)]                   # multi-scale K/V from concat features
+            # FPS seeds on the mask-feat IDENTITY dims only (drop the n_sem surface dims) over SHEET tokens, so one
+            # seed per instance rather than per sheet-vs-bg cluster (§3).
+            if self.n_sem > 0:
+                fps_sel = emb_seq[..., self.n_sem:]                          # (B,G,mask_dim) identity subspace
+                fps_valid = emb_seq[..., 1] > 0.3                            # p_sheet-high tokens (class 1 = surface)
+            else:
+                fps_sel = fps_valid = None
         else:
             emb_seq = tokens_seq
             content_proj = self.selector.content
             feats = [self.proj8(tokens_grid), self.proj4(feat_14)]          # multi-scale K/V (16³ tokens, 32³ feat_14)
+            fps_sel = fps_valid = None
         if self.learned_queries:                                            # option 1: fixed learned queries
             content = self.query_embed.to(tokens_seq.dtype).expand(B, -1, -1)
             anchors = self.query_ref.clamp(-1.0, 1.0).to(tokens_seq.dtype).expand(B, -1, -1)
             objectness = tokens_grid.new_zeros(B, dz * dy * dx)              # unused (no two-stage selection)
             idx = torch.full((B, self.selector.n_queries), -1, dtype=torch.long, device=tokens_grid.device)
         elif self.fps_queries:                                              # option 2 (§13.3): embedding-FPS init
-            content, anchors, objectness, idx = self._fps_select(emb_seq, coords, content_proj)
+            content, anchors, objectness, idx = self._fps_select(emb_seq, coords, content_proj,
+                                                                 select_feat=fps_sel, valid=fps_valid)
         else:
             content, anchors, objectness, idx = self.selector(tokens_seq, coords)
         if self.add_null:                                                   # prepend the reserved null query (index 0)
@@ -412,7 +444,7 @@ class InstanceHead(nn.Module):
             layers_out.append(
                 {"class_logits": self.class_head(q), "mask_embed": self.mask_embed(q), "anchors": anchors}
             )
-        out = {"objectness": objectness, "query_idx": idx, "layers": layers_out, "n_match": n_match}
+        out = {"objectness": objectness, "query_idx": idx, "layers": layers_out, "n_match": n_match, "seed_grid": dz}
         if dn is not None:
             out["dn_valid"], out["dn_sheet"] = dn_valid, dn_sheet
         return out

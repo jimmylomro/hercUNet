@@ -26,6 +26,8 @@ from .windowed import retrofit_windowed, DEFAULT_GLOBAL_BLOCKS, DEFAULT_WINDOW_S
 from .pixel_decoder import PixelDecoder
 from .patch_decoder import PatchDecoder
 from .instance_head import InstanceHead
+from .mask_pixel_encoder import MaskPixelEncoder
+from .mask_decoder import MaskDecoder
 
 #: Canonical pixel-decoder widths ``(1/8, 1/4, 1/2, 1/1)``. Only ``d8`` (the 1/8 width) is free — ``(d4,d2,d1)``
 #: are LOCKED to the stem skip channels ``(128,48,16)`` by the additive skips. A slim variant sets a smaller d8 in
@@ -91,13 +93,28 @@ class HercuVitNet(nn.Module):
                 mask_dim=mask_dim,
                 deep_supervision=deep_supervision,
             )
+        elif self.decoder_kind == "mask2former":                             # design C: 4-level deformable encoder
+            self.pixel_decoder = MaskPixelEncoder(                            # (docs/hercuvit-mask-architecture.md)
+                token_dim=token_dim, s2_dim=int(skip_channels[2]), dim=128,
+                n_layers=neck_layers, n_heads=neck_heads, n_points=neck_points,
+                n_sem_classes=n_sem_classes, mask_dim=mask_dim, deep_supervision=deep_supervision,
+            )
         else:
-            raise ValueError(f"decoder must be 'unet' or 'patchdecode', got {decoder!r}.")
-        # design B gates the mask features by σ(surface) and feeds those gated features to the instance head's K/V +
-        # FPS seeds (so the queries reason on surface-aware features, not raw frozen tokens).
+            raise ValueError(f"decoder must be 'unet', 'patchdecode' or 'mask2former', got {decoder!r}.")
+        # design B feeds the instance head SURFACE-CONCAT features (mask-feat ⊕ softmax(surface)): sheet-ness is a
+        # direction (null keys on it), identity is the mask-feat direction. The per-voxel feature width the head
+        # reads/writes is then n_sem+mask_dim (not mask_dim) — passed as feat_dim.
         self._gated_kv = (self.decoder_kind == "patchdecode" and bool(surface_gate))
         self.with_instance = bool(with_instance)
-        if self.with_instance:
+        feat_dim = int(getattr(self.pixel_decoder, "instance_feat_dim", mask_dim))  # concat width when design B
+        if not self.with_instance:
+            self.instance_head = None
+        elif self.decoder_kind == "mask2former":                             # design C: seeded masked-attn decoder
+            self.instance_head = MaskDecoder(
+                dim=128, mask_dim=mask_dim, n_heads=neck_heads, n_queries=n_queries,
+                n_layers=instance_layers, add_null=add_null_query,
+            )
+        else:
             self.instance_head = InstanceHead(
                 token_dim=token_dim,
                 feat_14_dim=int(decoder_channels[1]),
@@ -105,14 +122,13 @@ class HercuVitNet(nn.Module):
                 n_queries=n_queries,
                 n_layers=instance_layers,
                 mask_dim=mask_dim,
+                feat_dim=feat_dim,
                 add_null=add_null_query,
                 learned_queries=learned_queries,
                 fps_queries=fps_queries,
                 cross_attn=cross_attn,
                 gated_kv=self._gated_kv,
             )
-        else:
-            self.instance_head = None
 
     def forward(self, x: torch.Tensor, dn_owner: torch.Tensor | None = None, run_instance: bool = True) -> dict:
         """``run_instance=False`` skips the instance head entirely (surface-only training/validation) — the net then
@@ -124,10 +140,24 @@ class HercuVitNet(nn.Module):
         side = round(G ** (1 / 3))
         tokens_grid = tokens_seq.transpose(1, 2).reshape(B, C, side, side, side)  # (B, C, 16,16,16)
 
+        if self.decoder_kind == "mask2former":                       # design C: 4-level deformable encoder + seeded decoder
+            dec = self.pixel_decoder(tokens_grid, skips[2])          # 1/4 (s2) is a FULL encoder level
+            out = {"sem_logits": dec["sem_logits"], "mask_features": dec["mask_features"], "instance": None}
+            if "surf_share" in dec:
+                out["surf_share"] = dec["surf_share"]                 # ‖f[0:surf_dim]‖² monitor (≈0.19; →1 = collapse)
+            if self.instance_head is not None and run_instance:
+                surf4 = torch.softmax(dec["sem_logits"][-1].float(), dim=1)[:, 1]   # P(surface) @1/4 for seeding
+                dn4 = None
+                if dn_owner is not None:                             # thin GT owner → 1/4 (nearest via max-pool)
+                    r = dn_owner.shape[-1] // dec["mask_features"].shape[-1]
+                    dn4 = torch.nn.functional.max_pool3d(dn_owner.float()[:, None], r, r)[:, 0].long()
+                out["instance"] = self.instance_head(dec["memory"], dec["feat4"], dec["mask_features"], surf4, dn_owner=dn4)
+            return out
+
         if self.decoder_kind == "patchdecode":
             dec = self.pixel_decoder(tokens_grid, skips[2])          # the neck consumes the 1/4 stem skip (s2)
-            mf_inst = dec.get("gated_features", dec["mask_features"])  # instance head reasons on surface-gated features
-            feat_14 = None                                           # design B: no 1/4 decoder feat (gated-K/V instead)
+            mf_inst = dec.get("instance_features", dec["mask_features"])  # mask-feat ⊕ softmax(surface) (concat, §3)
+            feat_14 = None                                           # design B: no 1/4 decoder feat (concat-K/V instead)
         else:
             dec = self.pixel_decoder(tokens_grid, skips)
             mf_inst = dec["mask_features"]

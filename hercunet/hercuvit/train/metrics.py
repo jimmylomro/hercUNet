@@ -81,15 +81,24 @@ def coverage_metrics(net, loader, device, *, max_windows: int = 64, prob_thresh:
         lay = out["instance"]["layers"][-1]
         cls = torch.softmax(lay["class_logits"][0].float(), dim=-1)[:, 1]  # (Q,) P(sheet)
         mlog = mask_logits_from_embed(lay["mask_embed"][0:1].float(), out["mask_features"][0:1].float())[0]  # (Q,D,H,W)
+        # masks live at mask_features resolution (1/4 in design C) — bring the GT to the same grid (nearest/max-pool)
+        mside = out["mask_features"].shape[-1]
+        if mside != owner_thin.shape[-1]:
+            r = owner_thin.shape[-1] // mside
+            owner_g = F.max_pool3d(owner_thin.float()[:, None], r, r)[:, 0].long()
+            surf = F.max_pool3d((sem == 1).float()[:, None], r, r)[:, 0] > 0.5
+        else:
+            owner_g, surf = owner_thin, (sem == 1)
+        ids = [int(i) for i in torch.unique(owner_g[0]).tolist() if i > 0]
         if mask_mode == "softmax":                                     # exclusive ownership: argmax query owns the voxel
             owner_q = mlog.argmax(0)                                   # (D,H,W)
             masks = torch.stack([(owner_q == q) & (q != 0) for q in range(mlog.shape[0])], 0)  # null (0) = background
         else:
             masks = torch.sigmoid(mlog) > prob_thresh                  # (Q,D,H,W) independent
         fires.append(int((masks.flatten(1).any(1)).sum()) if mask_mode == "softmax" else int((cls > fire_thresh).sum()))
-        surf = (sem[0] == 1)
+        surf = surf[0]
         for sid in ids:
-            gt = (owner_thin[0] == sid) & surf
+            gt = (owner_g[0] == sid) & surf
             inter = (masks & gt).sum(dim=(1, 2, 3)).float()
             union = (masks | gt).sum(dim=(1, 2, 3)).float().clamp_min(1.0)
             bi = float((inter / union).max())

@@ -85,9 +85,14 @@ def _add_train_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--w-malis", dest="w_malis", type=float, default=None,
                    help="weight of the optional AffMALIS separation loss (default 0 = off)")
     p.add_argument("--denoise", dest="denoise", default=None, action=argparse.BooleanOptionalAction,
-                   help="mask denoising: a train-only fixed-assignment query group per GT sheet (default off)")
+                   help="mask denoising: a train-only fixed-assignment query group per GT sheet (default ON; "
+                        "--no-denoise to disable)")
     p.add_argument("--dn-weight", dest="dn_weight", type=float, default=None,
                    help="weight of the denoise-group loss (default 1.0)")
+    p.add_argument("--w-mask-bce", dest="w_mask_bce", type=float, default=None,
+                   help="weight of the mask/ownership CE term (default 5.0)")
+    p.add_argument("--w-mask-dice", dest="w_mask_dice", type=float, default=None,
+                   help="weight of the mask-Dice term (default 5.0; set 0 for ownership-CE-only, design B §3)")
     p.add_argument("--variant", default=None, choices=_VARIANTS,
                    help="FROM-SCRATCH training of this variant (no encoder) — mutually exclusive with --encoder; "
                         "NOT supported yet (raises). Normal training deduces the variant from --encoder.")
