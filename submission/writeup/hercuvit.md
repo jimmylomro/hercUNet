@@ -18,8 +18,11 @@ encoder's coarse 76.8 µm token scale and are inflated by it: they characterise 
 makes *available*, which a decoder must still sharpen to the voxel-level medial — not full-resolution accuracy.
 These
 measurements are the empirical foundation for HercuViT, a sheet instance-segmentation network that **freezes the
-encoder entirely** and trains only a lightweight decoder with a *decoupled* surface/identity head. We report the
-representation-geometry analysis here; the network and its training follow.
+encoder** and trains only a lightweight decoder with a *decoupled* surface/identity head. We report the
+representation-geometry analysis (§1–§4), the resulting architecture (§5), and a direct measurement that the trained
+decoder **sharpens sheet identity into a near-perfect, essentially 2-dimensional, voxel-resolution code** (identity
+ranking AUC 0.94 on its 1/1 mask features, §6) — closing the loop from "the primitive is latent in the frozen
+features" to "a small decoder reads it out at voxel scale".
 
 ---
 
@@ -231,6 +234,158 @@ easier/again-dominant signal starve the other.
 magnitude-based map. The identity decision the head must carry is only ~12-dimensional, and the on-sheet cloud
 ~46; a 32-channel head sits comfortably above the former and near the latter — enough to hold the identity axes
 the probe found, without the waste of reading out all 288.
+
+---
+
+## 5. The HercuViT architecture
+
+HercuViT reads the frozen representation with a lightweight decoder that answers the two questions — *is there a
+sheet here* and *which sheet* — with **separate heads** (§4), both computed from the pixel decoder's
+full-resolution output. The encoder is run once and frozen; everything below is the trainable part.
+
+```mermaid
+flowchart TD
+  X["Input 1×128³"] --> ENC
+
+  subgraph ENC["Encoder — FROZEN (full Dinovol, all-global)"]
+    direction TB
+    S0["Stem+S0 · 16@128³ (1/1)"] --> S1["S1 · 48@64³ (1/2)"]
+    S1 --> S2["S2 · 128@32³ (1/4)"]
+    S2 --> S3["S3 · 192@16³ (1/8)"]
+    S3 --> VIT["ViT 288@16³ (1/8)"]
+  end
+
+  subgraph PENC["UNETR-style pixel encoder (concat stem skips)"]
+    direction TB
+    BOT["bottleneck · 1/8 (16³)"] --> U4["deconv ↑ · 1/4 (32³)"]
+    U4 --> U2["deconv ↑ · 1/2 (64³)"]
+    U2 --> U1["deconv ↑ · 1/1 (128³)\n*AKA Mask Features*"]
+
+    VIT ==> BOT
+    S2  -. "stem skip 1/4 · CONCAT" .-> U4
+    S1  -. "stem skip 1/2 · CONCAT" .-> U2
+    S0  -. "stem skip 1/1 · CONCAT" .-> U1
+  end
+
+  subgraph FPYRBLOCK["Feature pyramid — ATTENTION MEMORY ONLY (≤1/8)"]
+    U1 --> D08[Bilinear downsample 1/8]
+    D08 --> D16[Bilinear downsample 1/16]
+    D16 --> D32[Bilinear downsample 1/32]
+    D08 & D16 & D32 --> FPYR[Feature pyramid]
+  end
+
+  subgraph DEC[M2F-style decoder and HercuViT additions]
+    direction TB
+
+    U1 --> SURF["Surface Head\n1×1 conv → 2-class surface @1/1<br/>(deep-sup OFF)"]
+    SURF .-> SURFL["thin-surface loss: fg-CE + Focal-Tversky + clDice + separation · ignore=2"]
+
+    subgraph MDEC[M2F decoder]
+        direction TB
+        FPYR[Feature Pyramid] --> MATTN[6x Masked Attn layers]
+        QRYS[Learned + Denoising queries] --> MATTN
+        MATTN --> QOUT[Query output q]
+        QOUT --> MEMBED["Mask-embed MLP → [Q, 32]"]
+        MEMBED --> OMASK["mask_logits [Q, 128³] @1/1 = PLAIN dot(mask_features, mask_embed)"]
+        U1 -. "mask_features = U1 @1/1 (dim 32)" .-> OMASK
+        OMASK -->|"sigmoid<0.5, maxpool→mem level, detached"| MATTN
+    end
+
+    OMASK --> MATCH{"Hungarian — ownership-CE cost ONLY (NO Dice → won't compete with surface head; NO class)"}
+    MATCH -->|matched only| LOWN["no-null softmax-over-Q ownership-CE on fg voxels + AffMALIS,\nuse the same thin labels but with owner"]
+
+    SURF -.->|inference| OBJIN["downsample surf→1/8 · obj_logit[Q] = P(sheet) over query mask"]
+    OBJIN -.-> FUSE["final score = sigmoid(obj_logit) × mask_score"]
+    OMASK -.-> MSC["mask_score = mean sigmoid inside binarized mask"]
+    MSC -.-> FUSE
+    FUSE -.-> OUT["Output: final score > thresh → masks + scores"]
+  end
+```
+
+**Encoder (frozen).** The full Dinovol encoder, all-global (no windowing), run once; its stem exposes the
+multi-resolution skips s0 (1/1), s1 (1/2), s2 (1/4) and the 1/8 token grid.
+
+**Pixel encoder (U1 = mask features).** A UNETR-style CNN decoder — built to the Dinovol author's Vesuvius surface
+decoder — upsamples the 1/8 tokens to full resolution: each stage is a transposed convolution, a **concatenation**
+of the matching stem skip, and two residual blocks (InstanceNorm3d / LeakyReLU); there is **no bottleneck conv**
+(the tokens feed the first transposed conv directly). Its 1/1 output **U1 (32 channels)** *is* the `mask_features` —
+a learned, voxel-resolution upsample of the coarse token field, over the stable frozen skips.
+
+**Decoupled surface head.** A single 1×1 conv off U1 produces the 2-class surface map; this *is* the objectness. It
+is trained by the thin-surface stack (foreground-weighted CE + Focal-Tversky + clDice skeleton-recall + separation,
+ignore = 2) and shares nothing with the mask space, so surface quality cannot be traded off against identity.
+
+**Mask decoder (Mask2Former-style).** Learned content/positional queries plus a train-only denoising group attend a
+≤1/8 **feature-pyramid memory** (trilinear downsamples of U1, kept at 32-d — no up-projection) over six
+masked-attention layers. Each query emits a 32-d mask embedding; the per-voxel mask is a **plain dot** of that
+embedding with U1 at 1/1 — **no null query, no class head, no temperature** (the decoupling removes the
+null-magnitude cheat those would otherwise fix). Matching is Hungarian on the **ownership-CE cost only** (no Dice,
+no class — so it never competes with the surface head); supervision is a no-null softmax-over-queries ownership
+cross-entropy on foreground voxels plus an AffMALIS separation term, both on the thin owner labels.
+
+**Inference.** For each query, the objectness is read from the surface head pooled over the query's mask, and the
+final score is `sigmoid(objectness) × mask_score`; queries above a threshold are emitted as sheet instances.
+
+### 5.1 Extending to ink and fibre masks
+
+HercuViT is single-class (sheet) by construction, but the same decoder extends to multi-class structures — ink,
+fibre — with four **additive** changes, none of which touch the frozen encoder or the surface/identity split:
+
+1. **Re-add a per-query class head** (`QOUT → Linear → cls_logits [Q, C]`).
+2. **Add a class term to training**: class cross-entropy on the matched queries, and a class-cost term in the
+   Hungarian matcher (so matching accounts for category as well as ownership).
+3. **Fuse class into inference**: multiply the final score by `softmax(cls)` and set each instance's label to
+   `argmax(cls)`.
+4. **Make the objectness multi-class**: extend the surface/objectness head to `{bg, sheet, ink, fibre}`, or give
+   each class its own objectness map — the "is this structure present here" gate then operates per class.
+
+This is cheap precisely because the primitives are expected to already be in the frozen features. Dinovol's pretext
+task produced a (discarded) dense head with **ink** and **region** outputs alongside the sheet signal, so the
+per-class evidence is plausibly latent in the same way sheet identity is (§3, §6); the decoder would read it out
+through the identical dot-product mechanism, with the class head only *naming* the structure a query has found.
+
+---
+
+## 6. The trained decoder sharpens sheet identity to a voxel-level, 2-D code
+
+§3 measured the sheet primitive in the frozen encoder at its coarse 1/8 token grid, and stated plainly that the
+grid inflates every figure and that a decoder must still sharpen the signal to the voxel medial. We can now test
+that directly: U1 (`mask_features`) is a learned upsample of those tokens, so we run the **same four measurements**
+on U1, at **per-voxel 9.6 µm resolution** (per-voxel labels, no 8³ pooling), on a trained HercuViT. The checkpoint
+is our strongest variant — the encoder lightly fine-tuned at 0.05× the base learning rate after a frozen warmup —
+at epoch 131; statistics are over 250 held-out windows (120 000 on-sheet and 120 000 background voxels).
+
+**Sheet identity is sharpened to near-perfect, and collapses to two dimensions.** On U1, two voxels on the *same*
+sheet have mean cosine similarity **0.96** and voxels on *different* sheets **0.70**; ranking same-sheet pairs above
+different-sheet pairs reaches an **AUC of 0.943** — well above the frozen encoder's token-scale 0.819 — and does so
+in a startlingly tight subspace: **90 % of the identity AUC is reached by just 2 of the 32 directions** (the encoder
+needed ~12 of 288), and the on-sheet cloud has a participation ratio of only ~1.3. The trained decoder has turned
+the coarse, distributed token-scale identity signal into a **near-linearly-trivial, essentially 2-dimensional,
+voxel-resolution identity code** — which is exactly what the dot-product mask head reads out (Figure 5, Figure 6).
+
+![**Figure 5.** Sheet identity in the trained decoder's U1 features (voxel scale). Same-sheet (red) vs
+different-sheet (blue) cosine similarity of U1 voxel pairs within a window: means 0.96 vs 0.70, ranking AUC 0.943 —
+far sharper than the frozen encoder's 0.819 at token scale.](../images/maskfeat-identity.jpg)
+
+![**Figure 6.** How many U1 directions carry the signal. Held-out AUC vs. number of retained principal directions,
+for sheet-vs-background (purple) and identity (red). Identity reaches 90 % of its ceiling by ~2 of 32
+directions.](../images/maskfeat-dims-fgbg.jpg)
+
+**U1 carries identity, not surface — the decoupling, confirmed in the features.** On U1 the sheet-vs-background
+*linear* separability is only AUC **0.709** / Dice 0.703 (and this is the honest **strict per-voxel** medial, not
+the forgiving "token contains surface" criterion that inflated §3's 0.757 — the two are not comparable). So U1 is
+*not* where surface lives; identity is (0.943 ≫ 0.709). That is the decoupling working at the representation level:
+the mask-feature space specialises in *which sheet*, while *is there a sheet* is carried by the separate surface
+head. Consistently, on U1 the on-sheet voxels now have **higher** norm than background (32.8 vs 24.1) — the trained
+features are no longer norm-neutral like the encoder's, but identity is still read purely by direction (the
+dot-product head), as the 0.943 cosine AUC shows.
+
+The headline, then: the frozen encoder makes the sheet primitives *available* at token scale (§3), and the trained
+lightweight decoder *sharpens identity into a near-perfect, 2-dimensional, voxel-level code* (§6) — the empirical
+end-to-end justification for the frozen-encoder, decoupled-head design. (This is a mild amendment to §4's "freeze
+entirely": a frozen encoder is a strong default, and a **small** low-LR unfreeze after a frozen warmup adds a little
+more — the stem and transformer were only ever trained through the 1/8 tokens, so a gentle fine-tune helps the
+decoder without the cost or instability of full end-to-end training.)
 
 ---
 
