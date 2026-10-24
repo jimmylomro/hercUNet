@@ -204,7 +204,7 @@ hercunet train fit --dataset 301 --pretrained-hf --num-gpus 4    # m7 warm-start
 `-tr` string discovery, so no trainer file is copied into the `nnunetv2` package. Flags:
 
 - `--trainer` — defaults to the alias `hercunet` (the AffinityMalis iterative-DAgger refiner); or
-  an explicit `module:ClassName` (e.g. `hercunet.training.trainers.affinity_malis_iter_dagger:nnUNetTrainer_AffinityMalis_IterDagger_500epochs`).
+  an explicit `module:ClassName` (e.g. `hercunet.hercunet.training.trainers.affinity_malis_iter_dagger:nnUNetTrainer_AffinityMalis_IterDagger_500epochs`).
 - `--dataset` (id or `DatasetNNN_…`), `--config`, `--fold`, `--plans-id`.
 - `--pretrained CKPT` — **warm-start** from a **local** checkpoint. This is the single warm-start path (no env
   var): the trainer's `load_pretrained` inspects the checkpoint and does the right thing per parameter —
@@ -232,10 +232,10 @@ Checkpoints land in the standard `$nnUNet_results/…/fold_N/` tree, so inferenc
 ### The training recipe (hyperparameters — a YAML file, no env vars)
 
 Every refiner hyperparameter lives in **one auditable, shipped file**,
-[`hercunet/recipes/hercunet.yml`](../hercunet/recipes/hercunet.yml) — installed with the package. It holds
+[`hercunet/hercunet/recipes/hercunet.yml`](../hercunet/recipes/hercunet.yml) — installed with the package. It holds
 **exactly** the values HercUNet v0 (run301) trained with, and it *is* what the trainer loads by default — so a
 bare `hercunet train fit` reproduces the recipe with **no environment variables** (the old `CK_*` env vars are
-gone). ([`hercunet/training/recipe.py`](../hercunet/training/recipe.py) is just the schema — types + docs.) At
+gone). ([`hercunet/hercunet/training/recipe.py`](../hercunet/training/recipe.py) is just the schema — types + docs.) At
 the start of every run the trainer logs the resolved recipe (`[recipe] run301: malis_w=1.0  …`) into the
 nnU-Net training log, so each run carries its own provenance.
 
@@ -253,7 +253,7 @@ rejected (a typo can't silently no-op). The YAML file is a keepable record of th
 recipe is logged like any other run:
 
 ```bash
-cp "$(python -c 'import hercunet.recipes,os;print(os.path.dirname(hercunet.recipes.__file__))')/hercunet.yml" my_recipe.yml
+cp "$(python -c 'import hercunet.hercunet.recipes,os;print(os.path.dirname(hercunet.hercunet.recipes.__file__))')/hercunet.yml" my_recipe.yml
 # edit my_recipe.yml (e.g. prev_fragprob: 0.3), then:
 hercunet train fit --dataset 301 --pretrained /path/m7/checkpoint_best.pth --recipe my_recipe.yml
 ```
@@ -266,17 +266,17 @@ Training **length** is separate from the recipe: `--epochs N` overrides it (the 
 
 Dataset assembly — our own in-process code (no nnU-Net internals), the **HercUNet** recipe (not the ablation):
 
-- `export-labels` (`hercunet/train/dataset.py`) — reads the `sample_s*.npz` bundles from `hercunet labels
+- `export-labels` (`hercunet/data/dataset.py`) — reads the `sample_s*.npz` bundles from `hercunet labels
   export`, decodes each window with `hercunet.labels.mesh.medial.build_gradphi_edt` (the library's CPU/EDT ∇φ
   decoder, returning the unbounded-Voronoi `owner_full` for the collapsed-sheet ignore), and emits `imagesTr`
   (CT + K candidate crests), `labelsTr` ({0,1,2}), `ownersTr` (band-limited instance GT for MALIS), and
   `dataset.json`. `--m7-corpus` then **copies** the pre-mined m7 cases in as `m7_*` (real writes, no symlinks;
   m7 cases carry no `ownersTr`, so MALIS stays silent on them).
-- `hercunet labels m7-mine` (`hercunet/labels/m7mine.py`) — scout (`--scroll`) or deterministic rebuild
+- `hercunet labels m7-mine` (`hercunet/hercunet/labels/m7mine.py`) — scout (`--scroll`) or deterministic rebuild
   (`--manifest`) of coherent m7 crest from the **published** m7 predictions + CT on the open-data bucket
   (`surf = m7 & (m7_normal_coherence > tau)`), written as a standalone **m7 corpus**. Lives in the **labels**
   stage — the mining is pseudo-label generation, done once, not during training prep.
-- `export-owner` (`hercunet/train/dataset.py`) — self-contained: crops each `ownersTr/<case>.tif` with the
+- `export-owner` (`hercunet/data/dataset.py`) — self-contained: crops each `ownersTr/<case>.tif` with the
   preprocessing's `bbox_used_for_cropping` and writes `<case>_owner.b2nd` at preprocessed resolution.
 
 ## How it works
@@ -289,9 +289,9 @@ is a faithful reduction of nnU-Net's own `run_training` (build plans/dataset.jso
 trainer, optional pretrained load, `run_training()`), minus the name lookup; DDP mirrors nnU-Net's
 `run_ddp`/`mp.spawn`.
 
-**Package layout.** Trainers live under `hercunet.training.trainers.*` (subclass `nnUNetTrainer`,
-import their siblings by `hercunet.*` paths); the launch driver is `hercunet/train/launch.py`; the
-preprocessing wrapper is `hercunet/train/preprocess.py`. The `--trainer` aliases resolve to those
+**Package layout.** Trainers live under `hercunet.hercunet.training.trainers.*` (subclass `nnUNetTrainer`,
+import their siblings by `hercunet.*` paths); the launch driver is `hercunet/hercunet/training/launch.py`; the
+preprocessing wrapper is `hercunet/hercunet/training/preprocess.py`. The `--trainer` aliases resolve to those
 modules.
 
 **Design invariants** (do not break): pin `nnunetv2==2.8.1`; `build_network_architecture` is a

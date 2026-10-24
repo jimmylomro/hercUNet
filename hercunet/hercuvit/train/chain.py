@@ -2,7 +2,7 @@
 
 One command end to end (§3/§7/§10). Reuses hercunet's HF plumbing: the corpus is pulled from the HF **dataset**
 (``jimmylomro/hercunet-corpus``) and the Dinovol encoder checkpoint from the HF **model** repo via
-``hercunet.train.launch.resolve_pretrained`` (same ``hf_hub_download`` cache hercunet uses).
+``hercunet.pretrained.resolve_pretrained`` (same ``hf_hub_download`` cache hercunet uses).
 """
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ def resolve_corpus(corpus=None, corpus_hf=None, *, allow_patterns=None) -> str:
 def resolve_encoder(encoder=None, encoder_hf=None, hf_file=None) -> str:
     """Return a LOCAL encoder checkpoint path — a distilled ``hercuvit distill`` output OR a raw Dinovol teacher
     (reuses hercunet's ``resolve_pretrained`` for the HF pull)."""
-    from ...train.launch import resolve_pretrained
+    from ...pretrained import resolve_pretrained
     from ..model.encoder import DINOVOL_CKPT_FILE
     if encoder:
         return encoder

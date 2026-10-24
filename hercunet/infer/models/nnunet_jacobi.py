@@ -123,7 +123,7 @@ class NnunetJacobiModel(InferenceModel):
         recomputed here from THIS batch's CT (``xb_base[:,0:1]``) and concatenated (8-ch) so TTA is correct."""
         import torch
         if self.affinity:
-            from ...training.affinity import ct_orientation
+            from ...losses.affinity import ct_orientation
             orient = ct_orientation(xb_base[:, 0:1], sigma_grad=1.0, sigma_tensor=3.0)
             xin = torch.cat([xb_base, orient.to(xb_base.dtype)], dim=1)
         else:

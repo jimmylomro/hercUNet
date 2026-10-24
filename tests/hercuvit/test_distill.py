@@ -10,7 +10,7 @@ from hercunet.hercuvit.train.recipe import VARIANTS
 
 
 def test_resolve_scrolls_all_and_comma():
-    from hercunet.labels.m7mine import SCROLLS
+    from hercunet.hercunet.labels.m7mine import SCROLLS
     assert distill._resolve_scrolls(None) == list(SCROLLS)        # default = all mined scrolls
     assert distill._resolve_scrolls("all") == list(SCROLLS)
     assert distill._resolve_scrolls("PHerc1447, PHerc0800") == ["PHerc1447", "PHerc0800"]

@@ -1,5 +1,12 @@
 # HercUNet
 
+> ## ⚠️ Repository reorganised (2026-10) — package layout changed
+> The nnU-Net machinery moved into `hercunet/hercunet/`, HercuViT stays in `hercunet/hercuvit/`, and shared code
+> (data layer, inference engine, losses, label geometry) now lives in its own top-level modules. **The `hercunet`
+> and `hercuvit` CLI commands are unchanged** — but **reinstall once** (`pip install -e .`) to refresh the console
+> scripts, and **Python import paths changed**. See **[docs/hercuvit-migration.md](docs/hercuvit-migration.md)**
+> for the full old→new mapping.
+
 📄 **[Read the paper (v0) → `paper_v0.pdf`](submission/writeup/paper_v0.pdf)** — the full write-up of both stages (HercuLabels + HercUNet), frozen as the first submission version.
 
 🧠 **Model:** [`jimmylomro/hercunet-v0`](https://huggingface.co/jimmylomro/hercunet-v0) on 🤗 Hugging Face (warm-start / re-train with `hercunet train fit --pretrained-hf jimmylomro/hercunet-v0`) · 🗂️ **Training corpus:** [`jimmylomro/hercunet-corpus`](https://huggingface.co/datasets/jimmylomro/hercunet-corpus) — the 4031 stage-1 pseudo-label bundles + m7 rehearsal manifest we trained on.
@@ -73,7 +80,7 @@ The **methodology** research write-ups: stage-1 (how the labels are derived) is
 |---|---|---|
 | **Data layer** — streaming multiscale OME-Zarr reads (chunk-cache + parallel prefetch + material tiling) | `hercunet.data` | ✅ implemented |
 | **Stage 1 — Pseudo-label generation** | `hercunet.labels` | ✅ implemented |
-| **Stage 2 — Training the refiner (HercUNet)** | `hercunet.train` / `hercunet.training` | ✅ implemented |
+| **Stage 2 — Training the refiner (HercUNet)** | `hercunet.hercunet.training` / `hercunet.hercunet.training` | ✅ implemented |
 | **Stage 3 — Iterative full-volume inference** | `hercunet.infer` | ✅ implemented |
 
 ### Stage 1 - HercuLabels

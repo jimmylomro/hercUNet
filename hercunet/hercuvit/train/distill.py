@@ -37,7 +37,7 @@ def resolve_dinovol_ckpt(spec: str) -> str:
     """A local path, or a Hugging Face repo id → cached ``teacher_305k.pt`` (reusing hercunet's HF helper)."""
     if spec and Path(spec).exists():
         return spec
-    from ...train.launch import resolve_pretrained  # reuse hercunet's hf_hub_download wrapper
+    from ...pretrained import resolve_pretrained  # reuse hercunet's hf_hub_download wrapper
     return resolve_pretrained(pretrained_hf=spec or DINOVOL_HF_REPO, hf_file=DINOVOL_CKPT_FILE)
 
 
@@ -98,7 +98,7 @@ def _scroll_crops(source, n, batch, device, *, seed=0, **kw):
 def _resolve_scrolls(spec):
     """``--scrolls`` → scroll-id list. ``None``/``all`` = the full mined-scroll set (``m7mine.SCROLLS``); else a
     comma list."""
-    from ...labels.m7mine import SCROLLS
+    from ...hercunet.labels.m7mine import SCROLLS
     if not spec or str(spec).strip().lower() == "all":
         return list(SCROLLS)
     return [s.strip() for s in str(spec).split(",") if s.strip()]
@@ -146,7 +146,7 @@ def _herculabels_crops(corpus_dir, n, batch, device, *, seed=0, readahead=6, wor
     import numpy as np
     from ...config import Config
     from ...data import get_backend, iter_windows
-    from ...train.dataset import _find_scroll, _window_req, _scroll_of
+    from ...data.dataset import _find_scroll, _window_req, _scroll_of
     from ..data.dataset import HercuvitDataset, resample_to_crop, TARGET_VOXEL_UM, CROP
     from ..data.normalize import dinovol_normalise
     if not corpus_dir:
@@ -297,7 +297,7 @@ def prep_shard(*, corpus_dir, manifest, mode, crops_out, nshards, shard, seed=0)
     if mode in ("herculabels", "labels") and corpus_dir:
         from ...config import Config
         from ...data import get_backend, iter_windows
-        from ...train.dataset import _find_scroll, _window_req, _scroll_of
+        from ...data.dataset import _find_scroll, _window_req, _scroll_of
         be = get_backend(Config.from_env())
         paths = sorted(glob.glob(os.path.join(corpus_dir, "sample_*.npz")))
         paths = [p for i, p in enumerate(paths) if i % nshards == shard]      # this shard's windows

@@ -53,7 +53,7 @@ train = [
     "connected-components-3d>=3.12",
     "numba>=0.59",                 # JITs the constrained-MALIS union-find (numpy<=2.4; auto-fallback)
     "blosc2>=2.5",                 # owner-id sidecar (<case>_owner.b2nd)
-    "pyyaml>=6",                   # loads the training recipe (hercunet/recipes/*.yml)
+    "pyyaml>=6",                   # loads the training recipe (hercunet/hercunet/recipes/*.yml)
 ]
 # stage-3 full-volume inference (hercunet infer). Much lighter than [train]: the network is built stock from
 # plans.json and loaded from network_weights, so only nnU-Net (the pinned 2.8.1) + the HF model pull are needed —
@@ -88,15 +88,15 @@ full = ["hercunet[viz,accel,train,infer,hercuvit]"]
 Repository = "https://github.com/jimmylomro/hercUNet"
 
 [project.scripts]
-hercunet = "hercunet.cli:main"
+hercunet = "hercunet.hercunet.cli:main"
 hercuvit = "hercunet.hercuvit.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["hercunet*"]
 
 [tool.setuptools.package-data]
-# ship the training recipe YAMLs (loaded by hercunet.training.recipe at run time)
-"hercunet.recipes" = ["*.yml"]
+# ship the training recipe YAMLs (loaded by hercunet.hercunet.training.recipe at run time)
+"hercunet.hercunet.recipes" = ["*.yml"]
 # ship the HercuViT recipe YAMLs (loaded by hercunet.hercuvit.train.recipe at run time)
 "hercunet.hercuvit.recipes" = ["*.yml"]
 

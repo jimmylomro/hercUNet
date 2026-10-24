@@ -185,7 +185,7 @@ training chain then points at it — `hercunet train export-labels --corpus … 
 (K, the prev/candidate channels) must match the value used by `train export-labels` / `train preprocess`.
 See [training.md](training.md) for the training chain.
 
-The mining lives in `hercunet/labels/m7mine.py` — the coherence recipe (`m7_coherence` / `label_from_window`,
+The mining lives in `hercunet/hercunet/labels/m7mine.py` — the coherence recipe (`m7_coherence` / `label_from_window`,
 via the library's own `structure_tensor_frame_torch`), the deterministic manifest rebuild, and the fresh
 scout (fully automatic — the coherence judge selects the regions; the manifest is written for
 reproducibility). Windows are read through the data layer (`ZarrSegment`) on a thread pool so the anon-S3

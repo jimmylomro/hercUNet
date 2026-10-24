@@ -35,7 +35,7 @@ def prep_train_shard(*, corpus_dir, cache_dir, nshards, shard, record="base", id
     from ...config import Config
     from ...data import get_backend, iter_windows
     from ...labels.io.bundle import load_sample_bundle
-    from ...train.dataset import _find_scroll, _scroll_of, _window_passes, _window_req, build_surface_owner
+    from ...data.dataset import _find_scroll, _scroll_of, _window_passes, _window_req, build_surface_owner
     from ..data.dataset import HercuvitDataset
     from ..data.normalize import dinovol_normalise
 

@@ -169,7 +169,7 @@ def _membership_affinity(p: torch.Tensor, offsets) -> torch.Tensor:
 
 def affinity_malis_loss(instance: dict, mask_features: torch.Tensor, owner: torch.Tensor, has_identity, recipe,
                         *, rng=None) -> tuple:
-    """AffMALIS on the M2F readout's MEMBERSHIP (option B) — REUSES ``hercunet.training.malis.ConstrainedMalisLoss``.
+    """AffMALIS on the M2F readout's MEMBERSHIP (option B) — REUSES ``hercunet.losses.malis.ConstrainedMalisLoss``.
 
     Per identity sample: crop a random ``recipe.malis_crop``³ cube, form the per-voxel membership
     ``p = softmax_Q(mask_embed · mask_features)`` on it, derive the soft same-owner affinity
@@ -178,7 +178,7 @@ def affinity_malis_loss(instance: dict, mask_features: torch.Tensor, owner: torc
     the affinity into the M2F ownership (mask_embed + mask_features). Gated by ``has_identity``. Returns
     ``(loss, terms)`` with ``terms = {malis, grow, sep, n_identity}``."""
     import numpy as np
-    from ...training.malis import ConstrainedMalisLoss
+    from ...losses.malis import ConstrainedMalisLoss
 
     rng = rng or np.random.default_rng()
     offsets = [tuple(o) for o in recipe.malis_offsets]

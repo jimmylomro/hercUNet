@@ -54,7 +54,7 @@ def test_dataset_getitem_offline(tmp_path, monkeypatch):
         return (mag, lab3, None, None, owner_full) if return_owner_full else (mag, lab3, None, None)
 
     monkeypatch.setattr(DS, "load_sample_bundle", fake_bundle)
-    # labels are now built by the SHARED hercunet.train.dataset.build_surface_owner, which imports build_gradphi_edt
+    # labels are now built by the SHARED hercunet.data.dataset.build_surface_owner, which imports build_gradphi_edt
     # locally from hercunet.labels.mesh.medial — patch it at the source so the real surf/owner construction runs.
     monkeypatch.setattr("hercunet.labels.mesh.medial.build_gradphi_edt", fake_edt)
 

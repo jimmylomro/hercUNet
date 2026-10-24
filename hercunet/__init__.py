@@ -8,7 +8,7 @@ The package is organised as a three-stage pipeline over a shared streaming data 
   * :mod:`hercunet.labels` — STAGE 1 (skeleton): pseudo-label generation.
   * :mod:`hercunet.refine` — STAGE 2 (skeleton): the iterative HercUNet refiner.
   * :mod:`hercunet.infer`  — STAGE 3 (skeleton): single-instance full-volume inference.
-  * :mod:`hercunet.viz`    — per-stage visual tools (skeleton).
+  * :mod:`hercunet.hercunet.viz`    — per-stage visual tools (skeleton).
 
 Everything downstream is written against the data layer's abstractions
 (:class:`~hercunet.data.SegmentSource`, :class:`~hercunet.data.SegmentVolume`), so a concrete

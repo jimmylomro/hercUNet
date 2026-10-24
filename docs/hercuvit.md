@@ -126,7 +126,7 @@ on this branch via `git checkout sheet-seg-decoder -- <path>`; additive, does no
 |---|---|---|
 | Stream CT from scroll/zarr | `hercunet/infer/nnunet_infer.py` | `open_source(source)` → vol with `.meta`, `read_window(level,z0,z1,y0,y1,x0,x1)` |
 | Prefetch/iterate windows | `hercunet/data/prefetch.py` | `iter_windows(vol, requests, readahead, workers)`, `VolumePrefetcher` |
-| HF model pull (encoder/ckpt) | `hercunet/train/launch.py` / `hercunet/infer/run.py` | `resolve_pretrained(pretrained, pretrained_hf, hf_file)` (hf_hub_download), `resolve_model(model, model_hf)` (snapshot_download) |
+| HF model pull (encoder/ckpt) | `hercunet/hercunet/training/launch.py` / `hercunet/infer/run.py` | `resolve_pretrained(pretrained, pretrained_hf, hf_file)` (hf_hub_download), `resolve_model(model, model_hf)` (snapshot_download) |
 | HF corpus pull | CLAUDE.md | `hf download jimmylomro/hercunet-corpus --repo-type dataset --local-dir <dir>` → `--corpus <dir>` |
 | Per-param warm-start | pattern from `affinity_malis_iter_dagger.py:load_pretrained` | match-by-name + shape, skip/fresh-init non-matching (here: load `backbone.*` into the vendored Eva) |
 | Infer tiling/halo/blend/claim-queue | `hercunet/infer/engine.py` (model-agnostic; was `jacobi_refine.py`) | `pass_blend_tiles`, `make_gaussian`, claim-queue; a model plugs in via `InferenceModel` |
@@ -392,7 +392,7 @@ to `model/decoder_common.py` (above). What remains on the build path:
   samples (instance loss gated by `has_identity` regardless). `hercuvit_collate` keeps per-item flags as lists. CT
   reader is injectable for offline tests.
 - `train/recipe.py` — `@dataclass(frozen=True) HercuvitRecipe` + shipped recipes (package data) +
-  `active()/set_active()/load()`, mirroring `hercunet/training/recipe.py`. **The shipped v2 recipe is
+  `active()/set_active()/load()`, mirroring `hercunet/hercunet/training/recipe.py`. **The shipped v2 recipe is
   `recipes/full_decoupled.yml`** (`decoder: decoupled`, `global_blocks: all`, `mask_dim: 32`, `neck_heads: 4`,
   `instance_layers: 6`, `learned_queries: true`, `add_null_query: false`, `deep_supervision: true`). Per the
   "recipe = the NET only" rule, training config (epochs, batch, LR, schedule, loss weights, AffMALIS, `decoder_lr_mult`)
@@ -422,7 +422,7 @@ to `model/decoder_common.py` (above). What remains on the build path:
   (`mask_mode="decoupled"`: argmax-q gated by the surface objectness). Checkpoint save (model + `model_cfg` + resolved
   `arch_override`/`variant` + optim) and resume.
 - `train/chain.py` — `resolve_corpus` (local / HF dataset `snapshot_download`), `resolve_encoder` (reuses
-  `hercunet.train.launch.resolve_pretrained`; bare `--encoder-hf` = the 288 teacher, or an explicit repo for the 480),
+  `hercunet.pretrained.resolve_pretrained`; bare `--encoder-hf` = the 288 teacher, or an explicit repo for the 480),
   the warm-start `_remap_vesuvius_decoder` + `--init-from` loader (above), `run_training` (build + dataset + loader +
   trainer), and the `fit` / `chain` CLI handlers.
 - `train/preextract.py` + `prep-shard` — the training set is pulled to a **local window cache** (`--train-cache`) by N
@@ -462,7 +462,7 @@ nnU-Net share one driver — no duplication (memory [[hercuvit-decoupled-cleanup
 - Tests: `tests/infer/test_engine_model.py` (registry, contract, `_tta_surface` correctness, base-input shapes).
   Remaining validation: a GPU byte-identical run of the migrated nnU-Net path vs the pre-migration engine on a small
   region (needs the nnU-Net model + a free GPU).
-- `cli.py` + `__main__.py` — `hercuvit` console script mirroring `hercunet/cli.py` (argparse subparsers +
+- `cli.py` + `__main__.py` — `hercuvit` console script mirroring `hercunet/hercunet/cli.py` (argparse subparsers +
   `set_defaults(func=…)` + lazy imports): `train chain`, `train fit [--continue]`, `train prep-shard`, `distill`,
   `distill-prep`, `infer single-instance`. The encoder source is `--encoder` / `--encoder-hf` / `--encoder-file`
   (there is no `--dinovol*` flag); the full training-config flag set (`--init-from`, `--decoder-lr-mult`,
@@ -478,7 +478,7 @@ nnU-Net share one driver — no duplication (memory [[hercuvit-decoupled-cleanup
   source-of-truth / `resolve_arch`; recipe YAML round-trip; distill fields; CLI parse of every subcommand; and a
   real-Dinovol build + 128³ forward (skipped unless the checkpoint is cached). 19 tests, all passing.
 
-- `hercunet/train/dataset.py` — `_build_surface_label` default changed to **`confidence_ignore=False`** to match the
+- `hercunet/data/dataset.py` — `_build_surface_label` default changed to **`confidence_ignore=False`** to match the
   HercUNet defaults exactly (the npz-confidence ignore and the render-geometric ignore are the two parts; both are now
   handled as HercUNet did). The loss ignore handling is nnU-Net-exact (see `surface_loss.py`).
 - `train/metrics.py` — adds the `mask_mode="decoupled"` coverage path used by validation (per-sheet coverage from the

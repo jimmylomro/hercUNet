@@ -155,7 +155,7 @@ class HercuvitRecipe:
     # Focal-Tversky + clDice skel-recall) on each matched sigmoid mask, for A/B against the plain-M2F baseline.
     w_symskel: float = 0.0                            # weight of the per-query SymSkel term (0 = off)
 
-    # --- OPTIONAL AffMALIS add-on (membership-derived affinity + constrained MALIS; hercunet.training.malis) ---
+    # --- OPTIONAL AffMALIS add-on (membership-derived affinity + constrained MALIS; hercunet.losses.malis) ---
     # Off by default (w_malis=0). aff_δ = Σ_q p(q|v)·p(q|v+δ) from the softmax membership, MALIS against owner — the
     # maximin attractive/repulsive passes for separation. See train/losses.py:affinity_malis_loss. Needs numba for a
     # usable speed (the njit maximin/union-find); crop bounds the O(E log E) cost (full-window is minutes/step).

@@ -9,12 +9,12 @@ reimplementation (that was the earlier mistake):
 
   * :func:`hercunet.labels.mesh.medial.build_gradphi_edt` → ``mag`` (|∇φ|), ``lab3`` (band-limited sheet id),
     ``owner_full`` (dense owner, 0 = ignore);
-  * :func:`hercunet.train.dataset._weight` → per-voxel confidence weight from the stored ``conf`` channels;
-  * :func:`hercunet.train.dataset._build_surface_label` → the 3-class surface ``{0 bg, 1 surface, 2 ignore}``
+  * :func:`hercunet.data.dataset._weight` → per-voxel confidence weight from the stored ``conf`` channels;
+  * :func:`hercunet.data.dataset._build_surface_label` → the 3-class surface ``{0 bg, 1 surface, 2 ignore}``
     (surface = ``|∇φ| >= surface_tau``; **ignore = collapsed-sheet ∪ confidence (weight < 0.5)** — the
     confidence masking; ``confidence_ignore=False`` to MATCH the released (uncleaned) HercUNet training —
     the confidence field supervises a confidence head, it does not mask the loss);
-  * :func:`hercunet.train.dataset._window_passes` → the window quality gate (``>= gate_count`` sheets ``>=
+  * :func:`hercunet.data.dataset._window_passes` → the window quality gate (``>= gate_count`` sheets ``>=
     gate_score``), applied at load time;
   * the instance owner = ``lab3 + 1`` with ``surf == 2 -> 0`` (ignore excluded from MALIS/M2F), exactly as
     ``export-labels`` writes ``ownersTr``.
@@ -41,7 +41,7 @@ from torch.utils.data import Dataset
 # --- reused hercunet label pipeline: the SHARED per-window label builder `export_labels` also uses (one source,
 #     no duplicated orchestration) + the window quality gate ---
 from ...labels.io.bundle import load_sample_bundle
-from ...train.dataset import _window_passes, build_surface_owner
+from ...data.dataset import _window_passes, build_surface_owner
 from .normalize import dinovol_normalise
 
 #: Dinovol working scale (``docs/hercuvit.md`` §2) — CT + labels are resampled to this voxel size and side.

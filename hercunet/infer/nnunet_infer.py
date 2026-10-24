@@ -63,7 +63,7 @@ def load_affinity_net(model_folder, ckpt_name="checkpoint_best.pth", device="cud
     the surface-probability Jacobi passes we only need the base nnU-Net — build it at ``2 + n_orient`` channels and
     load ONLY the ``base.*`` weights (aff_head skipped). The custom checkpoint has no ``init_args``, so pass
     ``configuration`` explicitly. Same return tuple as :func:`load_net`; caller supplies the orient channels
-    (recomputed from CT in-forward, so they stay consistent — see :func:`hercunet.training.affinity.ct_orientation`)."""
+    (recomputed from CT in-forward, so they stay consistent — see :func:`hercunet.losses.affinity.ct_orientation`)."""
     import torch
     from nnunetv2.utilities.plans_handling.plans_handler import PlansManager
     from nnunetv2.utilities.get_network_from_plans import get_network_from_plans
@@ -103,7 +103,7 @@ def load_affinity_net_with_head(model_folder, ckpt_name="checkpoint_best.pth", d
     import torch
     from nnunetv2.utilities.plans_handling.plans_handler import PlansManager
     from nnunetv2.utilities.get_network_from_plans import get_network_from_plans
-    from ..training.affinity import AffinityHeadNet
+    from ..losses.affinity import AffinityHeadNet
 
     plans = json.load(open(os.path.join(model_folder, "plans.json")))
     dataset_json = json.load(open(os.path.join(model_folder, "dataset.json")))
@@ -363,7 +363,7 @@ def preflight_s3(s3_prefix, region="eu-west-1"):
 
 def _find_scroll(be, sid):
     """The ScrollInfo whose id matches ``sid``. Exact ``scroll_id`` match first, then a tolerant substring over
-    id / name / PHerc handle (mirrors ``hercunet.train.dataset._find_scroll``)."""
+    id / name / PHerc handle (mirrors ``hercunet.data.dataset._find_scroll``)."""
     key = str(sid).lower().replace(" ", "")
     scrolls = list(be.list_scrolls())
     for s in scrolls:                                                # exact id first
