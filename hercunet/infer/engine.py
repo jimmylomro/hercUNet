@@ -245,70 +245,23 @@ def _resolve_tta(spec):
     return variants
 
 
-def _seg_logits(net, xb2, affinity):
-    """One forward on a ``[B,2,P,P,P]`` ``[CT, prev]`` batch → seg logits ``[B,C,P,P,P]``. When ``affinity``, the 6
-    orientation channels are recomputed IN-FORWARD from THIS batch's CT and concatenated (8-ch), then the net's
-    base seg output is returned. Recomputing orientation here is what makes TTA correct: under a flipped/transposed
-    CT the structure-tensor orientation is derived from the already-transformed CT, so no manual channel handling."""
-    import torch
-    if affinity:
-        from ..training.affinity import ct_orientation
-        orient = ct_orientation(xb2[:, 0:1], sigma_grad=1.0, sigma_tensor=3.0)
-        xin = torch.cat([xb2, orient.to(xb2.dtype)], dim=1)
-    else:
-        xin = xb2
-    logits = net(xin)
-    if isinstance(logits, (list, tuple)):
-        logits = logits[0]                                            # AffinityHeadNet base -> seg tensor
-    return logits
-
-
-# HercUNet v0 affinity offsets (recipe aff_offsets=(1,3,9) → z,y,x), the channel order of aff_head. Recorded in
-# the affinity zarr attrs; the band solve maps channel c → (dz,dy,dx) through this.
-V0_AFF_OFFSETS = [(1, 0, 0), (3, 0, 0), (9, 0, 0),
-                  (0, 1, 0), (0, 3, 0), (0, 9, 0),
-                  (0, 0, 1), (0, 0, 3), (0, 0, 9)]
-
-
-def _seg_aff(net, xb2, affinity):
-    """ONE canonical (un-augmented) forward returning ``(seg_logits, aff)`` — ``aff`` is ``[B,n_aff,P,P,P]`` in
-    [0,1] from the affinity head, or None if the net has no head. Affinity is emitted TTA-FREE on purpose: a
-    mirror/transpose permutes the offset channels (channel c = same-sheet-ness of the pair ``(u, u+δ_c)``), so
-    averaging augmented forwards would scramble it — only the identity orientation is meaningful."""
-    import torch
-    if affinity:
-        from ..training.affinity import ct_orientation
-        orient = ct_orientation(xb2[:, 0:1], sigma_grad=1.0, sigma_tensor=3.0)
-        xin = torch.cat([xb2, orient.to(xb2.dtype)], dim=1)
-    else:
-        xin = xb2
-    out = net(xin)
-    if isinstance(out, (list, tuple)):
-        if len(out) == 2:                                            # AffinityHeadNet -> (seg, aff)
-            seg, aff = out
-            if isinstance(seg, (list, tuple)):
-                seg = seg[0]
-            return seg, aff
-        return out[0], None
-    return out, None
-
-
-def _tta_seg_logits(net, xb2, affinity, variants):
-    """Seg logits with TTA: average the un-augmented logits over each ``(flips, transpose)`` in ``variants``
-    (villa-style — average raw LOGITS, no softmax first). A single ``[((), None)]`` means TTA off (one forward,
-    byte-identical to before). Each variant is applied (flip then transpose) to the input and its inverse
-    (transpose then flip — both are their own inverse) to the output."""
+def _tta_surface(model, xb_base, variants):
+    """Surface logits ``[B,2,P,P,P]`` with optional TTA, via ``model.forward``. Averages the un-augmented logits over
+    each ``(flips, transpose)`` in ``variants`` (villa-style — average raw LOGITS, no softmax first). A single
+    ``[((), None)]`` means TTA off (one forward). Each variant is applied (flip then transpose) to the base input and
+    its inverse (transpose then flip — both self-inverse) to the output; the model recomputes any input-derived
+    feature (e.g. structure-tensor orientation) from the transformed CT, so TTA stays correct."""
     import torch
     if len(variants) == 1:                                           # fast path: TTA off
-        return _seg_logits(net, xb2, affinity)
+        return model.forward(xb_base)[0]
     acc = None
     for flips, tp in variants:
-        xa = xb2
+        xa = xb_base
         if flips:
             xa = torch.flip(xa, flips)
         if tp:
             xa = torch.transpose(xa, *tp).contiguous()
-        lg = _seg_logits(net, xa, affinity)
+        lg = model.forward(xa)[0]
         if tp:
             lg = torch.transpose(lg, *tp)                            # undo transpose (self-inverse)
         if flips:
@@ -317,8 +270,8 @@ def _tta_seg_logits(net, xb2, affinity, variants):
     return acc.div_(len(variants))
 
 
-def run_pass(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, device,
-             air=25, batch=4, nb=4, log_every=40, donedir=None, reclaim=False, claim_chunk=6, affinity=False,
+def run_pass(model, vol, prev_arr, cur_arr, region, offset, P, device,
+             air=25, batch=4, nb=4, log_every=40, donedir=None, reclaim=False, claim_chunk=6,
              readahead=2, prefetch_workers=3, tta_variants=None, pass_idx=0, passes=1, level=0):
     """One disjoint (raw-write) Jacobi pass — BLOCK-batched + prefetched (fp16). Reads CT in big blocks (``nb``*P
     per axis) through the prefetched :func:`iter_windows` (S3 I/O overlaps GPU), reads the matching ``prev`` block
@@ -334,7 +287,6 @@ def run_pass(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, device,
     from ..data import iter_windows
     if not tta_variants:
         tta_variants = [((), None)]                                 # no TTA (single identity forward)
-    lo, hi, mean, std = ctnorm
     blocks, (ngz, ngy, ngx) = pass_blocks(cur_arr.shape, P, offset, region, nb, level=level)
     total_win = sum(len(b["wins"]) for b in blocks)
     print(f"[pass] {len(blocks)} blocks / {total_win} windows (grid {ngz}x{ngy}x{ngx})"
@@ -346,9 +298,9 @@ def run_pass(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, device,
     def flush():
         if not buf:
             return
-        xb = torch.from_numpy(np.stack(buf)).to(device, non_blocking=True)     # [B,2,P,P,P]
+        xb = torch.from_numpy(np.stack(buf)).to(device, non_blocking=True)     # [B,Cbase,P,P,P]
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
-            logits = _tta_seg_logits(net, xb, affinity, tta_variants)         # [B,C,P,P,P] (TTA-averaged if on)
+            logits = _tta_surface(model, xb, tta_variants)                    # [B,2,P,P,P] (TTA-averaged if on)
             prob = torch.softmax(logits, 1)[:, 1]                             # [B,P,P,P]
         u8 = prob.mul_(255.0).round_().clamp_(0, 255).to(torch.uint8).cpu().numpy()
         for i, (z, y, x) in enumerate(meta):
@@ -367,9 +319,9 @@ def run_pass(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, device,
             sub = ct_blk[sz:sz + P, sy:sy + P, sx:sx + P]
             if sub.shape != (P, P, P) or int(sub.max()) < air:               # off-block or all-air → skip
                 continue
-            ct_n = NI.norm_ct(sub, lo, hi, mean, std)
-            pv = np.zeros((P, P, P), np.float32) if pv_blk is None else pv_blk[sz:sz + P, sy:sy + P, sx:sx + P]
-            buf.append(np.stack([ct_n, pv]).astype(np.float32)); meta.append((z, y, x))
+            ct_n = model.norm_ct(sub)
+            pv = None if pv_blk is None else pv_blk[sz:sz + P, sy:sy + P, sx:sx + P]
+            buf.append(model.base_input(ct_n, pv).astype(np.float32)); meta.append((z, y, x))
             done[0] += 1
             if len(buf) >= batch:
                 flush()
@@ -409,22 +361,21 @@ def run_pass(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, device,
     print(f"[pass] DONE (this worker) {rate()}", flush=True)
 
 
-def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T, device,
-                   air=25, batch=4, log_every=20, donedir=None, reclaim=False, claim_chunk=6, affinity=False,
-                   readahead=2, prefetch_workers=3, tta_variants=None, aff_arr=None, pass_idx=0, passes=1, level=0):
+def run_pass_blend(model, vol, prev_arr, cur_arr, region, offset, P, S, T, device,
+                   air=25, batch=4, log_every=20, donedir=None, reclaim=False, claim_chunk=6,
+                   readahead=2, prefetch_workers=3, tta_variants=None, aux_arr=None, pass_idx=0, passes=1, level=0):
     """One OVERLAP-mode pass: like :func:`run_pass` (prefetched blocks, claim-queue, fp16) but each claim item is a
     disjoint OUTPUT TILE that runs every stride-S window covering it (halo) and merges them with the villa Gaussian
     blend in LOGIT space (accumulate ``(l1-l0)·g`` + ``g``, normalise, sigmoid), then writes only its owned region —
     so tiles never blend across each other and multi-instance stays race-free (same trick as full-volume infer).
 
-    ``aff_arr`` set (a 4-D ``(n_aff,Z,Y,X)`` uint8 zarr) → ALSO emit the affinity head: the ``n_aff`` channels are
-    Gaussian-blended in PROBABILITY space with the SAME weights as the surface, from the TTA-free identity forward
-    (:func:`_seg_aff`), and written to the tile's owned region. Only used on the final pass (``--keep-affinity``)."""
+    ``aux_arr`` set (a 4-D ``(channels,Z,Y,X)`` uint8 zarr, from ``model.aux``) → ALSO emit the model's aux output
+    (e.g. affinity): its channels are Gaussian-blended in PROBABILITY space with the SAME weights as the surface,
+    from the TTA-free identity ``model.forward``, and written to the tile's owned region. Final pass only."""
     import torch
     from ..data import iter_windows
     if not tta_variants:
         tta_variants = [((), None)]                                          # no TTA
-    lo, hi, mean, std = ctnorm
     gauss_t = torch.from_numpy(make_gaussian(P)).to(device)
     tiles = pass_blend_tiles(cur_arr.shape, P, S, offset, region, T, level=level)
     total_win = sum(len(t["starts"][0]) * len(t["starts"][1]) * len(t["starts"][2]) for t in tiles)
@@ -444,18 +395,18 @@ def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T,
         return np.asarray(prev_arr[z0:z1, y0:y1, x0:x1]).astype(np.float32) / 255.0
 
     def _assemble_batch(chunk_st, ct_blk, pv_blk, bz0, by0, bx0):
-        """Build one batch's [B,2,P,P,P] net input (norm_ct + prev-gather + stack) OFF the GPU thread, so the
-        next batch's CPU/IO overlaps the current batch's forward (kills the 100%->0% starvation sawtooth).
-        Returns (stacked_float32 | None, keep_coords); None when every window in the batch is air."""
+        """Build one batch's [B,Cbase,P,P,P] net input (model.norm_ct + prev-gather + model.base_input) OFF the GPU
+        thread, so the next batch's CPU/IO overlaps the current batch's forward (kills the 100%->0% starvation
+        sawtooth). Returns (stacked_float32 | None, keep_coords); None when every window in the batch is air."""
         arrs, keep = [], []
         for (z, y, x) in chunk_st:
             oz, oy, ox = z - bz0, y - by0, x - bx0
             sub = ct_blk[oz:oz + P, oy:oy + P, ox:ox + P]
             if sub.shape != (P, P, P) or int(sub.max()) < air:                     # off-block or all-air → contributes nothing
                 continue
-            ct_n = NI.norm_ct(sub, lo, hi, mean, std)
-            pv = np.zeros((P, P, P), np.float32) if pv_blk is None else pv_blk[oz:oz + P, oy:oy + P, ox:ox + P]
-            arrs.append(np.stack([ct_n, pv]).astype(np.float32)); keep.append((z, y, x))
+            ct_n = model.norm_ct(sub)
+            pv = None if pv_blk is None else pv_blk[oz:oz + P, oy:oy + P, ox:ox + P]
+            arrs.append(model.base_input(ct_n, pv).astype(np.float32)); keep.append((z, y, x))
         return (np.stack(arrs) if arrs else None, keep)
 
     def process_tile(ct_blk, tile, pv_blk):
@@ -465,8 +416,8 @@ def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T,
         th, tw, tdp = oz1 - oz0, oy1 - oy0, ox1 - ox0
         acc = torch.zeros((th, tw, tdp), dtype=torch.float32, device=device)   # Σ (l1-l0)·g
         wsum = torch.zeros((th, tw, tdp), dtype=torch.float32, device=device)  # Σ g
-        aff_acc = (torch.zeros((aff_arr.shape[0], th, tw, tdp), dtype=torch.float32, device=device)
-                   if aff_arr is not None else None)                          # Σ aff·g (per channel)
+        aux_acc = (torch.zeros((aux_arr.shape[0], th, tw, tdp), dtype=torch.float32, device=device)
+                   if aux_arr is not None else None)                          # Σ aux·g (per channel)
         if pv_blk is not None:                                                     # prefetched by _read_prev; trim to the CT block
             pv_blk = pv_blk[:ct_blk.shape[0], :ct_blk.shape[1], :ct_blk.shape[2]]
         starts = [(z, y, x) for z in sz for y in sy for x in sx]
@@ -485,18 +436,18 @@ def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T,
                 pend.append(asm_ex.submit(_assemble_batch, chunks[nxt], ct_blk, pv_blk, bz0, by0, bx0)); nxt += 1
             if arrs_np is None:                                                     # whole batch was air → nothing to do
                 continue
-            xb = torch.from_numpy(arrs_np).to(device, non_blocking=True)           # [B,2,P,P,P]
+            xb = torch.from_numpy(arrs_np).to(device, non_blocking=True)           # [B,Cbase,P,P,P]
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
-                if aff_acc is not None and len(tta_variants) == 1:
-                    seg_logits, aff = _seg_aff(net, xb, affinity)                   # one forward gives both (no TTA)
-                elif aff_acc is not None:
-                    seg_logits = _tta_seg_logits(net, xb, affinity, tta_variants)   # TTA'd surface …
-                    _, aff = _seg_aff(net, xb, affinity)                            # … + one identity forward for aff
+                if aux_acc is not None and len(tta_variants) == 1:
+                    seg_logits, aux = model.forward(xb)                             # one forward gives both (no TTA)
+                elif aux_acc is not None:
+                    seg_logits = _tta_surface(model, xb, tta_variants)             # TTA'd surface …
+                    _, aux = model.forward(xb)                                      # … + one identity forward for aux
                 else:
-                    seg_logits = _tta_seg_logits(net, xb, affinity, tta_variants)   # [B,C,P,P,P] (TTA-avg if on)
-                    aff = None
+                    seg_logits = _tta_surface(model, xb, tta_variants)             # [B,2,P,P,P] (TTA-avg if on)
+                    aux = None
                 diff = (seg_logits[:, 1] - seg_logits[:, 0]).float()               # [B,P,P,P] logit margin
-                aff_f = aff.float() if aff is not None else None                   # [B,n_aff,P,P,P] in [0,1]
+                aux_f = aux.float() if aux is not None else None                   # [B,Caux,P,P,P] in [0,1]
             for bj, (z, y, x) in enumerate(keep):
                 iz0, iz1 = max(z, oz0), min(z + P, oz1)                             # window ∩ owned (absolute)
                 iy0, iy1 = max(y, oy0), min(y + P, oy1)
@@ -505,9 +456,9 @@ def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T,
                 acc[iz0 - oz0:iz1 - oz0, iy0 - oy0:iy1 - oy0, ix0 - ox0:ix1 - ox0] += \
                     diff[bj, iz0 - z:iz1 - z, iy0 - y:iy1 - y, ix0 - x:ix1 - x] * gp
                 wsum[iz0 - oz0:iz1 - oz0, iy0 - oy0:iy1 - oy0, ix0 - ox0:ix1 - ox0] += gp
-                if aff_acc is not None:
-                    aff_acc[:, iz0 - oz0:iz1 - oz0, iy0 - oy0:iy1 - oy0, ix0 - ox0:ix1 - ox0] += \
-                        aff_f[bj, :, iz0 - z:iz1 - z, iy0 - y:iy1 - y, ix0 - x:ix1 - x] * gp[None]
+                if aux_acc is not None:
+                    aux_acc[:, iz0 - oz0:iz1 - oz0, iy0 - oy0:iy1 - oy0, ix0 - ox0:ix1 - ox0] += \
+                        aux_f[bj, :, iz0 - z:iz1 - z, iy0 - y:iy1 - y, ix0 - x:ix1 - x] * gp[None]
                 done[0] += 1
         mask = wsum > 0
         wden = wsum.clamp(min=1e-12)                                                # shared denom (surface + aff)
@@ -515,10 +466,10 @@ def run_pass_blend(net, ctnorm, vol, prev_arr, cur_arr, region, offset, P, S, T,
         torch.sigmoid_(acc); acc.mul_(mask)                                        # 0 where no window covered (air)
         u8 = acc.mul_(255.0).round_().clamp_(0, 255).to(torch.uint8).cpu().numpy()
         cur_arr[oz0:oz1, oy0:oy1, ox0:ox1] = u8
-        if aff_acc is not None:
-            aff_acc.div_(wden[None]); aff_acc.mul_(mask[None]); aff_acc.clamp_(0.0, 1.0)
-            aff_u8 = aff_acc.mul_(255.0).round_().clamp_(0, 255).to(torch.uint8).cpu().numpy()
-            aff_arr[:, oz0:oz1, oy0:oy1, ox0:ox1] = aff_u8
+        if aux_acc is not None:
+            aux_acc.div_(wden[None]); aux_acc.mul_(mask[None]); aux_acc.clamp_(0.0, 1.0)
+            aux_u8 = aux_acc.mul_(255.0).round_().clamp_(0, 255).to(torch.uint8).cpu().numpy()
+            aux_arr[:, oz0:oz1, oy0:oy1, ox0:ox1] = aux_u8
 
     def rate():
         dt = time.time() - t0
@@ -592,67 +543,50 @@ def _resolve_pass_spec(spec, passes, flag="--finalise"):
     return out
 
 
-def jacobi_refine(source, model, out_prefix, passes=3, ckpt="checkpoint_best.pth", device="cuda",
+def run_inference(source, out_prefix, *, model_type="nnunet-jacobi", model=None, model_hf=None,
+                  ckpt="checkpoint_best.pth", device="cuda", model_opts=None, model_import=None,
                   air=25, region=None, level=0, keep_buffers=False, finalise="last", resume=False, batch=4, nb=4,
                   s3_prefix=None, upload="last", multi=False, reclaim=False, claim_chunk=6, leader=False,
-                  affinity=True, n_orient=6, overlap=0.25, readahead=2, prefetch_workers=3,
-                  tta="none", tta_passes="all", keep_affinity=False, compile=False):
-    """Run ``passes`` double-buffered Jacobi refinement passes over ``source`` and write per-pass surface-prob
-    OME-Zarrs ``{out_prefix}_pass{p}.zarr``. Returns the final pass path.
+                  readahead=2, prefetch_workers=3, tta="none", tta_passes="all"):
+    """Model-agnostic inference engine. Build the model (:class:`hercunet.infer.model.InferenceModel`) named by
+    ``model_type`` from ``model``/``model_hf`` + ``model_opts``, then run ``model.passes`` double-buffered passes over
+    ``source`` and write per-pass surface-prob OME-Zarrs ``{out_prefix}_pass{p}.zarr``. Returns the final pass path.
 
-    pass 0: aligned grid, prev = 0 (bootstrap). pass p>0: grid shifted (all axes) on odd p, reads pass p-1.
-    Buffers pruned to the last two unless ``keep_buffers``. ``finalise`` selects which passes get an OME-Zarr
-    pyramid built and ``upload`` which passes upload to ``s3_prefix`` — both take the same spec (``"last"`` default
-    = only the deliverable; ``"all"``; ``"no"``; or an index list — see :func:`_resolve_pass_spec`); ``upload`` is
-    inert without ``s3_prefix``. ``region``=(z0,z1,y0,y1,x0,x1) restricts computed tiles (buffer canvas stays
-    full-volume) — use it for a small-cube smoke test. ``overlap`` > 0 → Gaussian-blend mode (default 0.25,
-    HercUNet v0); 0 → disjoint mode. ``tta`` (none/all/mirror/rotate/axes) applies per-window test-time
-    augmentation on the ``tta_passes`` passes, averaging logits over N variants (N× forwards there).
+    Single-pass models (``model.passes == 1``, e.g. HercuViT) just run pass 0 with prev=0. For Jacobi models
+    (``passes>1``): pass 0 aligned grid, prev=0 (bootstrap); pass p>0 grid shifted on odd p, reads pass p-1.
+    Buffers pruned to the last two unless ``keep_buffers``. ``finalise``/``upload`` select which passes get a pyramid /
+    upload to ``s3_prefix`` (see :func:`_resolve_pass_spec`). ``region``=(z0,z1,y0,y1,x0,x1) restricts computed tiles.
+    ``model.overlap`` > 0 → Gaussian-blend mode; 0 → disjoint. ``tta`` applies per-window TTA on ``tta_passes``.
 
-    ``multi`` → MULTI-INSTANCE. Run the identical worker on any number of processes sharing ``out_prefix`` storage
-    (one per GPU on a box's local FS, or across pods on a network volume); extra workers can join mid-run. Within a
-    pass, workers dynamically steal blocks/tiles via the ``claim_queue`` (a faster worker does more). Between passes
-    there is a hard BARRIER (a pass-p+1 tile reads pass-p output one window over, so ALL of pass p must finish
-    first): every worker waits for all items ``.done``, then ONE ``leader`` builds the pyramid + uploads + writes
-    the ``_complete`` marker while the others wait on it. ``reclaim`` re-queues blocks orphaned by a crashed worker.
-    Single instance (``multi=False``) is byte-identical to before."""
-    n_aff = None
-    if affinity and keep_affinity:                                     # full AffinityHeadNet (base + head) — emit aff too
-        net, cfg, lm, pm, dsj, num_in, n_aff = NI.load_affinity_net_with_head(model, ckpt, device, n_orient=n_orient)
-        assert num_in == 2 + n_orient, f"expected {2+n_orient}-ch affinity model, got {num_in}"
-    elif affinity:                                                     # 8-ch [CT, prev, orient(6)] AffinityMalis model
-        net, cfg, lm, pm, dsj, num_in = NI.load_affinity_net(model, ckpt, device, n_orient=n_orient)
-        assert num_in == 2 + n_orient, f"expected {2+n_orient}-ch affinity model, got {num_in}"
-    else:
-        if keep_affinity:
-            raise SystemExit("hercunet infer --keep-affinity: needs the affinity model, not --plain ([CT, prev]).")
-        net, cfg, lm, pm, dsj, num_in = NI.load_net(model, ckpt, device, deep_supervision=False, force_in_channels=2)
-        assert num_in == 2, f"expected a 2-channel [CT, prev] model, got num_input_channels={num_in}"
-    if compile:
-        # Lossless speedup (~1.37x measured on L40S, bandwidth-bound workload): torch.compile the forward.
-        # no-cudagraphs so a ragged final batch (B<batch) doesn't trip cudagraph static-shape capture; the slow
-        # one-time triton autotune (a few min, per batch shape seen) amortises over a multi-hour full-scroll run.
-        import torch
-        print("[jacobi] torch.compile(net, max-autotune-no-cudagraphs) — one-time warmup on first windows …", flush=True)
-        net = torch.compile(net, mode="max-autotune-no-cudagraphs")
-    P = int(cfg.patch_size[0])
-    assert list(cfg.patch_size) == [P, P, P], cfg.patch_size
+    ``multi`` → MULTI-INSTANCE: run the identical worker on any number of processes sharing ``out_prefix`` storage;
+    within a pass workers steal tiles via the ``claim_queue``; between passes a BARRIER + one ``leader`` builds the
+    pyramid + uploads + writes ``_complete``. All model-specific behaviour (load, norm, input stack, forward, aux
+    output) is in the model; the orchestration here is unchanged."""
+    from .model import InferenceModel
+    from . import models as _builtin  # noqa: F401 — registers the built-in models (nnunet-jacobi)
+    if model_import:                                                    # an out-of-tree model module to register first
+        import importlib
+        importlib.import_module(model_import)                           # e.g. "hercunet.hercuvit.infer.model"
+    m = InferenceModel.get(model_type).load(model=model, model_hf=model_hf, ckpt=ckpt, device=device,
+                                            **(model_opts or {}))
+    passes = int(m.passes)
+    overlap = float(m.overlap)
+    aux_spec = m.aux
+    P = int(m.patch_size)
     chunk = P // 2                                                     # phase boundaries (0, P/2, P, ...) all aligned
-    # OVERLAP mode: each pass is a Gaussian-blended overlapping-window inference (like single-pass); passes shift
-    # by S/2 so centres land on the previous pass's overlap-centres. S forced even so S/2 is integral; output tile
-    # T is a multiple of the zarr chunk (P/2) so parallel tile writes never share a chunk.
+    # OVERLAP mode: each pass is a Gaussian-blended overlapping-window inference; passes shift by S/2 so centres land
+    # on the previous pass's overlap-centres. S forced even so S/2 is integral; output tile T is a multiple of the
+    # zarr chunk (P/2) so parallel tile writes never share a chunk.
     blend = bool(overlap) and overlap > 0.0
-    if keep_affinity and not blend:
-        raise SystemExit("hercunet infer --keep-affinity requires overlap>0 (blend mode, the v0 default); "
-                         "affinity is not emitted in disjoint mode. Rerun without --overlap 0.")
+    if aux_spec is not None and not blend:
+        raise SystemExit("infer: this model's aux output requires overlap>0 (blend mode); rerun without --overlap 0.")
     S = Tt = None
     if blend:
         S = 2 * max(1, int(round(P * (1.0 - float(overlap)) / 2)))
         S = int(min(max(S, 2), P - 2))                                # 0 < S < P (real overlap AND real shift)
         Tt = max(P, int(nb) * (P // 2))                              # output tile per axis (chunk-aligned)
-        print(f"[jacobi] OVERLAP mode: stride S={S} (overlap {1 - S / P:.2f}), tile T={Tt}, "
+        print(f"[engine] OVERLAP mode: stride S={S} (overlap {1 - S / P:.2f}), tile T={Tt}, "
               f"inter-pass shift {S // 2} (centres land on prev overlap-centres)", flush=True)
-    ctnorm = NI.ct_norm_params(model)
     vol = NI.open_source(source)
     label = NI.source_label(source)
     # --- WORKING RESOLUTION: run on OME-Zarr pyramid `level` (default 0 = full res). Everything downstream — the
@@ -665,24 +599,23 @@ def jacobi_refine(source, model, out_prefix, passes=3, ckpt="checkpoint_best.pth
     shape = tuple(int(v) for v in vol.meta.level_shapes[level])
     vx = float(vol.meta.voxel_size_um) * float(vol.meta.level_downsamples[level])
     region_full = tuple(region) if region else (0, shape[0], 0, shape[1], 0, shape[2])
-    # Big, unmissable warning if this level's voxel size is outside the model's native-coarse training band. HercUNet
-    # v0 was trained on the 7.5-9.5 µm grand-prize-native domain; we warn outside ~[7.5, 10] µm (10 tolerates a
-    # 2.4 µm scroll pooled to L2 = 9.6 µm, the pragmatic closest). Outside that the predictions will be unreliable.
-    TRAIN_LO, TRAIN_HI, WARN_LO, WARN_HI = 7.5, 9.5, 7.5, 10.0
-    if not (WARN_LO <= vx <= WARN_HI):
-        best = min(range(nlev), key=lambda L: abs(vol.meta.voxel_size_um * vol.meta.level_downsamples[L]
-                                                   - 0.5 * (TRAIN_LO + TRAIN_HI)))
+    # Big, unmissable warning if this level's voxel size is outside the model's training band (model.train_voxel_band;
+    # None → skip). Outside the band the predictions will be unreliable.
+    band = m.train_voxel_band
+    if band is not None and not (band[0] <= vx <= band[1]):
+        mid = 0.5 * (band[0] + band[1])
+        best = min(range(nlev), key=lambda L: abs(vol.meta.voxel_size_um * vol.meta.level_downsamples[L] - mid))
         best_vx = float(vol.meta.voxel_size_um) * float(vol.meta.level_downsamples[best])
         bar = "!" * 92
         print(f"\n{bar}\n"
               f"!!  WARNING — OUT-OF-DOMAIN RESOLUTION: --level {level} of {label} is {vx:.2f} µm/voxel.\n"
-              f"!!  HercUNet v0 was TRAINED ONLY on the native-coarse {TRAIN_LO}-{TRAIN_HI} µm band; at {vx:.2f} µm "
-              f"the model is OUT OF DISTRIBUTION\n"
+              f"!!  {model_type} was trained near {band[0]}-{band[1]} µm; at {vx:.2f} µm it is OUT OF DISTRIBUTION\n"
               f"!!  and its surface predictions will be UNRELIABLE. Closest in-band level for this source is "
               f"--level {best} ({best_vx:.2f} µm).\n"
               f"!!  Re-run with --level {best} unless you specifically intend this resolution.\n"
               f"{bar}\n", flush=True)
-    print(f"[jacobi] {label} level={level} vx={vx:.3f}µm shape={shape} (L0={tuple(int(v) for v in vol.meta.level_shapes[0])}) "
+    print(f"[engine] {model_type} {label} level={level} vx={vx:.3f}µm shape={shape} "
+          f"(L0={tuple(int(v) for v in vol.meta.level_shapes[0])}) "
           f"P={P} chunk={chunk} passes={passes} region={region_full} batch={batch} nb={nb}", flush=True)
 
     # ---- STORAGE WARNING: each pass writes a full-resolution uint8 surface-prob buffer. For a whole scroll that
@@ -761,32 +694,32 @@ def jacobi_refine(source, model, out_prefix, passes=3, ckpt="checkpoint_best.pth
             CQ.wait_for_path(os.path.join(donedir, "_created"), f"pass {p} zarr creation")
             cur = zarr.open_group(cur_path, mode="r+")["0"]
 
-        # --keep-affinity: on the FINAL pass only (most-settled prev → best, deliverable-consistent affinity),
-        # also create a 4-D (n_aff,Z,Y,X) affinity zarr and let run_pass_blend fill it from the identity forward.
-        aff_arr = None
-        if keep_affinity and p == passes - 1:
-            assert len(V0_AFF_OFFSETS) == n_aff, f"offset table ({len(V0_AFF_OFFSETS)}) != checkpoint n_aff ({n_aff})"
-            aff_path = f"{out_prefix}_pass{p}_aff.zarr"
+        # model.aux (e.g. affinity): on the FINAL pass only (most-settled prev → best, deliverable-consistent),
+        # create a 4-D (channels,Z,Y,X) uint8 zarr and let run_pass_blend fill it from the identity forward.
+        aux_arr = None
+        emit_aux = aux_spec is not None and (p == passes - 1 or not aux_spec.final_pass_only)
+        if emit_aux:
+            aux_path = f"{out_prefix}_pass{p}_{aux_spec.name}.zarr"
             if not multi or leader:
-                aff_arr = NI.create_affinity_zarr(aff_path, n_aff, shape, chunk, vx, V0_AFF_OFFSETS, p,
-                                                  overwrite=not resume)
+                aux_arr = NI.create_affinity_zarr(aux_path, aux_spec.channels, shape, chunk, vx,
+                                                  aux_spec.offsets, p, overwrite=not resume)
                 if multi:
-                    open(os.path.join(donedir, "_aff_created"), "w").close()
+                    open(os.path.join(donedir, "_aux_created"), "w").close()
             else:
-                CQ.wait_for_path(os.path.join(donedir, "_aff_created"), f"pass {p} aff zarr creation")
-                aff_arr = zarr.open_group(aff_path, mode="r+")["0"]
-            print(f"[jacobi] pass {p}: ALSO emitting affinity ({n_aff} ch, uint8) -> {aff_path}", flush=True)
+                CQ.wait_for_path(os.path.join(donedir, "_aux_created"), f"pass {p} aux zarr creation")
+                aux_arr = zarr.open_group(aux_path, mode="r+")["0"]
+            print(f"[engine] pass {p}: ALSO emitting {aux_spec.name} ({aux_spec.channels} ch, uint8) -> {aux_path}", flush=True)
 
         pass_variants = tta_all if p in tta_set else [((), None)]   # TTA only on the selected passes
         if blend:
-            run_pass_blend(net, ctnorm, vol, prev_arr, cur, region_full, offset, P, S, Tt, device, air=air,
+            run_pass_blend(m, vol, prev_arr, cur, region_full, offset, P, S, Tt, device, air=air,
                            batch=batch, donedir=(donedir if multi else None), reclaim=reclaim,
-                           claim_chunk=claim_chunk, affinity=affinity,
+                           claim_chunk=claim_chunk,
                            readahead=readahead, prefetch_workers=prefetch_workers, tta_variants=pass_variants,
-                           aff_arr=aff_arr, pass_idx=p, passes=passes, level=level)
+                           aux_arr=aux_arr, pass_idx=p, passes=passes, level=level)
         else:
-            run_pass(net, ctnorm, vol, prev_arr, cur, region_full, offset, P, device, air=air, batch=batch, nb=nb,
-                     donedir=(donedir if multi else None), reclaim=reclaim, claim_chunk=claim_chunk, affinity=affinity,
+            run_pass(m, vol, prev_arr, cur, region_full, offset, P, device, air=air, batch=batch, nb=nb,
+                     donedir=(donedir if multi else None), reclaim=reclaim, claim_chunk=claim_chunk,
                      readahead=readahead, prefetch_workers=prefetch_workers, tta_variants=pass_variants,
                      pass_idx=p, passes=passes, level=level)
 
@@ -818,18 +751,18 @@ def jacobi_refine(source, model, out_prefix, passes=3, ckpt="checkpoint_best.pth
                 else:
                     _up("pyramid")                                     # re-upload: sync adds only levels 1-5 + attrs
 
-            # --keep-affinity: ship the 4-D affinity zarr alongside the deliverable (whole-tree cp; no pyramid — it
-            # is a 4-D analysis field, not a VC3D volume). ``uri`` is truthy only when this pass is in --upload, so
-            # this gates on the same s3_prefix + upload_set; it exists only on the final pass.
-            if keep_affinity and uri and pp == passes - 1:
-                aff_lp = f"{out_prefix}_pass{pp}_aff.zarr"
-                aff_uri = f"{s3_prefix.rstrip('/')}/pass{pp}_aff.zarr"
-                if os.path.isdir(aff_lp):
+            # model.aux: ship the 4-D aux zarr alongside the deliverable (whole-tree cp; no pyramid — it is a 4-D
+            # analysis field, not a VC3D volume). ``uri`` is truthy only when this pass is in --upload, so this gates
+            # on the same s3_prefix + upload_set; it exists only on the aux-emitting pass(es).
+            if aux_spec is not None and uri and (pp == passes - 1 or not aux_spec.final_pass_only):
+                aux_lp = f"{out_prefix}_pass{pp}_{aux_spec.name}.zarr"
+                aux_uri = f"{s3_prefix.rstrip('/')}/pass{pp}_{aux_spec.name}.zarr"
+                if os.path.isdir(aux_lp):
                     try:
-                        NI.upload_zarr_to_s3(aff_lp, aff_uri, incremental=False)   # same throttled streaming logs
-                        print(f"[jacobi] PASS {pp} AFFINITY ON S3 — {NI.s3_to_https(aff_uri)}", flush=True)
+                        NI.upload_zarr_to_s3(aux_lp, aux_uri, incremental=False)   # same throttled streaming logs
+                        print(f"[engine] PASS {pp} {aux_spec.name.upper()} ON S3 — {NI.s3_to_https(aux_uri)}", flush=True)
                     except Exception as e:
-                        print(f"[jacobi] pass {pp} affinity upload FAILED: {e}", flush=True)
+                        print(f"[engine] pass {pp} {aux_spec.name} upload FAILED: {e}", flush=True)
 
         if multi:
             nbk = (len(pass_blend_tiles(shape, P, S, offset, region_full, Tt)) if blend

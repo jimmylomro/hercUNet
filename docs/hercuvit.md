@@ -129,7 +129,7 @@ on this branch via `git checkout sheet-seg-decoder -- <path>`; additive, does no
 | HF model pull (encoder/ckpt) | `hercunet/train/launch.py` / `hercunet/infer/run.py` | `resolve_pretrained(pretrained, pretrained_hf, hf_file)` (hf_hub_download), `resolve_model(model, model_hf)` (snapshot_download) |
 | HF corpus pull | CLAUDE.md | `hf download jimmylomro/hercunet-corpus --repo-type dataset --local-dir <dir>` → `--corpus <dir>` |
 | Per-param warm-start | pattern from `affinity_malis_iter_dagger.py:load_pretrained` | match-by-name + shape, skip/fresh-init non-matching (here: load `backbone.*` into the vendored Eva) |
-| Infer tiling/halo/blend/claim-queue | `hercunet/infer/jacobi_refine.py` | `pass_blend_tiles`, `make_gaussian`, claim-queue; swap the net loader + per-window forward |
+| Infer tiling/halo/blend/claim-queue | `hercunet/infer/engine.py` (model-agnostic; was `jacobi_refine.py`) | `pass_blend_tiles`, `make_gaussian`, claim-queue; a model plugs in via `InferenceModel` |
 | Logging style | `affinity_malis_iter_dagger.py` | `_reset_terms`/`_acc`/single-line `[ep N] loss …` — mirror in `trainer.py` |
 | Test patterns | `tests/` | CPU-runnable, `torch.manual_seed(0)`, tiny synthetic tensors, permutation/byte-equality/zero-grad invariants |
 
@@ -226,12 +226,17 @@ come from `VARIANT_ARCH` (single source of truth); the recipe carries the distil
 `hercuvit distill --teacher … --student {tiny,nano} --out … [--steps N] [--smoke]` (handler lazy-imports
 `train.distill:run`). Smoke-verified by the lead (tiny 0.96→0.43, nano 1.45→1.05, both < 4.2 GB).
 
-## 9. Inference (`infer/loader.py`, `infer/infer.py`)
+## 9. Inference — the shared model-agnostic engine (`hercunet/infer/engine.py`)
 
-- Reuse the hercunet tiling/halo/Gaussian-blend/claim-queue engine; add a HercuViT loader returning the same
-  tuple shape as `load_affinity_net` and a per-window forward.
-- v1 output: full-volume **semantic sheet-surface** (+ optional per-tile instance masks). **No cross-tile
-  sheet-ID stitching** in v1 (design §10/§12 → future).
+HercuViT and nnU-Net/Jacobi run on **one** engine (`engine.run_inference`) via the `InferenceModel` contract
+(`hercunet/infer/model.py`) — no duplicated streaming / tiling / Gaussian-blend / claim-queue / leader-finalise /
+S3 machinery. A model supplies only load + `norm_ct` + `base_input` + `forward` + output specs; the engine owns the
+rest (see Part II → "Model-agnostic inference engine").
+
+- HercuViT = `HercuvitSurfaceModel` (`hercunet/hercuvit/infer/model.py`): single-pass, 1-channel, surface blended on
+  the logit margin; **masks not emitted**. `hercuvit infer single-instance` drives the engine single-GPU in-process.
+- v1 output: full-volume **semantic sheet-surface** (`{out}_pass0.zarr`). **No cross-tile sheet-ID stitching** in v1
+  (design §10/§12 → future); multi-GPU/pod + S3 for HercuViT is available in the engine (expose via CLI flags).
 
 ---
 
@@ -422,12 +427,34 @@ to `model/decoder_common.py` (above). What remains on the build path:
   S3 path deadlocks under DataLoader-worker concurrency and re-streams every epoch, so pre-extraction is the default
   (`--no-pre-extract` opts out). Each cache entry is a `sample_*.npz` of native CT + thin surface + owner.
 - `infer/loader.py` — `load_hercuvit` resolves a trained checkpoint (local / HF), rebuilds via `build_from_cfg`
-  (no Dinovol ckpt needed) and loads the trained weights; returns `(net, recipe, model_cfg)`. Instance-head keys
-  are allowed to be "unexpected" when loading a full checkpoint into a semantic-only net.
-- `infer/infer.py` — `infer_volume` streams `open_source`, tiles with the reused `pass_blend_tiles` +
-  `make_gaussian`, forwards 128³ robust-normalised windows, Gaussian-blends per tile, writes `{out}_sem.zarr`
-  (uint8 surface prob) via `create_surface_zarr` + `finalize_pyramid`; single pass, no prev channel. `single_instance`
-  is the CLI handler (CPU fallback if no CUDA). Per-tile instance masks / cross-tile stitching = future (§13).
+  (no Dinovol ckpt needed, decoder/skip_channels threaded) and loads the trained weights; returns `(net, recipe,
+  model_cfg)`. Instance-head keys are allowed to be "unexpected" when loading a full checkpoint into a semantic-only net.
+- `infer/model.py` — `HercuvitSurfaceModel(InferenceModel)`: the HercuViT plug-in for the shared engine. `load`
+  (via `load_hercuvit`, `with_instance=False`), `norm_ct` (`dinovol_normalise`), `base_input` (1-ch `[ct]`, prev
+  ignored), `forward` (`sem_logits[:,:2]`, no aux), `passes=1`. Registered as `"hercuvit-surface"`.
+- `infer/infer.py` — `single_instance` drives `hercunet.infer.engine.run_inference(model_type="hercuvit-surface", …)`
+  single-GPU in-process (CPU fallback if no CUDA); the engine streams, tiles, Gaussian-blends the surface and writes
+  `{out}_pass0.zarr` + pyramid. Per-tile instance masks / cross-tile stitching = future.
+
+### Model-agnostic inference engine (`hercunet/infer/`, migrated from the Jacobi engine)
+
+The nnU-Net/Jacobi infer engine was generalised **in place** (`jacobi_refine.py` → `engine.py`) so HercuViT and
+nnU-Net share one driver — no duplication (memory [[hercuvit-decoupled-cleanup-and-infer]]):
+- `model.py` — the `InferenceModel` ABC + `OutputSpec`/`AuxSpec` + a `__init_subclass__` registry. A model supplies
+  `load` / `patch_size` / `passes` / `overlap` / `uses_prev` / `aux` / `train_voxel_band` / `norm_ct` / `base_input`
+  / `forward`; the engine owns region, streaming (+ pre-sync), tiling, Gaussian blend, multi-pass Jacobi, the
+  claim-queue `.done` work-stealing, the per-pass barrier, leader-automatic pyramid finalise + S3 upload, buffer
+  pruning and resume. The blend is on the **surface logit margin** (model-independent), so TTA + prev + aux stay generic.
+- `engine.py` — `run_inference(model_type, model|model_hf, model_opts, model_import, …)` builds the model (registry;
+  `model_import` lets a worker subprocess register an out-of-tree model) and runs the unchanged orchestration;
+  `run_pass_blend`/`run_pass` call `model.norm_ct`/`base_input`/`forward`. All math lines are byte-identical to the
+  pre-migration engine (verified by diff).
+- `models/nnunet_jacobi.py` — `NnunetJacobiModel` (`"nnunet-jacobi"`): the production path as a plug-in (8-ch
+  `[ct,prev,orient]` or 2-ch plain, Jacobi `passes`, affinity head as `aux`). `run.py`/`_worker.py` build it via
+  `model_opts`. `hercunet infer` is unchanged behaviourally.
+- Tests: `tests/infer/test_engine_model.py` (registry, contract, `_tta_surface` correctness, base-input shapes).
+  Remaining validation: a GPU byte-identical run of the migrated nnU-Net path vs the pre-migration engine on a small
+  region (needs the nnU-Net model + a free GPU).
 - `cli.py` + `__main__.py` — `hercuvit` console script mirroring `hercunet/cli.py` (argparse subparsers +
   `set_defaults(func=…)` + lazy imports): `train chain`, `train fit [--continue]`, `train prep-shard`, `distill`,
   `distill-prep`, `infer single-instance`. The encoder source is `--encoder` / `--encoder-hf` / `--encoder-file`

@@ -85,8 +85,8 @@ def _run(model_dir, gpus, multi, is_leader_node, jargs):
         from .nnunet_infer import preflight_s3
         preflight_s3(jargs["s3_prefix"])
     if not multi:
-        from .jacobi_refine import jacobi_refine
-        return jacobi_refine(model=model_dir, device="cuda", multi=False, leader=True, **jargs)
+        from .engine import run_inference
+        return run_inference(model=model_dir, device="cuda", multi=False, leader=True, **jargs)
 
     # multi: one worker subprocess per GPU, each pinned to its device, all sharing the donedir under out_prefix.
     import shutil
@@ -143,16 +143,17 @@ def _maybe_presync(a, region):
 
 
 def _common_jargs(a, region, source):
-    """The jacobi_refine kwargs shared by both modes, read off the parsed CLI args ``a`` (``source`` already
-    resolved by :func:`_maybe_presync`)."""
+    """The engine.run_inference kwargs shared by both modes, read off the parsed CLI args ``a`` (``source`` already
+    resolved by :func:`_maybe_presync`). The nnU-Net/Jacobi-specific knobs go in ``model_opts`` (JSON-serialisable,
+    so the per-GPU worker subprocess can carry them)."""
     return dict(
-        source=source, out_prefix=a.out, passes=a.passes, ckpt=a.ckpt, air=a.air, level=int(getattr(a, "level", 0)),
+        model_type="nnunet-jacobi",
+        model_opts=dict(affinity=not a.plain, keep_affinity=a.keep_affinity, n_orient=a.n_orient,
+                        passes=a.passes, overlap=a.overlap, compile=getattr(a, "compile", False)),
+        source=source, out_prefix=a.out, ckpt=a.ckpt, air=a.air, level=int(getattr(a, "level", 0)),
         region=region, keep_buffers=a.keep_buffers, finalise=a.finalise, resume=a.resume,
         batch=a.batch, nb=a.nb, s3_prefix=a.s3_prefix, upload=a.upload, reclaim=a.resume, claim_chunk=a.claim_chunk,
-        affinity=not a.plain, n_orient=a.n_orient, overlap=a.overlap,
-        readahead=a.readahead, prefetch_workers=a.prefetch_workers,
-        tta=a.tta, tta_passes=a.tta_passes, keep_affinity=a.keep_affinity,
-        compile=getattr(a, "compile", False),
+        readahead=a.readahead, prefetch_workers=a.prefetch_workers, tta=a.tta, tta_passes=a.tta_passes,
     )
 
 

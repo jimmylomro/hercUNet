@@ -47,7 +47,7 @@ def main(argv=None):
         raise SystemExit("hercunet.infer._worker: expected exactly one argument (the args JSON file path)")
     with open(argv[0]) as f:
         kwargs = json.load(f)
-    # worker identity (added by run._run) — used only for the log tag, not passed to jacobi_refine
+    # worker identity (added by run._run) — used only for the log tag, not passed to the engine
     rank = kwargs.pop("rank", 0)
     gpu = kwargs.pop("gpu", None)
     tag = f"[w{rank}" + (f"·gpu{gpu}" if gpu is not None else "") + ("·L" if kwargs.get("leader") else "") + "] "
@@ -55,9 +55,9 @@ def main(argv=None):
     sys.stderr = _TagStream(sys.stderr, tag)
     region = kwargs.get("region")
     if region is not None:
-        kwargs["region"] = tuple(region)                              # JSON lists → the tuple jacobi_refine expects
-    from .jacobi_refine import jacobi_refine
-    jacobi_refine(**kwargs)
+        kwargs["region"] = tuple(region)                              # JSON lists → the tuple the engine expects
+    from .engine import run_inference
+    run_inference(**kwargs)
 
 
 if __name__ == "__main__":
