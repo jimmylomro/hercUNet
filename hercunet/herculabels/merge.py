@@ -22,7 +22,7 @@ def _prefer(new_entry: dict, old_entry: dict) -> bool:
 def merge_corpora(out_path: str, input_paths: list[str]) -> None:
     """Merge the corpora at ``input_paths`` into a new corpus at ``out_path`` (a ``.herculabels`` dir;
     fails if it exists)."""
-    from ...labels.corpus import Corpus
+    from ..labels.corpus import Corpus
 
     inputs = [Corpus.open(p) for p in input_paths]
     merged_from = [{"root": str(c.root), "herculabels_version": c.meta.get("herculabels_version"),

@@ -1,11 +1,13 @@
 # HercUNet
 
-> ## ⚠️ Repository reorganised (2026-10) — package layout changed
-> The nnU-Net machinery moved into `hercunet/hercunet/`, HercuViT stays in `hercunet/hercuvit/`, and shared code
-> (data layer, inference engine, losses, label geometry) now lives in its own top-level modules. **The `hercunet`
-> and `hercuvit` CLI commands are unchanged** — but **reinstall once** (`pip install -e .`) to refresh the console
-> scripts, and **Python import paths changed**. See **[docs/hercuvit-migration.md](docs/hercuvit-migration.md)**
-> for the full old→new mapping.
+> ## ⚠️ Repository reorganised (2026-10) — package layout + CLI changed
+> The three products are now separate packages — **HercuLabels** (`hercunet/herculabels/`, label generation + the
+> Qt editor), **HercUNet** (`hercunet/hercunet/`, the nnU-Net refiner), **HercuViT** (`hercunet/hercuvit/`) — over
+> shared top-level modules (data layer, inference engine, losses, label geometry). **Reinstall once**
+> (`pip install -e .`) to refresh the console scripts. `hercunet …` / `hercuvit …` are unchanged, but stage-1 label
+> generation moved to a new **`herculabels`** command (**breaking:** `hercunet labels …` → `herculabels …`). The
+> core install is now lean (data layer only); install `.[herculabels]`, `.[train]`, `.[infer]`, `.[hercuvit]` or
+> `.[full]`. Python import paths changed too. See **[docs/hercuvit-migration.md](docs/hercuvit-migration.md)**.
 
 📄 **[Read the paper (v0) → `paper_v0.pdf`](submission/writeup/paper_v0.pdf)** — the full write-up of both stages (HercuLabels + HercUNet), frozen as the first submission version.
 
@@ -103,7 +105,7 @@ In short:
 
 Try this, it's the window that started everything (you need to install with \[viz], check the installation guide):
 ```shell
-pipenv run hercunet labels create /tmp/test.herculabels --scroll PHerc1447 --coords 11714,3293,3648 --interactive
+pipenv run herculabels create /tmp/test.herculabels --scroll PHerc1447 --coords 11714,3293,3648 --interactive
 ```
 
 ![HercuLabels UI.](submission/images/sheets-with-sheets.jpg)

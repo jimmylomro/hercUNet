@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from hercunet.hercunet.labels.augment import augment as aug
+from hercunet.herculabels.augment import augment as aug
 from ._window import extract_window
 from hercunet.labels.mesh.medial import (
     build_gradphi,
@@ -152,7 +152,7 @@ def generate(args, brick: dict, progress=None):
     if progress is not None:                                          # observer hook (viewer) — labelled cloud
         progress("clusters", {"pts": pts.astype(np.float32), "plab": plab.astype(np.int32),
                               "corner": brick.get("corner")})
-        from hercunet.hercunet.labels.edit import build_edit_context             # hand the viewer the edit context
+        from hercunet.herculabels.edit import build_edit_context             # hand the viewer the edit context
         progress("editctx", build_edit_context(C, args, dev))          # (in-process reference; edits + save)
         if C.get("pos_nbr") is not None:                                # per-point positive/negative sample tables
             progress("samples", {"pos_nbr": C["pos_nbr"], "neg_nbr": C["neg_nbr"]})  # viewer 'samples' overlay (live only)

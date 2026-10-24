@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from hercunet.hercunet.labels.augment import augment as aug
+from hercunet.herculabels.augment import augment as aug
 from hercunet.labels.mesh.medial import fit_sheet_meshes
 
 

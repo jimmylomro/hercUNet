@@ -12,7 +12,7 @@ import time
 
 import numpy as np
 
-from ...data.tiling import locate_material
+from ..data.tiling import locate_material
 
 
 def find_scroll(be, name: str):
@@ -90,7 +90,7 @@ def build_brick(be, target, coords, *, level=0, depth_um=1500.0, gpu=True) -> di
     """Read the window around ``coords`` from ``target``'s volume and CED-clean it to the ``bced``
     substrate. Returns ``{bced, voxel_um, org}``."""
     from hercunet.labels.fields.anisotropic import coherence_enhancing_diffusion
-    from hercunet.hercunet.labels.common.scales import mesh_params, window_px, window_z_px
+    from hercunet.herculabels.common.scales import mesh_params, window_px, window_z_px
 
     vol = be.open_scroll_volume(target)
     m = vol.meta
@@ -142,7 +142,7 @@ def scroll_material_mask(be, target, *, mask_level=5):
 def window_material_frac(be, target, coords, *, mask_level=5):
     """Material fill fraction of the window centred at ``coords`` (L0 voxels), estimated from the cached
     coarse mask — instant, no full-res read. Same window footprint as :func:`build_brick`."""
-    from hercunet.hercunet.labels.common.scales import window_px, window_z_px
+    from hercunet.herculabels.common.scales import window_px, window_z_px
     mask, fac, (Z5, Y5, X5), voxel_um = scroll_material_mask(be, target, mask_level=mask_level)
     Sxy, Sz = window_px(voxel_um), window_z_px(voxel_um)
     zc, yc, xc = coords

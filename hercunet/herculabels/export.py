@@ -2,7 +2,7 @@
 
 Reads each corpus window (base sheet meshes + meshlet cloud) and writes the per-window training ``.npz``
 the training pipeline consumes — the base record plus, by default, the merge/split augmentations
-(:func:`hercunet.hercunet.labels._generate.build_records`, regenerated from the stored meshlet cloud, no pipeline
+(:func:`hercunet.herculabels._generate.build_records`, regenerated from the stored meshlet cloud, no pipeline
 re-run and no dense fields). Non-destructive and re-runnable: the corpus is never modified.
 
 ``--no-augment`` writes base-only samples (e.g. a validation set). The training consumer decides whether to
@@ -22,7 +22,7 @@ def export(corpus_path, train_out, *, augment=True, gpu=True,
            merge_size=3, n_merges=2, n_splits=2) -> None:
     """Export ``corpus_path`` (a ``.herculabels`` dir) into ``train_out`` as training samples. ``augment``
     (default True) also regenerates the augmentation records; ``gpu`` runs the ∇φ / refit on CUDA."""
-    from ...labels.corpus import Corpus
+    from ..labels.corpus import Corpus
     from ._generate import build_records
     import hercunet.labels.io.bundle as bundle
 

@@ -104,7 +104,7 @@ class _EditSignals(QObject):
 
 
 class EditWorker(QRunnable):
-    """Runs one interactive label edit — ``fn(progress)`` calling a ``hercunet.hercunet.labels.edit`` function —
+    """Runs one interactive label edit — ``fn(progress)`` calling a ``hercunet.herculabels.edit`` function —
     off the GUI thread (a split does a GPU/CPU mesh refit). Its ``progress`` hook forwards ``split_status``
     payloads to :attr:`signals.status` so the loading overlay can update mid-edit."""
 

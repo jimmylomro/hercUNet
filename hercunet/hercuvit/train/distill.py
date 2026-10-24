@@ -98,7 +98,7 @@ def _scroll_crops(source, n, batch, device, *, seed=0, **kw):
 def _resolve_scrolls(spec):
     """``--scrolls`` → scroll-id list. ``None``/``all`` = the full mined-scroll set (``m7mine.SCROLLS``); else a
     comma list."""
-    from ...hercunet.labels.m7mine import SCROLLS
+    from ...herculabels.m7mine import SCROLLS
     if not spec or str(spec).strip().lower() == "all":
         return list(SCROLLS)
     return [s.strip() for s in str(spec).split(",") if s.strip()]

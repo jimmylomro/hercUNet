@@ -28,12 +28,12 @@ generation and the viewer; the research **methodology** is under
 git clone https://github.com/jimmylomro/hercUNet.git
 cd hercUNet
 pipenv install                 # core: streaming data layer + stage-1 label generation
-pipenv install -e ".[viz]"     # + the interactive label viewer / editor (PySide6, pyqtgraph, PyOpenGL)
+pipenv install -e ".[herculabels]"     # + the interactive label viewer / editor (PySide6, pyqtgraph, PyOpenGL)
 ```
 
 `pipenv install` installs the package (editable, via the `Pipfile`) with its full runtime. The viewer is an
 **opt-in extra** (`[viz]`) — core label generation and the CLI never import it. Plain pip works too:
-`pip install .` (or `pip install ".[viz]"`); add `-e` only if you're editing the code.
+`pip install .` (or `pip install ".[herculabels]"`); add `-e` only if you're editing the code.
 
 **Stage-2 training** (`hercunet train …`) needs an **NVIDIA GPU** — a local workstation or a pod. Clone the repo
 and install the `train` extra:
@@ -121,7 +121,7 @@ pipenv run python -c "import torch; print(torch.__version__, torch.version.cuda,
 Everything is one `hercunet` console script. Run `pipenv run hercunet --help`, or
 `pipenv run hercunet <group> <command> --help` for any subcommand.
 
-### Stage 1 — labels (`hercunet labels …`)
+### Stage 1 — labels (`herculabels …`)
 
 Build, edit, combine, and export `.herculabels` pseudo-label corpora:
 

@@ -3,7 +3,7 @@
 ``hercunet labels create --interactive (or edit)`` opens a window (three orthogonal cross-sections +
 a 3D sheet view + a log pane) that streams the SAME pipeline the CLI runs — the viewer only observes
 via a progress hook; it never reimplements label generation. Qt (PySide6 + pyqtgraph) is an optional
-extra (``.[viz]`` / ``.[full]``) and is imported lazily by :mod:`hercunet.hercunet.viz.interactive`, so
+extra (``.[viz]`` / ``.[full]``) and is imported lazily by :mod:`hercunet.herculabels.viz.interactive`, so
 importing this package does not require it.
 """
 

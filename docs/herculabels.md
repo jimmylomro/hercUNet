@@ -21,7 +21,7 @@ medial-mesh fit, confidence), see the methodology write-up: [`../submission/writ
   ```bash
   cd ~/Desktop/hercunet
   pipenv install                 # core deps (torch, scipy, scikit-learn, hdbscan, matplotlib, …)
-  pipenv install -e ".[viz]"     # + the interactive viewer (PySide6, pyqtgraph, PyOpenGL)
+  pipenv install -e ".[herculabels]"     # + the interactive viewer (PySide6, pyqtgraph, PyOpenGL)
   ```
 
   Label generation needs only the core deps; **the interactive viewer (`--interactive` and `edit`) needs
@@ -31,7 +31,7 @@ medial-mesh fit, confidence), see the methodology write-up: [`../submission/writ
 - **Data access.** Voxels are read through the streaming data layer (see
   [data-layer.md](data-layer.md)); configure the backend via `HERCUNET_*` env vars / `Config`.
 
-Run `pipenv run hercunet labels <create|edit|export> --help` for the raw flag list of each verb.
+Run `pipenv run herculabels <create|edit|export> --help` for the raw flag list of each verb.
 
 ---
 
@@ -39,19 +39,19 @@ Run `pipenv run hercunet labels <create|edit|export> --help` for the raw flag li
 
 ```bash
 # 1) Grind a new corpus interactively (edit + save each window; close the viewer to stop)
-pipenv run hercunet labels create demo.herculabels --interactive --scroll PHerc1447
+pipenv run herculabels create demo.herculabels --interactive --scroll PHerc1447
 
 # 2) …or build one headless: 50 random material windows from the standard corpus
-pipenv run hercunet labels create demo.herculabels --count 50
+pipenv run herculabels create demo.herculabels --count 50
 
 # 3) Re-open the corpus later to keep correcting windows
-pipenv run hercunet labels edit demo.herculabels
+pipenv run herculabels edit demo.herculabels
 
 # 4) Extend a corpus: grind a fresh one, then merge into a combined corpus
-pipenv run hercunet labels merge combined.herculabels demo.herculabels more.herculabels
+pipenv run herculabels merge combined.herculabels demo.herculabels more.herculabels
 
 # 5) Export the training corpus (base + augmentations) for the refiner
-pipenv run hercunet labels export combined.herculabels ./train_out
+pipenv run herculabels export combined.herculabels ./train_out
 ```
 
 ---
@@ -72,16 +72,16 @@ These commands operate over a `.herculabels` corpus (a directory; always editabl
 
 ```bash
 # Random windows from the whole corpus (scroll auto-picked in the voxel band)
-pipenv run hercunet labels create demo.herculabels --count 100
+pipenv run herculabels create demo.herculabels --count 100
 
 # Random windows from one scroll
-pipenv run hercunet labels create demo.herculabels --count 100 --scroll PHerc1447
+pipenv run herculabels create demo.herculabels --count 100 --scroll PHerc1447
 
 # One exact window
-pipenv run hercunet labels create demo.herculabels --count 1 --scroll PHerc1447 --coords 11714,3293,3648
+pipenv run herculabels create demo.herculabels --count 1 --scroll PHerc1447 --coords 11714,3293,3648
 
 # An exact SET of windows from a coordinate file (regenerate a known corpus) — no --count
-pipenv run hercunet labels create demo.herculabels --coords-file windows.txt
+pipenv run herculabels create demo.herculabels --coords-file windows.txt
 ```
 
 Without `--coords`, windows are drawn randomly and windows that are mostly air are skipped. `--coords Z,Y,X`
@@ -95,16 +95,16 @@ writes its base sheet meshes + meshlet cloud into the corpus and appends a manif
 
 ```bash
 # Open-ended grind of random windows from a scroll
-pipenv run hercunet labels create demo.herculabels --interactive --scroll PHerc1447
+pipenv run herculabels create demo.herculabels --interactive --scroll PHerc1447
 
 # Grind only HIGH-material windows (≥ 55% fill) — the overlay reads "searching for a window with 55% material fill…"
-pipenv run hercunet labels create demo.herculabels --interactive --scroll PHerc1447 --himat 0.55
+pipenv run herculabels create demo.herculabels --interactive --scroll PHerc1447 --himat 0.55
 
 # Grind an ordered list of specific windows
-pipenv run hercunet labels create demo.herculabels --interactive --coords-file windows.txt
+pipenv run herculabels create demo.herculabels --interactive --coords-file windows.txt
 
 # Start at one exact window (then Next offers random / specify)
-pipenv run hercunet labels create demo.herculabels --interactive --scroll PHerc1447 --coords 11714,3293,3648
+pipenv run herculabels create demo.herculabels --interactive --scroll PHerc1447 --coords 11714,3293,3648
 ```
 
 - **No `--count`** — grinding is open-ended; you advance window-to-window and **close the viewer to
@@ -123,7 +123,7 @@ pipenv run hercunet labels create demo.herculabels --interactive --scroll PHerc1
 ### edit — correct an existing corpus
 
 ```bash
-pipenv run hercunet labels edit demo.herculabels
+pipenv run herculabels edit demo.herculabels
 ```
 
 Opens the corpus's windows in the same viewer, one after another (list-mode Next), loading each from disk
@@ -135,7 +135,7 @@ back in place and the window is flagged `edited` in the manifest.
 
 ```bash
 # Union two (or more) corpora into a new combined one
-pipenv run hercunet labels merge combined.herculabels session1.herculabels session2.herculabels
+pipenv run herculabels merge combined.herculabels session1.herculabels session2.herculabels
 ```
 
 `merge` builds a **new** output corpus (fails if it exists) holding the union of the inputs' windows; the
@@ -152,10 +152,10 @@ grind a fresh corpus and merge them — so `create`/`edit` stay simple.
 
 ```bash
 # Base + augmentations (the training set the refiner reads)
-pipenv run hercunet labels export demo.herculabels ./train_out
+pipenv run herculabels export demo.herculabels ./train_out
 
 # Base only (e.g. a validation set)
-pipenv run hercunet labels export demo.herculabels ./val_out --no-augment
+pipenv run herculabels export demo.herculabels ./val_out --no-augment
 ```
 
 Export never modifies the corpus, so you can edit and re-export freely.
@@ -173,10 +173,10 @@ pre-extracted set of `{0, 1, 2}` label windows.
 
 ```bash
 # Fresh scout: pick coherent compressed regions per scroll → write the m7 corpus
-pipenv run hercunet labels m7-mine ./m7_corpus --scroll PHerc1447,PHerc0800 --max-candidates 4
+pipenv run herculabels m7-mine ./m7_corpus --scroll PHerc1447,PHerc0800 --max-candidates 4
 
 # Reproduce an approved set exactly (no re-scout) from a scout manifest
-pipenv run hercunet labels m7-mine ./m7_corpus --manifest scout_manifest.json --max-candidates 4
+pipenv run herculabels m7-mine ./m7_corpus --manifest scout_manifest.json --max-candidates 4
 ```
 
 It is deliberately a **labels-stage**, do-it-once step: the m7 corpus is a reusable artifact. The refiner's
@@ -185,7 +185,7 @@ training chain then points at it — `hercunet train export-labels --corpus … 
 (K, the prev/candidate channels) must match the value used by `train export-labels` / `train preprocess`.
 See [training.md](training.md) for the training chain.
 
-The mining lives in `hercunet/hercunet/labels/m7mine.py` — the coherence recipe (`m7_coherence` / `label_from_window`,
+The mining lives in `hercunet/herculabels/m7mine.py` — the coherence recipe (`m7_coherence` / `label_from_window`,
 via the library's own `structure_tensor_frame_torch`), the deterministic manifest rebuild, and the fresh
 scout (fully automatic — the coherence judge selects the regions; the manifest is written for
 reproducibility). Windows are read through the data layer (`ZarrSegment`) on a thread pool so the anon-S3
@@ -374,12 +374,12 @@ window's coordinates and the exact extraction parameters — is in
 
 ```bash
 # regenerate exactly the published windows (note --old-negatives), then derive the training bundles:
-pipenv run hercunet labels create scroll_corpus.herculabels \
+pipenv run herculabels create scroll_corpus.herculabels \
     --old-negatives --coords-file submission/corpus/corpus_windows.txt
-pipenv run hercunet labels export scroll_corpus.herculabels ./train_out
+pipenv run herculabels export scroll_corpus.herculabels ./train_out
 
 # …or a fresh, equivalent draw from the same operating point:
-pipenv run hercunet labels create scroll_corpus.herculabels --old-negatives --count 4031 --seed 20260808
+pipenv run herculabels create scroll_corpus.herculabels --old-negatives --count 4031 --seed 20260808
 ```
 
 Per-window content is deterministic from `(run_id, scroll, coords)`; the original run spanned several code

@@ -162,7 +162,7 @@ class GrindSession:
         """Remove the window at ``scroll`` + ``coords`` (z,y,x) from the corpus (skip a bad one). Takes
         explicit coords — not ``_current_meta`` — so a failed window can't delete the previous good one.
         Returns the window id if it was present, else None."""
-        from ...labels.corpus import window_id
+        from ..labels.corpus import window_id
         if self.corpus is None or scroll is None or coords is None:
             return None
         return self.corpus.delete_window(window_id(scroll, level, coords))
@@ -240,7 +240,7 @@ class EditSession:
 
     def delete(self, scroll, coords, level=0):
         """Remove the window at ``scroll`` + ``coords`` from the corpus (same as :meth:`GrindSession.delete`)."""
-        from ...labels.corpus import window_id
+        from ..labels.corpus import window_id
         if scroll is None or coords is None:
             return None
         return self.corpus.delete_window(window_id(scroll, level, coords))

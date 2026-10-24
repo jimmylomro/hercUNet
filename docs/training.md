@@ -93,15 +93,15 @@ chain):
 1. **Our ∇φ samples.** Generate (or download the window list) and export to sample bundles — see
    [herculabels.md](herculabels.md):
    ```bash
-   hercunet labels create scroll_corpus.herculabels --old-negatives --coords-file submission/corpus/corpus_windows.txt
-   hercunet labels export  scroll_corpus.herculabels /workspace/corpus      # → sample_*.npz
+   herculabels create scroll_corpus.herculabels --old-negatives --coords-file submission/corpus/corpus_windows.txt
+   herculabels export  scroll_corpus.herculabels /workspace/corpus      # → sample_*.npz
    ```
 2. **The m7 rehearsal corpus.** Mine it from the *published* m7 predictions (reads open-data S3, no token):
    ```bash
    # deterministic rebuild from the shipped manifest (identical to ours; add --images for QC renders):
-   hercunet labels m7-mine /workspace/corpus/m7_corpus \
+   herculabels m7-mine /workspace/corpus/m7_corpus \
        --manifest submission/corpus/m7_scout_himat_manifest.json --max-candidates 4
-   # …or scout fresh: hercunet labels m7-mine /workspace/corpus/m7_corpus --scroll all --images
+   # …or scout fresh: herculabels m7-mine /workspace/corpus/m7_corpus --scroll all --images
    ```
 
 Either way you end up with `/workspace/corpus` (`.npz`) + `/workspace/corpus/m7_corpus`, ready for the chain.
@@ -119,7 +119,7 @@ This is the **HercUNet (run301 / v0) recipe** — the iterative AffinityMalis re
 single-pass ablation.
 
 > **The m7 rehearsal labels are mined once, in the labels stage** — not during training prep.
-> `hercunet labels m7-mine` scouts coherent m7 crest in compressed regions (from the published m7
+> `herculabels m7-mine` scouts coherent m7 crest in compressed regions (from the published m7
 > predictions) and writes a **pre-extracted m7 corpus**; `train export-labels --m7-corpus` then
 > **copies** those cases into the dataset (no re-mining, no symlinks). See
 > [herculabels.md](herculabels.md) for `m7-mine`.
@@ -132,7 +132,7 @@ single-pass ablation.
 | 4 | `fit` | train the refiner by **direct instantiation** of the trainer class (single-GPU or DDP); knobs via `CK_*` env | ✅ live |
 
 All four steps are our own in-process code (no nnU-Net internals in 1/3, stock library calls in 2/4). Step 1
-consumes a directory of `sample_s*.npz` bundles written by `hercunet labels export` (the light corpus→samples
+consumes a directory of `sample_s*.npz` bundles written by `herculabels export` (the light corpus→samples
 step) and decodes them with the library's own ∇φ EDT decoder (`hercunet.labels.mesh.medial.build_gradphi_edt`)
 — the two commands stay separate on purpose (`labels export` is cheap; `export-labels` is the heavy CT-fetch +
 decode + emit).
@@ -272,7 +272,7 @@ Dataset assembly — our own in-process code (no nnU-Net internals), the **HercU
   (CT + K candidate crests), `labelsTr` ({0,1,2}), `ownersTr` (band-limited instance GT for MALIS), and
   `dataset.json`. `--m7-corpus` then **copies** the pre-mined m7 cases in as `m7_*` (real writes, no symlinks;
   m7 cases carry no `ownersTr`, so MALIS stays silent on them).
-- `hercunet labels m7-mine` (`hercunet/hercunet/labels/m7mine.py`) — scout (`--scroll`) or deterministic rebuild
+- `herculabels m7-mine` (`hercunet/herculabels/m7mine.py`) — scout (`--scroll`) or deterministic rebuild
   (`--manifest`) of coherent m7 crest from the **published** m7 predictions + CT on the open-data bucket
   (`surf = m7 & (m7_normal_coherence > tau)`), written as a standalone **m7 corpus**. Lives in the **labels**
   stage — the mining is pseudo-label generation, done once, not during training prep.

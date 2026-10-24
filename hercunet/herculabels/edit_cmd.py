@@ -2,7 +2,7 @@
 
 Implicitly interactive: each window is loaded from the corpus (base meshes + meshlet cloud), shown in the
 same viewer as ``create --interactive``, and written back on save+advance. No labels are re-generated. The
-CT slice-pane background is re-read from the scroll on open (see :class:`hercunet.hercunet.labels.grind.EditSession`).
+CT slice-pane background is re-read from the scroll on open (see :class:`hercunet.herculabels.grind.EditSession`).
 """
 
 from __future__ import annotations
@@ -10,10 +10,10 @@ from __future__ import annotations
 
 def edit_corpus(corpus_path: str, *, gpu: bool = True) -> None:
     """Launch the viewer over the corpus at ``corpus_path`` and grind through its windows for correction."""
-    from ...config import Config
-    from ...data import get_backend
-    from ..viz.interactive import launch_interactive, require_viewer
-    from ...labels.corpus import Corpus
+    from ..config import Config
+    from ..data import get_backend
+    from .viz.interactive import launch_interactive, require_viewer
+    from ..labels.corpus import Corpus
     from .grind import EditSession
 
     require_viewer()                                            # fail fast with an install hint if [viz] is missing

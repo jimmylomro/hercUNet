@@ -57,7 +57,7 @@ def _initial_colours(plab, pts, voxel_um):
     """Adjacency-aware initial colouring ``{cid: (r,g,b)}`` (touching sheets forced to different palette
     entries), excluding noise. Same ``cluster_colors`` graph-colouring the CLI montage uses. This map is
     then held PERSISTENT for the session so an edit keeps every existing sheet's colour."""
-    from hercunet.hercunet.labels.common.scales import cluster_colors
+    from hercunet.herculabels.common.scales import cluster_colors
     raw = cluster_colors(np.asarray(plab), polylines=pts[:, None, :], voxel_um=voxel_um)
     return {int(c): (float(v[0]), float(v[1]), float(v[2])) for c, v in raw.items() if int(c) >= 0}
 
@@ -602,7 +602,7 @@ class InteractiveWindow(QMainWindow):
         cid = int(self._selection[0])
         self._split_cid = cid
         ctx = self._edit_ctx
-        from hercunet.hercunet.labels.edit import split_sheet
+        from hercunet.herculabels.edit import split_sheet
         self._start_edit(lambda progress: split_sheet(ctx, cid, progress),
                          f"splitting sheet {cid}…", f"split of sheet {cid}", self._on_split_done)
 
@@ -630,7 +630,7 @@ class InteractiveWindow(QMainWindow):
             return
         a, b = int(self._selection[0]), int(self._selection[1])
         ctx = self._edit_ctx
-        from hercunet.hercunet.labels.edit import merge_sheets
+        from hercunet.herculabels.edit import merge_sheets
         self._start_edit(lambda progress: merge_sheets(ctx, a, b, progress),
                          f"merging sheets {a} + {b}…", f"merge of sheets {a} + {b}", self._on_merge_done)
 
@@ -649,7 +649,7 @@ class InteractiveWindow(QMainWindow):
             return
         ids = [int(c) for c in self._selection]
         ctx = self._edit_ctx
-        from hercunet.hercunet.labels.edit import delete_sheets
+        from hercunet.herculabels.edit import delete_sheets
         lab = ", ".join(str(i) for i in ids)
         self._start_edit(lambda progress: delete_sheets(ctx, ids, progress),
                          f"deleting sheet(s) {lab}…", f"delete of sheet(s) {lab}", self._on_delete_done)

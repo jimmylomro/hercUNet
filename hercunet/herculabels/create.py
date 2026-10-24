@@ -70,18 +70,18 @@ def create(
         seed = int(np.random.SeedSequence().entropy) % (2**32)  # OS-entropy; recorded below so it stays reproducible
         print(f"[create] no seed given — using random seed {seed} (pass --seed {seed} to reproduce)", flush=True)
     if interactive:                                             # fail fast (before making the corpus dir) if [viz] is missing
-        from ..viz.interactive import require_viewer
+        from .viz.interactive import require_viewer
         require_viewer()
     mat_thr = float(himat) if himat is not None else _MIN_MATERIAL_FRAC
     # The slab-field negatives (§5.3) are now the DEFAULT; --old-negatives selects the gap-gated method
     # (§5.2) that made the published corpus. Internally the pipeline still keys on ``slab_negatives``.
     slab_negatives = not old_negatives
 
-    from ...config import Config
-    from ...data import get_backend
+    from ..config import Config
+    from ..data import get_backend
     from ._brick import build_brick, find_scroll, in_band_scrolls, sample_windows, window_material_frac
     from ._generate import generate
-    from ...labels.corpus import Corpus
+    from ..labels.corpus import Corpus
 
     be = get_backend(Config.from_env())
     run_id = f"run{seed}"
@@ -108,7 +108,7 @@ def create(
         )
 
     if interactive:                                              # launch the Qt viewer; it grinds into the corpus
-        from ..viz.interactive import launch_interactive
+        from .viz.interactive import launch_interactive
         from .grind import GrindSession, parse_coords_file
 
         scrolls = _resolve_scrolls(be, scroll, voxel_min, voxel_max, find_scroll, in_band_scrolls)
