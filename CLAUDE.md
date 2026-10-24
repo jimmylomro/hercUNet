@@ -4,9 +4,19 @@ Guidance for AI agents (and humans) developing in this repo. Read this first, th
 **before** writing code. This is a clean, self-contained package with a real CLI and a documented pipeline —
 treat it as such.
 
-> This branch (`hercuvit`) also hosts **HercuViT** — a Dinovol-based sheet-segmentation net built PARALLEL to
-> HercUNet (`hercunet/hercuvit/`, its own `hercuvit` CLI, spec in `docs/hercuvit.md`). It deliberately **reuses**
-> HercUNet's machinery (data layer, label pipeline, losses). The rule below applies to it with full force.
+> **Package layout — reorganised 2026-10 (read `docs/hercuvit-migration.md`).** Three products, each its own
+> package, over shared top-level modules:
+> - **HercuLabels** — `hercunet/herculabels/` — stage-1 label generation + the Qt editor (`viz/`). CLI: `herculabels`.
+> - **HercUNet** — `hercunet/hercunet/` — the nnU-Net refiner (training + recipes). CLI: `hercunet` (train + infer).
+> - **HercuViT** — `hercunet/hercuvit/` — Dinovol sheet segmentation. CLI: `hercuvit`. Spec: `docs/hercuvit.md`.
+> - **Shared** (used by more than one): `hercunet/data` (streaming layer + the training `dataset.py`),
+>   `hercunet/infer` (model-agnostic engine), `hercunet/losses` (MALIS + affinity), `hercunet/labels` (label
+>   GEOMETRY primitives: corpus, io, mesh, meshlets, embedding, fields, selection), `hercunet/pretrained`, `hercunet/config`.
+>
+> HercuViT and HercUNet deliberately **reuse** the shared machinery — the ⛔ rule below applies with full force.
+> **CLI change (breaking):** stage-1 is now `herculabels …` (was `hercunet labels …`). **Install is lean**: bare
+> install = the data layer only; each product is an extra (`.[herculabels]`, `.[train]`, `.[infer]`, `.[hercuvit]`,
+> `.[full]`). Full old→new mapping in `docs/hercuvit-migration.md`.
 
 ## ⛔ STOP — do NOT rewrite code that already exists here. READ IT AND REUSE IT.
 
@@ -18,7 +28,7 @@ that a function signature does NOT reveal and that you *will* get wrong by rewri
 
 **This is not hypothetical — here is what it already cost us.** HercuViT's CT reader was rewritten from scratch
 and treated `meta["org"]` as the window **ORIGIN**. But the entire label pipeline writes `meta["org"]` as the
-window **CENTRE** — the real reader, `hercunet/train/dataset.py:_window_req`, does `z0 = centre - shape//2`
+window **CENTRE** — the real reader, `hercunet/data/dataset.py:_window_req`, does `z0 = centre - shape//2`
 (clipped to the level shape; "same origin math as label generation's open_ct"). The rewrite therefore read every
 CT crop **offset by half a window on every axis**, so the CT was misaligned with its label, the net "wouldn't
 learn", and it burned a long multi-session debugging arc chasing the head, the attention, and the losses —
@@ -34,10 +44,10 @@ learn", and it burned a long multi-session debugging arc chasing the head, the a
 
 ## What this repo is
 HercUNet: a sheet-separation **refiner** for carbonised-papyrus µCT — a stock `nnunetv2==2.8.1` (pinned,
-unmodified) wrapped by the `hercunet` CLI. It has three stages, each with a guide under `docs/`:
-- **labels** — stage-1 pseudo-label generation (`hercunet labels …`; `docs/herculabels.md`),
-- **train** — the stage-2 refiner chain (`hercunet train …`; `docs/training.md`),
-- **infer** — stage-3 full-volume inference (`hercunet infer …`; `docs/infer.md`),
+unmodified) wrapped by the `hercunet` CLI. The full pipeline spans three products, each with a guide under `docs/`:
+- **HercuLabels** — stage-1 pseudo-label generation + editor (`herculabels …`; `docs/herculabels.md`),
+- **HercUNet train** — the stage-2 refiner chain (`hercunet train …`; `docs/training.md`),
+- **HercUNet infer** — stage-3 full-volume inference (`hercunet infer …`; `docs/infer.md`),
 plus the streaming **data layer** (`docs/data-layer.md`) and the sheet-segmentation decoder
 (`--meshes`; `docs/tracer-sheet-decoder.md`). Install & CLI overview: `docs/README.md`.
 
@@ -65,9 +75,10 @@ Only build a corpus from scratch (`labels create` / `labels m7-mine`) if you del
 to reproduce HercUNet v0, download the published corpus (`docs/training.md`, Option A).
 
 ## How to use the CLI (the happy path)
-- **Install:** a venv (or `pipenv`) + the right extra — `pip install -e ".[train]"` (training),
-  `".[infer]"` (inference), `".[viz]"` (label viewer). On a GPU pod, reuse the preinstalled CUDA torch with a
-  `python -m venv --system-site-packages` venv so the install doesn't pull a mismatched torch.
+- **Install:** a venv (or `pipenv`) + the right extra — bare install is the data layer only; add
+  `".[herculabels]"` (label generation + Qt editor), `".[train]"` (training), `".[infer]"` (inference), or
+  `".[hercuvit]"`. On a GPU pod, reuse the preinstalled CUDA torch with a `python -m venv --system-site-packages`
+  venv so the install doesn't pull a mismatched torch.
 - **Training is ONE command — the chain does everything** (export-labels → preprocess → export-owner → fit):
   ```
   hercunet train chain --nnunet-path <root> --corpus <dir> --m7-corpus <dir>/m7_corpus \
@@ -83,9 +94,11 @@ to reproduce HercUNet v0, download the published corpus (`docs/training.md`, Opt
   align to them. (And re-read the ⛔ warning at the top — reuse before you rewrite.)
 - **Extend the existing machinery; do not write standalone/janky scripts or patch on top.** Concretely:
   - a new trainer **subclasses** the existing one (inherit the owner-aware dataloader, MALIS, DAgger,
-    prev-channel, warm-start, and the per-term logging); register it as an **alias** in `train/launch.py`.
-  - new pipeline work goes **into the chain** (`train/dataset.py`, the chain steps), not around it.
-  - hyperparameters go in the **recipe** (`training/recipe.py`); new loss terms fold into the existing
+    prev-channel, warm-start, and the per-term logging); register it as an **alias** in
+    `hercunet/hercunet/training/launch.py`.
+  - new pipeline work goes **into the chain** (`hercunet/hercunet/training/`, and the shared
+    `hercunet/data/dataset.py`), not around it.
+  - hyperparameters go in the **recipe** (`hercunet/hercunet/training/recipe.py`); new loss terms fold into the existing
     `_acc` / per-term logging, in the same single-line style.
   - reuse the **data layer** (`data/`, streaming/caching/prefetch) and the existing **parallelism**
     (e.g. `nshards` process-sharding for export; `ThreadPoolExecutor` where the heavy call releases the GIL).
@@ -99,6 +112,9 @@ to reproduce HercUNet v0, download the published corpus (`docs/training.md`, Opt
   block-polling; the `train chain` logs every stage (export → preprocess → fit) to one stream.
 
 ## Layout
-`hercunet/{labels,train,training,infer,data,tracer,unwrap,viz,hercuvit}` · `docs/` (per-stage guides) · `tests/` ·
-`submission/` (writeup). The CLI is `hercunet` (`python -m hercunet …`), dispatched in `hercunet/cli.py`;
-HercuViT adds the parallel `hercuvit` CLI (`python -m hercunet.hercuvit …`).
+- **Products:** `hercunet/herculabels/` (+ `viz/`), `hercunet/hercunet/` (`training/`, `recipes/`, `refine/`, `cli.py`),
+  `hercunet/hercuvit/`.
+- **Shared:** `hercunet/{data,infer,losses,labels,pretrained.py,config.py}` (`labels/` = geometry primitives only).
+- `docs/` (per-stage guides + `hercuvit-migration.md`) · `tests/` · `submission/` (writeup).
+- **CLIs:** `herculabels` (`hercunet.herculabels.cli`), `hercunet` (`hercunet.hercunet.cli`, also `python -m hercunet`),
+  `hercuvit` (`hercunet.hercuvit.cli`). Reinstall (`pip install -e .`) after pulling to refresh the console scripts.

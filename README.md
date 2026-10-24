@@ -1,13 +1,11 @@
 # HercUNet
 
 > ## ⚠️ Repository reorganised (2026-10) — package layout + CLI changed
-> The three products are now separate packages — **HercuLabels** (`hercunet/herculabels/`, label generation + the
-> Qt editor), **HercUNet** (`hercunet/hercunet/`, the nnU-Net refiner), **HercuViT** (`hercunet/hercuvit/`) — over
-> shared top-level modules (data layer, inference engine, losses, label geometry). **Reinstall once**
-> (`pip install -e .`) to refresh the console scripts. `hercunet …` / `hercuvit …` are unchanged, but stage-1 label
-> generation moved to a new **`herculabels`** command (**breaking:** `hercunet labels …` → `herculabels …`). The
-> core install is now lean (data layer only); install `.[herculabels]`, `.[train]`, `.[infer]`, `.[hercuvit]` or
-> `.[full]`. Python import paths changed too. See **[docs/hercuvit-migration.md](docs/hercuvit-migration.md)**.
+> The three products are now separate packages — **HercuLabels** (`hercunet/herculabels/`), **HercUNet**
+> (`hercunet/hercunet/`), **HercuViT** (`hercunet/hercuvit/`) — over shared top-level modules. **Breaking:** stage-1
+> label generation moved to a new **`herculabels`** command (was `hercunet labels …`), the core install is now lean
+> (install the per-product extra you need), and Python import paths changed. **Reinstall once** after pulling.
+> → **[installation & usage](docs/README.md)** · **[migration guide](docs/hercuvit-migration.md)**.
 
 📄 **[Read the paper (v0) → `paper_v0.pdf`](submission/writeup/paper_v0.pdf)** — the full write-up of both stages (HercuLabels + HercUNet), frozen as the first submission version.
 
@@ -68,7 +66,7 @@ Start there. Each part of the project also has its own guide under [`docs/`](doc
 
 - **[Install & CLI](docs/README.md)** — requirements, `pipenv` install, CUDA build selection, the `hercunet` CLI. ✅
 - **[Data layer](docs/data-layer.md)** — streaming OME-Zarr reads, caching, prefetch, tiling, with a quickstart. ✅
-- **[Stage 1 — label generation](docs/herculabels.md)** — the `hercunet labels` CLI, the interactive grinding viewer, the `.herculabels` corpus format. ✅
+- **[Stage 1 — label generation](docs/herculabels.md)** — the `herculabels` CLI, the interactive grinding viewer, the `.herculabels` corpus format. ✅
 - **[Stage 2 — training the refiner](docs/training.md)** — the `hercunet train` chain over pinned `nnunetv2==2.8.1`. ✅
 - **[Stage 3 — inference](docs/infer.md)** — the `hercunet infer` iterative full-volume refiner (multi-GPU / multi-pod). ✅ (methodology: [`submission/writeup/hercunet.md`](submission/writeup/hercunet.md))
 
@@ -103,7 +101,7 @@ In short:
 
 **Full methodology → [`submission/writeup/herculabels.md`](submission/writeup/herculabels.md).**
 
-Try this, it's the window that started everything (you need to install with \[viz], check the installation guide):
+Try this, it's the window that started everything (you need to install with \[herculabels], check the installation guide):
 ```shell
 pipenv run herculabels create /tmp/test.herculabels --scroll PHerc1447 --coords 11714,3293,3648 --interactive
 ```

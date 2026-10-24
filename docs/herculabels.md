@@ -24,9 +24,9 @@ medial-mesh fit, confidence), see the methodology write-up: [`../submission/writ
   pipenv install -e ".[herculabels]"     # + the interactive viewer (PySide6, pyqtgraph, PyOpenGL)
   ```
 
-  Label generation needs only the core deps; **the interactive viewer (`--interactive` and `edit`) needs
-  the `[viz]` extra**. (`.[full]` additionally installs `obstore`, an optional native read backend — not
-  needed for the viewer.)
+  Label generation and the interactive viewer/editor (`--interactive`, `edit`) are all in **the `[herculabels]`
+  extra** (`pip install ".[herculabels]"`) — the lean core (data layer only) does not include them.
+  (`.[full]` additionally installs `obstore`, an optional native read backend — not needed for the viewer.)
 
 - **Data access.** Voxels are read through the streaming data layer (see
   [data-layer.md](data-layer.md)); configure the backend via `HERCUNET_*` env vars / `Config`.

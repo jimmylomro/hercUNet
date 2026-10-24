@@ -232,10 +232,10 @@ Checkpoints land in the standard `$nnUNet_results/…/fold_N/` tree, so inferenc
 ### The training recipe (hyperparameters — a YAML file, no env vars)
 
 Every refiner hyperparameter lives in **one auditable, shipped file**,
-[`hercunet/hercunet/recipes/hercunet.yml`](../hercunet/recipes/hercunet.yml) — installed with the package. It holds
+[`hercunet/hercunet/recipes/hercunet.yml`](../hercunet/hercunet/recipes/hercunet.yml) — installed with the package. It holds
 **exactly** the values HercUNet v0 (run301) trained with, and it *is* what the trainer loads by default — so a
 bare `hercunet train fit` reproduces the recipe with **no environment variables** (the old `CK_*` env vars are
-gone). ([`hercunet/hercunet/training/recipe.py`](../hercunet/training/recipe.py) is just the schema — types + docs.) At
+gone). ([`hercunet/hercunet/training/recipe.py`](../hercunet/hercunet/training/recipe.py) is just the schema — types + docs.) At
 the start of every run the trainer logs the resolved recipe (`[recipe] run301: malis_w=1.0  …`) into the
 nnU-Net training log, so each run carries its own provenance.
 
@@ -266,7 +266,7 @@ Training **length** is separate from the recipe: `--epochs N` overrides it (the 
 
 Dataset assembly — our own in-process code (no nnU-Net internals), the **HercUNet** recipe (not the ablation):
 
-- `export-labels` (`hercunet/data/dataset.py`) — reads the `sample_s*.npz` bundles from `hercunet labels
+- `export-labels` (`hercunet/data/dataset.py`) — reads the `sample_s*.npz` bundles from `herculabels
   export`, decodes each window with `hercunet.labels.mesh.medial.build_gradphi_edt` (the library's CPU/EDT ∇φ
   decoder, returning the unbounded-Voronoi `owner_full` for the collapsed-sheet ignore), and emits `imagesTr`
   (CT + K candidate crests), `labelsTr` ({0,1,2}), `ownersTr` (band-limited instance GT for MALIS), and

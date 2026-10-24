@@ -24,45 +24,45 @@ generation and the viewer; the research **methodology** is under
 
 ## Install
 
+The repo holds **three products** over a shared data layer, each installed as an opt-in extra. The **core** install
+is deliberately lean — the streaming data layer only (numpy/zarr/fsspec/s3fs; no torch) — so the reader, or a
+downstream that already has its own torch, pulls nothing heavy.
+
 ```bash
 git clone https://github.com/jimmylomro/hercUNet.git
 cd hercUNet
-pipenv install                 # core: streaming data layer + stage-1 label generation
-pipenv install -e ".[herculabels]"     # + the interactive label viewer / editor (PySide6, pyqtgraph, PyOpenGL)
+pip install .                      # core: the streaming data layer only
+pip install ".[herculabels]"       # HercuLabels: stage-1 label generation + the Qt editor
+pip install ".[hercuvit]"          # HercuViT: Dinovol sheet segmentation
+pip install ".[train]" ".[infer]"  # HercUNet: the nnU-Net refiner (training + inference)
+pip install ".[full]"              # everything
 ```
 
-`pipenv install` installs the package (editable, via the `Pipfile`) with its full runtime. The viewer is an
-**opt-in extra** (`[viz]`) — core label generation and the CLI never import it. Plain pip works too:
-`pip install .` (or `pip install ".[herculabels]"`); add `-e` only if you're editing the code.
+Add `-e` for an editable install when editing the code; `pipenv install` works too (the `Pipfile` pins Python
+3.12). After install the console scripts are **`herculabels …`** (stage 1), **`hercunet …`** (train/infer, stages
+2–3) and **`hercuvit …`**. Stages 2–3 (and HercuViT training) need an **NVIDIA GPU**.
 
-**Stage-2 training** (`hercunet train …`) needs an **NVIDIA GPU** — a local workstation or a pod. Clone the repo
-and install the `train` extra:
-
-```bash
-pip install ".[train]"             # contributors editing the code: add -e for an editable install
-```
-
-> **Note — reuse an existing CUDA `torch`.** The `train` extra pulls a default `torch` wheel. If your machine
-> already has a working CUDA `torch` you want to keep (common on GPU pods, or a curated local env), install into
-> a venv created with `--system-site-packages` so it is inherited rather than re-downloaded — this also
-> sidesteps a PEP-668 "externally managed" system `pip`:
+> **Note — reuse an existing CUDA `torch`.** The heavy extras pull a default `torch` wheel. If your machine already
+> has a working CUDA `torch` you want to keep (common on GPU pods, or a curated local env), install into a venv
+> created with `--system-site-packages` so it is inherited rather than re-downloaded — this also sidesteps a
+> PEP-668 "externally managed" system `pip`:
 > ```bash
 > python3 -m venv --system-site-packages .venv && .venv/bin/pip install ".[train]"
 > ```
 
-See **[training.md](training.md)** for the full walk-through — install notes, getting the data (download vs
-build), and the train/resume commands.
+See **[training.md](training.md)** for the stage-2 walk-through and **[herculabels.md](herculabels.md)** for stage 1.
 
 ### Extras
 
 | Extra | Adds | For |
 |---|---|---|
-| _(none)_ | data layer + stage-1 label gen | the default — everything runs |
-| `viz` | PySide6, pyqtgraph, PyOpenGL | the interactive viewer (`create --interactive`, `edit`) |
+| _(none)_ | numpy, zarr, fsspec, aiohttp, requests, s3fs | the streaming **data layer** — just the reader |
+| `herculabels` | torch, scipy, scikit-learn, hdbscan, matplotlib, numba, blosc2, tifffile, Pillow, cc3d, huggingface_hub, pyyaml, + PySide6/pyqtgraph/PyOpenGL | **HercuLabels** — stage-1 label generation + the Qt editor (`herculabels …`) |
+| `hercuvit` | torch, timm, einops, scipy, matplotlib, tifffile, numba, blosc2, zarr, huggingface_hub, pyyaml | **HercuViT** — Dinovol sheet segmentation (`hercuvit …`) — CUDA GPU for training |
+| `train` | nnunetv2==2.8.1 + torch, scipy, tifffile, huggingface_hub, acvl-utils, cc3d, numba, blosc2, pyyaml | **HercUNet** stage-2 refiner training (`hercunet train …`) — CUDA GPU |
+| `infer` | nnunetv2==2.8.1 + torch, scipy, numba, huggingface_hub, s5cmd | **HercUNet** stage-3 full-volume inference (`hercunet infer …`) — CUDA GPU |
 | `accel` | obstore | a faster native (non-boto) S3 reader |
-| `train` | nnunetv2==2.8.1 + huggingface_hub, acvl-utils, cc3d, numba, blosc2, tifffile, pyyaml | stage-2 refiner training (`hercunet train …`) — needs a CUDA GPU |
-| `infer` | nnunetv2==2.8.1 + huggingface_hub + s5cmd | stage-3 full-volume inference (`hercunet infer …`) — needs a CUDA GPU |
-| `full` | viz + accel + train + infer | everything |
+| `full` | herculabels + hercuvit + train + infer + accel | everything |
 | `dev` | pytest | the test suite |
 
 ## GPU / CUDA
