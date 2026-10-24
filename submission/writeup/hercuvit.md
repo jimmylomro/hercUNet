@@ -389,6 +389,97 @@ decoder without the cost or instability of full end-to-end training.)
 
 ---
 
+## 7. Training stability: the mask-decoder attention-logit explosion, and why QK-norm
+
+> **⚠️ WORK IN PROGRESS (as of 2026-10-24).** This section documents a training-stability failure we diagnosed in
+> the lightly-fine-tuned run and the fix. The QK-normed attention (§7.2) and the smooth encoder schedule (§7.3) are
+> **implemented and under retraining now**; the final numbers (bounded logits post-fix, recovered own-accuracy) will
+> replace the placeholders below once the retrain completes. The §6 statistics above were taken at epoch 131, which
+> — as this section explains — was *mid-divergence*; they will be refreshed from a clean post-fix checkpoint.
+
+The one place where the lightly-unfrozen variant (§6) bit us was **training stability**. After a healthy climb
+(own-sheet accuracy reaching ~0.56), the run **diverged around epoch 130**: the loss rose from ~124 to ~530, the
+ownership cross-entropy from ~8 to ~58, and own-accuracy fell from 0.56 to ~0.30. Crucially the divergence was
+*finite* — no `NaN`/`inf` — so a naïve non-finite guard never fired.
+
+**We instrumented every attention in the network and localised the blow-up precisely.** It is **not** the encoder:
+the fine-tuned encoder's query/key norms are essentially identical between the healthy (ep104) and diverged (ep136)
+checkpoints, so the self-supervised features — and the fine-tuning of them — are intact and salvageable. It is
+**not** the decoder self-attention either (logits stay ≤ ~16). The divergence is **entirely in the mask-decoder
+*cross*-attention** (queries attending to the pixel-decoder memory). The pre-softmax logits grow with decoder depth
+and then explode: across the six layers the maximum |logit| runs 109 / 892 / 1616 / 528 / 4128 / **19968** at ep136,
+against 11 / 17 / 15 / 34 / 107 / 245 in the healthy checkpoint. The driver is the **key norm**: max ‖k‖ reaches
+**~3025** (healthy ~64), while the query norm stays modest (1–20). This is the classic *attention-logit growth*
+instability [7,8]: nothing bounds the magnitude of the QK dot product, so a slow positive-feedback drift in the key
+projection eventually produces a near-one-hot softmax, a vanishing gradient through the attention, and a collapse of
+the ownership assignment. The growth is already visible, latent, in the healthy checkpoint (logits climbing
+11→245 with depth) — the run was always on this trajectory.
+
+### 7.1 Why the fix cannot live inside `torch.nn.MultiheadAttention`
+
+The remedy for attention-logit growth is **QK-normalisation**: normalise the per-head query and key vectors (over
+the head dimension) *before* the scaled dot product, so the logit scale is bounded by construction rather than by
+the drift of the projection weights [7,8,9]. The natural question is whether we can keep PyTorch's built-in
+`nn.MultiheadAttention` and simply switch on QK-norm. **We read the PyTorch 2.14 source to be sure, and the answer
+is no.** Our decoder layers call `nn.MultiheadAttention(..., need_weights=False)`; with that flag, after the packed
+in-projection the function hands the reshaped q, k, v straight to `scaled_dot_product_attention` — which is
+`torch._C._nn.scaled_dot_product_attention`, a **compiled C++/CUDA kernel** (the FlashAttention / memory-efficient /
+cuDNN / math backends). The scaling and the QK dot happen *inside* that kernel; there is **no Python-visible hook
+between the projection and the dot** where q and k could be normalised. (The `need_weights=True` path is a separate,
+slower pure-tensor `baddbmm`→`softmax`→`bmm` implementation — the one our probe recomputes logits from — but it,
+too, exposes no normalisation point and is not what training uses.) `nn.MultiheadAttention` encapsulates projection,
+reshape, dot and out-projection as one unit, so QK-norm cannot be inserted into it; it requires our own attention
+module.
+
+### 7.2 The fix: QK-LayerNorm around the fused kernel
+
+We therefore replace the two `nn.MultiheadAttention` modules in `MaskDecoderLayer` with a small custom attention
+that keeps the fast path and adds exactly the missing step:
+
+1. in-project q, k, v and reshape to `(B, H, L, head_dim)` (as before);
+2. **apply a per-head `LayerNorm` over `head_dim` to q and to k** (ViT-22B–style QK-LayerNorm [8]) — two cheap
+   elementwise operations;
+3. hand the normalised q, k and the raw v to **`F.scaled_dot_product_attention`**, so the heavy O(N²) dot ·
+   softmax · value product still runs in the **fused flash kernel** (fast, memory-efficient, numerically stable
+   online softmax);
+4. out-project (as before).
+
+Because SDPA retains its internal `1/√head_dim` scaling while q and k are now unit-RMS, each logit is a sum of
+`head_dim` roughly-unit terms scaled by `1/√head_dim` — i.e. **O(1) regardless of the input magnitude**. The
+pathological ‖k‖→3025 therefore cannot translate into a 19968 logit: the key norm is divided out before the dot.
+This is a *structural* fix to the instability's root cause, not a symptomatic patch — we deliberately did **not**
+reach for gradient clipping, a lower learning rate, loss-spike skipping, or re-freezing the encoder, all of which
+either mask the instability or sacrifice the fine-tuning gains of §6. Two implementation details matter: (a)
+Mask2Former *masked* cross-attention can leave a query row fully masked (all `-inf`), which yields `NaN` under SDPA,
+so fully-masked rows are reset to attend everywhere (the standard Mask2Former guard); and (b) the attention probe is
+adapted to read the *post-norm* logits, so the bound can be verified directly after the retrain.
+
+**Expected outcome (to be filled in):** cross-attention max |logit| bounded to O(10) across all six layers for the
+full run, ‖k‖ bounded to O(10), and own-accuracy climbing past the pre-divergence ceiling without collapse. The §6
+mask-feature statistics will be re-measured on the post-fix checkpoint.
+
+### 7.3 A smooth encoder schedule in place of the hard freeze→unfreeze
+
+The divergence also exposed a second fragility, in *how* the encoder is unfrozen. The original schedule is
+step-shaped LP-FT [10]: the encoder is held frozen for a warmup, then unfrozen in one step to a flat fine-tune
+multiplier. That hard transition forces the optimiser to be rebuilt (the trainable parameter set changes), which
+**wipes the AdamW moment estimates**, and the newly-trainable encoder then receives its full fine-tune learning rate
+with no ramp — a jolt precisely when the (now-confirmed) attention-logit growth is most sensitive. We replace it with
+a single **parametrised logistic ramp** of the encoder's learning-rate multiplier over epochs,
+
+&nbsp;&nbsp;&nbsp;&nbsp;*m*(ep) = *m*<sub>max</sub> / (1 + exp(−(ep − ep₀) / τ)),
+
+which rises smoothly from ≈0 through a half-point ep₀ at steepness τ and saturates at the cap *m*<sub>max</sub> (=
+the fine-tune multiplier). One curve subsumes warmup, ramp-up and the ramp-stop, with no special-casing. Because the
+encoder stays trainable throughout and the ramp is smooth, the optimiser is **never rebuilt for the unfreeze** and
+the AdamW moments persist across the whole fine-tune; the encoder learning rate is vanishing early (a true freeze for
+AdamW, whose updates and decoupled weight decay both scale with the rate) and grows only as the decoder stabilises.
+(For compute, encoder gradients are physically disabled only while the multiplier is in the deep toe of the sigmoid,
+below a small fraction of the cap.) Together with QK-norm this gives a fine-tune regime that is both smooth and
+bounded — the two properties the step-schedule + raw-dot-attention combination lacked.
+
+---
+
 ## References
 
 [1] Oquab, M., Darcet, T., Moutakanni, T., et al. (2024). *DINOv2: Learning Robust Visual Features without
@@ -408,3 +499,18 @@ Signal Processing Conference (EUSIPCO), 606–610.
 
 [6] Alain, G., and Bengio, Y. (2016). *Understanding intermediate layers using linear classifier probes.*
 arXiv:1610.01644.
+
+[7] Wortsman, M., Liu, P. J., Xiao, L., et al. (2024). *Small-scale proxies for large-scale Transformer training
+instabilities.* International Conference on Learning Representations (ICLR). arXiv:2309.14322. (Attention-logit
+growth; QK-norm and z-loss as mitigations.)
+
+[8] Dehghani, M., Djolonga, J., Mustafa, B., et al. (2023). *Scaling Vision Transformers to 22 Billion Parameters.*
+International Conference on Machine Learning (ICML). arXiv:2302.05442. (QK-LayerNorm on query and key before the
+dot product.)
+
+[9] Henry, A., Dachapally, P. R., Pawar, S., and Chen, Y. (2020). *Query-Key Normalization for Transformers.*
+Findings of EMNLP. arXiv:2010.04245.
+
+[10] Kumar, A., Raghunathan, A., Jones, R., Ma, T., and Liang, P. (2022). *Fine-Tuning can Distort Pretrained
+Features and Underperform Out-of-Distribution.* International Conference on Learning Representations (ICLR).
+arXiv:2202.10054. (LP-FT: linear-probe-then-fine-tune.)

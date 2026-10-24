@@ -62,7 +62,17 @@ def _add_train_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--batch-size", dest="batch_size", type=int, default=None, metavar="N", help="batch size (default 1)")
     p.add_argument("--base-lr", dest="base_lr", type=float, default=None, metavar="LR", help="base LR (default 1e-4)")
     p.add_argument("--encoder-lr-mult", dest="encoder_lr_mult", type=float, default=None, metavar="M",
-                   help="LR multiplier for the (unfrozen) encoder — stem + transformer (default 0.1)")
+                   help="LR multiplier CAP for the encoder — stem + transformer (default 0.1); the ceiling the "
+                        "sigmoid ramp saturates at in --encoder-lr-schedule sigmoid")
+    p.add_argument("--encoder-lr-schedule", dest="encoder_lr_schedule", default=None, choices=("step", "sigmoid"),
+                   help="encoder fine-tune schedule: 'step' (legacy frozen→hard-unfreeze LP-FT) | 'sigmoid' (smooth "
+                        "logistic ramp of the encoder LR mult over epochs, cap=encoder-lr-mult; default step)")
+    p.add_argument("--encoder-sigmoid-midpoint", dest="encoder_sigmoid_midpoint", type=float, default=None, metavar="EP",
+                   help="sigmoid mode: epoch where the encoder LR ramp reaches half the cap (default 120)")
+    p.add_argument("--encoder-sigmoid-width", dest="encoder_sigmoid_width", type=float, default=None, metavar="EP",
+                   help="sigmoid mode: ramp steepness in epochs (larger = gentler; default 25)")
+    p.add_argument("--encoder-grad-enable-frac", dest="encoder_grad_enable_frac", type=float, default=None, metavar="F",
+                   help="sigmoid mode: enable encoder grad once m(ep) ≥ F×cap (default 1e-3; deep-toe compute saving)")
     p.add_argument("--decoder-lr-mult", dest="decoder_lr_mult", type=float, default=None, metavar="M",
                    help="LR multiplier for the pixel decoder (default 1.0; <1 fine-tunes a warm-started decoder "
                         "gently while the fresh instance head trains at base LR)")

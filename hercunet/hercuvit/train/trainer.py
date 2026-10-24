@@ -28,39 +28,6 @@ from . import losses as L
 _C = dict(tot="\033[1;97m", sem="\033[36m", inst="\033[35m", dim="\033[2m", r="\033[0m")
 
 
-@torch.no_grad()
-def _fps_sheet_coverage(query_idx, owner_thin, has_id, *, side: int = 16):
-    k = max(1, owner_thin.shape[-1] // int(side))
-    """FPS seed coverage over GT sheets: fraction of GT sheets that have >=1 FPS seed landing in their 1/8 cell.
-
-    ``query_idx`` (B, 1+Q) are the FPS-selected 1/8 token indices (null = -1), ``owner_thin`` (B,D,H,W) the thin GT
-    sheet ids. For each seed, its 8³ cell's GT sheet ids count as "covered". Returns ``(covered, total)`` summed
-    over the batch (micro-average numerator/denominator), so the epoch coverage is Σcovered / Σsheets. Cheap:
-    ~64 small ``unique`` calls per item, detached — a diagnostic of whether the query init even reaches every sheet."""
-    B = owner_thin.shape[0]
-    covered_tot = 0
-    sheet_tot = 0
-    qi = query_idx.detach()
-    for b in range(B):
-        if not bool(has_id[b]):
-            continue
-        ob = owner_thin[b]
-        ids = torch.unique(ob); ids = ids[ids > 0]
-        if ids.numel() == 0:
-            continue
-        seeds = qi[b]; seeds = seeds[seeds >= 0].tolist()             # drop the null query (-1); -> python ints
-        covered: set[int] = set()
-        for s in seeds:
-            tz, ty, tx = s // (side * side), (s // side) % side, s % side
-            blk = ob[tz * k:(tz + 1) * k, ty * k:(ty + 1) * k, tx * k:(tx + 1) * k]
-            u = torch.unique(blk); u = u[u > 0]
-            if u.numel():
-                covered.update(int(x) for x in u.tolist())
-        covered_tot += len(set(int(x) for x in ids.tolist()) & covered)
-        sheet_tot += int(ids.numel())
-    return covered_tot, sheet_tot
-
-
 class HercuvitTrainer:
     def __init__(self, net, recipe, out_dir, *, model_cfg=None, device="cuda") -> None:
         self.net = net
@@ -77,9 +44,26 @@ class HercuvitTrainer:
         self.optim = None
 
     # ---- LP-FT freeze-warmup ----------------------------------------------------------------------
+    def _enc_mult(self, ep: int) -> float:
+        """The encoder LR multiplier at epoch ``ep`` (cap = ``encoder_lr_mult``). In ``sigmoid`` mode this is a smooth
+        logistic ramp ``cap / (1 + exp(-(ep - midpoint)/width))`` — one curve replacing warmup+ramp+stop; in the
+        legacy ``step`` mode it is 0 while frozen and the flat ``cap`` afterwards (the flat value is already baked into
+        the encoder param-group base_lr, so the step path returns the cap and lets the group carry it)."""
+        import math
+        cap = float(self.recipe.encoder_lr_mult)
+        if str(getattr(self.recipe, "encoder_lr_schedule", "step")) != "sigmoid":
+            return cap
+        w = max(1e-6, float(self.recipe.encoder_sigmoid_width))
+        return cap / (1.0 + math.exp(-(float(ep) - float(self.recipe.encoder_sigmoid_midpoint)) / w))
+
     def _frozen_at(self, ep: int) -> bool:
-        """True while the ENCODER (stem + transformer) is frozen — the first ``freeze_warmup_epochs`` (train the head
-        on the encoder's features), then it is fine-tuned at ``encoder_lr_mult`` × LR."""
+        """True while the ENCODER (stem + transformer) grad is OFF. ``step`` mode: the first ``freeze_warmup_epochs``.
+        ``sigmoid`` mode: only while the ramp is in its deep toe (``m(ep) < encoder_grad_enable_frac × cap``) — the
+        encoder is otherwise trainable throughout, its LR driven by the sigmoid (so AdamW moments persist; the one
+        rebuild at the toe crossing wipes only ~0 moments)."""
+        if str(getattr(self.recipe, "encoder_lr_schedule", "step")) == "sigmoid":
+            cap = float(self.recipe.encoder_lr_mult)
+            return self._enc_mult(ep) < float(self.recipe.encoder_grad_enable_frac) * cap
         return ep < int(self.recipe.freeze_warmup_epochs)
 
     def _decoder_frozen_at(self, ep: int) -> bool:
@@ -100,7 +84,10 @@ class HercuvitTrainer:
             self._dec_frozen = dec_f; changed = True
         if changed:
             self._build_optimiser()                             # the trainable set changed → rebuild the optimiser
-            print(f"[hercuvit] encoder {'FROZEN' if enc_f else 'trainable@×LR'} | decoder-trunk "
+            sig = str(getattr(self.recipe, "encoder_lr_schedule", "step")) == "sigmoid"
+            enc_s = ("FROZEN" if enc_f else
+                     (f"trainable@sigmoid(ep)×LR (m={self._enc_mult(ep):.2e})" if sig else "trainable@×LR"))
+            print(f"[hercuvit] encoder {enc_s} | decoder-trunk "
                   f"{'FROZEN (instance warmup)' if dec_f else 'trainable'}", flush=True)
 
     def _build_optimiser(self) -> None:
@@ -123,21 +110,26 @@ class HercuvitTrainer:
             return 0.5 * (1.0 + math.cos(math.pi * prog))
         return 1.0
 
-    def _apply_lr(self) -> float:
+    def _apply_lr(self, epoch: int) -> float:
+        """Set every group's LR to ``base_lr × cosine/warmup scale``. The encoder group additionally gets the smooth
+        per-epoch sigmoid factor ``m(ep)/cap`` (≈0 in the toe → ≈1 at the cap) in ``sigmoid`` mode; in ``step`` mode
+        that factor is 1 (the flat multiplier is already in the group's base_lr)."""
         s = self._lr_scale()
+        cap = max(1e-12, float(self.recipe.encoder_lr_mult))
+        enc_rel = (self._enc_mult(epoch) / cap
+                   if str(getattr(self.recipe, "encoder_lr_schedule", "step")) == "sigmoid" else 1.0)
         for g in self.optim.param_groups:
-            g["lr"] = g["base_lr"] * s
+            g["lr"] = g["base_lr"] * s * (enc_rel if g.get("is_encoder") else 1.0)
         return self.optim.param_groups[0]["lr"]
 
     # ---- one epoch --------------------------------------------------------------------------------
     def _run_epoch(self, loader, epoch: int) -> None:
         self.net.train()
         # accumulate on-GPU as tensors (one .item() per epoch at print time, NOT ~8 float() syncs/step — §profiling)
-        acc = {k: torch.zeros((), device=self.device) for k in ("loss", "class", "own", "dn", "symskel", "malis", "surf", "fire", "share")}
+        acc = {k: torch.zeros((), device=self.device) for k in ("loss", "own", "dn", "symskel", "malis", "surf", "fire", "share")}
         n_share = 0                                                    # count of steps that reported surf_share (subspace split)
         pdc = {k: torch.zeros((), device=self.device) for k in ("tp", "fp", "fn")}  # surface pseudo-Dice (nnU-Net-style)
         own = {"correct": torch.zeros((), device=self.device), "fg": torch.zeros((), device=self.device)}
-        fpsc = {"cov": 0.0, "n": 0.0}                                  # FPS seed coverage (diagnostic; sampled every 25 steps)
         n = 0
         nan_skips = 0
         amp_dtype = torch.bfloat16
@@ -149,7 +141,7 @@ class HercuvitTrainer:
             has_id = batch["has_identity"]
             owner_thin = owner * (sem == 1).to(owner.dtype)    # THIN GT: sheet id kept ONLY on its medial surface
 
-            lr = self._apply_lr()
+            lr = self._apply_lr(epoch)
             self.optim.zero_grad(set_to_none=True)
             surface_only = bool(self.recipe.surface_only)             # design-B stage 1: train ONLY the surface head
             run_instance = not surface_only
@@ -224,14 +216,9 @@ class HercuvitTrainer:
                     tm = (sem == 1) & vmask
                     pdc["tp"] += (pm & tm).sum(); pdc["fp"] += (pm & ~tm).sum(); pdc["fn"] += (~pm & tm).sum()
             if it is not None:
-                acc["class"] += it["class"]; acc["own"] += it["mask_bce"]
+                acc["own"] += it["mask_bce"]
                 acc["dn"] += it["dn"]; acc["fire"] += it["n_fire"]
                 own["correct"] += it["own_correct"]; own["fg"] += it["own_fg"]
-                inst_out = out.get("instance")
-                if inst_out is not None and inst_out.get("query_idx") is not None and (bi % 25 == 0):
-                    c, ntot = _fps_sheet_coverage(inst_out["query_idx"], owner_thin, has_id,
-                                                  side=int(inst_out.get("seed_grid", 16)))
-                    fpsc["cov"] += c; fpsc["n"] += ntot
             if skt is not None:
                 acc["symskel"] += float(skt["tversky"])
             if mt is not None:
@@ -241,7 +228,6 @@ class HercuvitTrainer:
         share_val = float(acc["share"]) / max(n_share, 1)             # mean ‖f[0:surf_dim]‖² (subspace norm share)
         pdice = float(2 * pdc["tp"] / (2 * pdc["tp"] + pdc["fp"] + pdc["fn"]).clamp_min(1.0))  # epoch micro pseudo-Dice
         own_acc = float(own["correct"]) / max(float(own["fg"]), 1.0)   # frac of sheet voxels owned by their matched query
-        fps_cov = fpsc["cov"] / max(fpsc["n"], 1.0)                    # frac of GT sheets reached by >=1 FPS seed
         dt = time.time() - t0
         run_instance = not bool(self.recipe.surface_only)
         share_str = f" share {share_val:.3f}" if n_share > 0 else ""   # subspace norm share (≈0.19; →1 = collapse)
@@ -249,9 +235,8 @@ class HercuvitTrainer:
                  f"{_C['sem']}surf {m['surf']:.3f} pdice {pdice:.4f}{share_str}{_C['r']}"]
         if run_instance:
             # own-acc = ownership quality (↑ = masks carve the surface into their matched sheets); fire = queries used
-            parts.append(f"{_C['inst']}inst [class {m['class']:.3f} own-ce {m['own']:.3f} dn {m['dn']:.3f}] "
-                         f"own-acc {own_acc:.3f} fire {m['fire']:.1f}/{int(self.recipe.n_queries)} "
-                         f"fps-cov {fps_cov:.2f}{_C['r']}")
+            parts.append(f"{_C['inst']}inst [own-ce {m['own']:.3f} dn {m['dn']:.3f}] "
+                         f"own-acc {own_acc:.3f} fire {m['fire']:.1f}/{int(self.recipe.n_queries)}{_C['r']}")
             extra = []
             if self.recipe.w_symskel > 0: extra.append(f"symskel {m['symskel']:.3f}")
             if self.recipe.w_malis > 0: extra.append(f"malis {m['malis']:.4f}")

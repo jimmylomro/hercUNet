@@ -41,22 +41,73 @@ def _mlp(dim: int, hidden: int, out: int, n: int = 3) -> nn.Sequential:
     return nn.Sequential(*layers)
 
 
+class QKNormAttention(nn.Module):
+    """Multi-head attention with **per-head QK-LayerNorm** — query and key are LayerNorm'd over the head dimension
+    *before* the scaled dot — computed through the fused ``F.scaled_dot_product_attention`` kernel.
+
+    Drop-in replacement for ``nn.MultiheadAttention(dim, n_heads, batch_first=True)`` as used in the mask decoder,
+    with one structural change: the normalisation of q and k (ViT-22B QK-LayerNorm [Dehghani+ 2023]; Wortsman+ 2024).
+    PyTorch's ``nn.MultiheadAttention`` cannot host this — with ``need_weights=False`` it hands q,k,v straight to the
+    compiled ``scaled_dot_product_attention`` kernel, exposing no hook between the in-projection and the dot. Here we
+    normalise q,k ourselves (cheap elementwise ops) and keep SDPA for the heavy O(N²) dot·softmax·value. Because SDPA
+    keeps its internal ``1/√head_dim`` scaling while q,k are unit-RMS, each logit is O(1) *regardless of the magnitude
+    of the projected keys/queries* — the structural fix for the mask-decoder attention-logit explosion (an unbounded
+    key norm, ‖k‖→3025, drove the cross-attention logits to ~20000 and collapsed training).
+
+    ``attn_mask`` follows the decoder's convention used by :class:`MaskDecoderLayer`: a **bool** tensor of shape
+    ``(B·n_heads, Lq, Lk)`` with ``True`` = MASKED (not allowed to attend), or ``None`` for full attention. A fully
+    masked query row is reset to attend everywhere (SDPA returns ``NaN`` for an all-``-inf`` row), matching the
+    Mask2Former masked-attention guard.
+    """
+
+    def __init__(self, dim: int, n_heads: int, bias: bool = True) -> None:
+        super().__init__()
+        if dim % n_heads != 0:
+            raise ValueError(f"dim {dim} not divisible by n_heads {n_heads}")
+        self.dim = int(dim); self.n_heads = int(n_heads); self.head_dim = dim // n_heads
+        self.q_proj = nn.Linear(dim, dim, bias=bias)
+        self.k_proj = nn.Linear(dim, dim, bias=bias)
+        self.v_proj = nn.Linear(dim, dim, bias=bias)
+        self.out_proj = nn.Linear(dim, dim, bias=bias)
+        self.q_norm = nn.LayerNorm(self.head_dim)          # QK-LayerNorm (per head, over head_dim)
+        self.k_norm = nn.LayerNorm(self.head_dim)
+
+    def _heads(self, x: torch.Tensor) -> torch.Tensor:     # (B,L,dim) → (B,H,L,head_dim)
+        B, L, _ = x.shape
+        return x.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+
+    def forward(self, query, key, value, attn_mask=None):
+        B, Lq, _ = query.shape
+        q = self.q_norm(self._heads(self.q_proj(query)))   # (B,H,Lq,hd)  ← normalised before the dot
+        k = self.k_norm(self._heads(self.k_proj(key)))     # (B,H,Lk,hd)  ← normalised before the dot
+        v = self._heads(self.v_proj(value))                # (B,H,Lk,hd)
+        bias = None
+        if attn_mask is not None:                          # (B·H,Lq,Lk) bool True=masked → (B,H,Lq,Lk) float bias
+            m = attn_mask.view(B, self.n_heads, Lq, attn_mask.shape[-1])
+            m = m & ~m.all(dim=-1, keepdim=True)           # fully-masked row → attend everywhere (no NaN)
+            bias = torch.zeros_like(m, dtype=q.dtype).masked_fill_(m, float("-inf"))
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)   # fused kernel; internal 1/√head_dim scale
+        out = out.transpose(1, 2).reshape(B, Lq, self.dim)
+        return self.out_proj(out)
+
+
 class MaskDecoderLayer(nn.Module):
-    """Mask2Former decoder layer: masked cross-attn (to one memory level) → self-attn → FFN (pre-norm, residual)."""
+    """Mask2Former decoder layer: masked cross-attn (to one memory level) → self-attn → FFN (pre-norm, residual).
+    Both attentions use :class:`QKNormAttention` (QK-LayerNorm) for training stability — see its docstring."""
 
     def __init__(self, dim: int, n_heads: int, mlp_ratio: int = 4) -> None:
         super().__init__()
         self.n_heads = int(n_heads)
-        self.cross = nn.MultiheadAttention(dim, n_heads, batch_first=True)
-        self.self_attn = nn.MultiheadAttention(dim, n_heads, batch_first=True)
+        self.cross = QKNormAttention(dim, n_heads)
+        self.self_attn = QKNormAttention(dim, n_heads)
         self.n1 = nn.LayerNorm(dim); self.n2 = nn.LayerNorm(dim); self.n3 = nn.LayerNorm(dim)
         self.mlp = nn.Sequential(nn.Linear(dim, dim * mlp_ratio), nn.GELU(), nn.Linear(dim * mlp_ratio, dim))
 
     def forward(self, q, qpos, mem_k, mem_v, cross_mask, self_mask):
         qn = self.n1(q)
-        q = q + self.cross(qn + qpos, mem_k, mem_v, attn_mask=cross_mask, need_weights=False)[0]
+        q = q + self.cross(qn + qpos, mem_k, mem_v, attn_mask=cross_mask)
         qn = self.n2(q)
-        q = q + self.self_attn(qn + qpos, qn + qpos, qn, attn_mask=self_mask, need_weights=False)[0]
+        q = q + self.self_attn(qn + qpos, qn + qpos, qn, attn_mask=self_mask)
         q = q + self.mlp(self.n3(q))
         return q
 

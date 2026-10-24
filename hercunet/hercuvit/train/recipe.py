@@ -108,6 +108,17 @@ class HercuvitRecipe:
     #     head on the distilled encoder's features so the random head's early gradients don't distort them),
     #     then fine-tuned at ``encoder_lr_mult`` × LR for the remainder. ---
     epochs: int = 175                               # total training epochs
+    # --- encoder fine-tune schedule. "step" = legacy LP-FT (frozen for ``freeze_warmup_epochs`` then a hard jump to
+    #     flat ``encoder_lr_mult``; rebuilds the optimiser at the jump → wipes AdamW moments, fragile). "sigmoid" = a
+    #     smooth parametrised logistic ramp of the encoder LR multiplier over EPOCHS, from ~0 up to a cap of
+    #     ``encoder_lr_mult``: ``m(ep) = encoder_lr_mult / (1 + exp(-(ep - midpoint)/width))`` — one elegant curve in
+    #     place of warmup+ramp+stop. The encoder stays trainable throughout (LR≈0 is a true freeze for AdamW), so the
+    #     moments persist; grad is only physically disabled while ``m`` is below ``encoder_grad_enable_frac``×cap (deep
+    #     toe → compute saving, and the single optimiser rebuild at the crossing wipes only ~0 moments). ---
+    encoder_lr_schedule: str = "step"               # "step" (legacy LP-FT) | "sigmoid" (smooth logistic ramp)
+    encoder_sigmoid_midpoint: float = 120.0         # epoch at which the ramp reaches half the cap (sigmoid mode)
+    encoder_sigmoid_width: float = 25.0             # ramp steepness in epochs (larger = gentler; sigmoid mode)
+    encoder_grad_enable_frac: float = 1.0e-3        # enable encoder grad once m(ep) ≥ this × cap (sigmoid mode)
     freeze_warmup_epochs: int = 50                  # epochs with the transformer frozen (0 = fine-tune from step 0)
     freeze_decoder_epochs: int = 0                  # epochs with the warm-started decoder TRUNK + surface head frozen
                                                     # (mask head + instance head still train) — instance-head warmup
@@ -205,7 +216,8 @@ _TUPLE_FIELDS = {"global_blocks", "window_size", "deep_sup_weights", "sr_factor"
 _TRAIN_FIELDS = frozenset({
     "attention_backend", "target_voxel_um", "augment", "batch_size",
     "base_lr", "encoder_lr_mult", "decoder_lr_mult", "weight_decay", "grad_clip", "warmup_steps", "lr_schedule",
-    "epochs", "freeze_warmup_epochs", "freeze_decoder_epochs", "softmax_temp", "mask_loss_chunks",
+    "epochs", "encoder_lr_schedule", "encoder_sigmoid_midpoint", "encoder_sigmoid_width",
+    "encoder_grad_enable_frac", "freeze_warmup_epochs", "freeze_decoder_epochs", "softmax_temp", "mask_loss_chunks",
     "val_fold", "val_interval", "val_windows",
     "w_surface", "surface_only",
     "sem_fg_weight", "w_sem_ce", "w_sem_tversky", "w_sem_skel", "w_sem_sep",

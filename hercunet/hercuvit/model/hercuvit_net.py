@@ -143,7 +143,7 @@ class HercuVitNet(nn.Module):
         if pd:
             groups.append({"params": pd, "lr": base_lr * decoder_lr_mult})
         if enc:
-            groups.append({"params": enc, "lr": base_lr * encoder_lr_mult})
+            groups.append({"params": enc, "lr": base_lr * encoder_lr_mult, "is_encoder": True})
         return groups
 
 
