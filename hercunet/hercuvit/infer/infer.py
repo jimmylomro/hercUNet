@@ -1,34 +1,58 @@
 """HercuViT full-volume inference — drives the shared, model-agnostic engine (:mod:`hercunet.infer.engine`) with the
-``hercuvit-surface`` model (:class:`hercunet.hercuvit.infer.model.HercuvitSurfaceModel`).
+``hercuvit-surface`` model (:class:`hercunet.hercuvit.infer.model.HercuvitSurfaceModel`) through the SAME fan-out as
+``hercunet infer`` (:func:`hercunet.infer.run.run_fanout`): one worker process per local GPU on a shared ``.done``
+claim-queue, a per-pass barrier, and leader-automatic pyramid finalise + S3 upload — across pods too (multi-instance).
 
-HercuViT is single-pass (no Jacobi ``prev`` feedback) and 1-channel; the engine streams the CT, tiles it, runs the
-overlapping windows, Gaussian-blends the SURFACE (``sem_logits[:,1]-sem_logits[:,0]`` → sigmoid), and writes a
-VC3D-friendly OME-Zarr ``{out}_sem.zarr`` + pyramid. Per-sheet masks are NOT emitted (the decoupled instance head is
-built off at load). The engine supplies region/full-volume, empty-window skipping, streaming + prefetch, and — when
-driven multi-process — the claim-queue ``.done`` work-stealing + leader finalise + S3 upload, same as hercunet.
+HercuViT is single-pass (no Jacobi ``prev`` feedback) and 1-channel; the engine streams the CT, tiles it, Gaussian-
+blends the SURFACE (``sem_logits[:,1]-sem_logits[:,0]`` → sigmoid) and writes ``{out}_pass0.zarr`` + pyramid. Per-sheet
+masks are NOT emitted (the decoupled instance head is built off at load).
 """
 from __future__ import annotations
 
 
-def single_instance(args) -> None:
-    """``hercuvit infer single-instance`` handler — one box, semantic surface output via the shared engine."""
+def _resolve_model(a) -> str:
+    """A LOCAL HercuViT model path (dir or .pth; ``model.load`` handles both). ``--model`` local, or ``--model-hf``
+    snapshot-downloaded once in the parent so every worker reads the same local copy."""
+    if a.model and a.model_hf:
+        raise SystemExit("hercuvit infer: pass --model OR --model-hf, not both.")
+    if a.model:
+        return a.model
+    if a.model_hf:
+        from huggingface_hub import snapshot_download
+        print(f"[hercuvit] downloading model from HF {a.model_hf} …", flush=True)
+        return snapshot_download(a.model_hf)
+    raise SystemExit("hercuvit infer: give a model — --model <dir|.pth> or --model-hf <repo>.")
+
+
+def _drive(a, *, across_pods: bool) -> None:
     import torch
+    from ...infer.run import run_fanout, parse_region, _maybe_presync, engine_jargs
     from ...infer.engine import run_inference
-    from ...infer.run import parse_region
 
-    device = args.device
-    if device == "cuda" and not torch.cuda.is_available():
-        print("[hercuvit] no CUDA visible — falling back to CPU (slow)", flush=True)
-        device = "cpu"
-
-    run_inference(
-        source=args.source,
-        out_prefix=args.out,                                  # engine writes {out}_pass0.zarr (single pass)
+    model_dir = _resolve_model(a)
+    region = parse_region(a.region)
+    source = _maybe_presync(a, region)
+    jargs = dict(
+        engine_jargs(a, region, source),
         model_type="hercuvit-surface",
-        model_import="hercunet.hercuvit.infer.model",         # registers HercuvitSurfaceModel in this/worker process
-        model=args.model, model_hf=args.model_hf, ckpt=args.ckpt, device=device,
-        model_opts=dict(attention_backend=args.attention_backend, overlap=args.overlap),
-        region=parse_region(args.region), level=args.level, air=args.air,
-        finalise=args.finalise,                              # "last" | "no"
-        multi=False,                                          # single-GPU in-process (multi-GPU/pod + S3 = future CLI flags)
+        model_import="hercunet.hercuvit.infer.model",          # so a worker subprocess registers the model
+        model_opts=dict(attention_backend=a.attention_backend, overlap=a.overlap),
     )
+    if a.device == "cpu" or not torch.cuda.is_available():
+        if across_pods:
+            raise SystemExit("hercuvit infer multi-instance requires CUDA GPUs.")
+        print("[hercuvit] no CUDA (or --device cpu) — running the engine in-process on CPU (slow)", flush=True)
+        run_inference(model=model_dir, device="cpu", multi=False, leader=True, **jargs)
+    else:
+        run_fanout(a, model_dir, jargs, across_pods=across_pods)
+
+
+def single_instance(a) -> None:
+    """``hercuvit infer single-instance`` — one box, fanning across its local GPUs (CPU fallback in-process)."""
+    _drive(a, across_pods=False)
+
+
+def multi_instance(a) -> None:
+    """``hercuvit infer multi-instance`` — run the SAME command on each pod (``--out`` on shared storage, ``--leader``
+    on one); each pod fans across its own GPUs on the shared claim-queue."""
+    _drive(a, across_pods=True)

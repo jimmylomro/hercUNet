@@ -212,32 +212,76 @@ def _infer_single(args: argparse.Namespace) -> None:
     single_instance(args)
 
 
-def _add_infer_single(sub: argparse._SubParsersAction) -> None:
-    p = sub.add_parser("single-instance", help="full-volume semantic sheet-surface inference on one box",
-                       description="Stream a scroll / zarr, run HercuViT over Gaussian-blended 128³ windows, and "
-                                   "write {out}_sem.zarr (uint8 sheet-surface probability). v1: no cross-tile "
-                                   "sheet-ID stitching.")
+def _infer_multi(args: argparse.Namespace) -> None:
+    from .infer.infer import multi_instance
+    multi_instance(args)
+
+
+def _add_infer_common(p: argparse.ArgumentParser) -> None:
+    """The full HercuViT infer flag set — shared by single/multi, driving the same engine fan-out as ``hercunet infer``
+    (streaming + pre-sync, per-GPU/pod ``.done`` claim-queue, leader finalise + S3 upload). HercuViT is single-pass
+    and 1-channel, so there is no --passes / --plain / affinity knob."""
     p.add_argument("source", metavar="SOURCE",
                    help="CT source: a scroll id (e.g. PHerc1447), 's3://…/x.zarr', 'https://…/x.zarr', "
                         "'file:///abs/x.zarr' or a local path")
-    p.add_argument("--model", default=None, metavar="DIR|PTH",
-                   help="trained HercuViT checkpoint dir or .pth")
+    p.add_argument("--model", default=None, metavar="DIR|PTH", help="trained HercuViT checkpoint dir or .pth")
     p.add_argument("--model-hf", dest="model_hf", nargs="?", const=_MODEL_HF, default=None, metavar="REPO",
                    help=f"download the trained model from an HF repo (bare flag = {_MODEL_HF})")
     p.add_argument("--ckpt", default="checkpoint_best.pth", help="checkpoint filename within --model dir")
-    p.add_argument("--out", required=True, metavar="PREFIX", help="output prefix — writes {PREFIX}_sem.zarr")
+    p.add_argument("--out", required=True, metavar="PREFIX", help="output prefix — writes {PREFIX}_pass0.zarr")
     p.add_argument("--region", default=None, metavar="z0:z1,y0:y1,x0:x1",
-                   help="restrict to a sub-cube (level voxels); whole volume if omitted")
+                   help="restrict to a sub-cube (working-level voxels); whole volume if omitted")
     p.add_argument("--level", type=int, default=0, metavar="L",
                    help="OME-Zarr pyramid level to run on (default 0; pick the level nearest ~9.6 µm)")
+    p.add_argument("--pre-sync-source", dest="pre_sync_source", nargs="?", const="<auto>", default=None, metavar="DIR",
+                   help="for an s3://|https:// SOURCE: region-download the covering L0 chunks locally (s5cmd) and read "
+                        "from there (GPU-bound). Bare flag syncs next to --out; pass a POD-LOCAL DIR for multi-instance")
     p.add_argument("--overlap", type=float, default=0.25, help="window overlap for the Gaussian blend (0 = disjoint)")
+    p.add_argument("--tta", default="none", metavar="none|all|mirror|rotate|z,y,x",
+                   help="per-window test-time augmentation (villa-style, averages logits); default none")
+    p.add_argument("--tta-passes", default="all", dest="tta_passes", metavar="all|last|no",
+                   help="which passes to apply --tta on (single-pass model → effectively pass 0); default all")
+    p.add_argument("--gpus", default="all", metavar="all|0,1,3",
+                   help="GPUs to use on THIS node (default all visible; one worker per GPU)")
+    p.add_argument("--batch", type=int, default=4, help="windows per forward batch (default 4)")
+    p.add_argument("--nb", type=int, default=4, help="windows per prefetch block/tile per axis (default 4)")
     p.add_argument("--air", type=int, default=25, help="skip windows whose CT max < this (all-air; default 25)")
-    p.add_argument("--finalise", default="last", metavar="last|no",
-                   help="build the OME-Zarr pyramid for the output ('last' = yes, 'no' = skip)")
-    p.add_argument("--device", default="cuda", help="cuda | cpu (default cuda)")
+    p.add_argument("--readahead", type=int, default=2, help="CT block-prefetch depth (default 2)")
+    p.add_argument("--prefetch-workers", type=int, default=3, dest="prefetch_workers", help="CT prefetch threads (default 3)")
+    p.add_argument("--finalise", default="last", metavar="last|all|no|0",
+                   help="which passes get an OME-Zarr pyramid built ('last' default, 'no' = skip, or an index list)")
+    p.add_argument("--s3-prefix", default=None, dest="s3_prefix", metavar="s3://…",
+                   help="upload finished passes to this S3 prefix with s5cmd (AWS creds in env; write-preflighted)")
+    p.add_argument("--upload", default="last", metavar="last|all|no|0",
+                   help="which passes to upload to --s3-prefix (default last; ignored without --s3-prefix)")
+    p.add_argument("--resume", action="store_true",
+                   help="continue an interrupted run: skip _complete passes + re-queue tiles orphaned by killed workers")
+    p.add_argument("--keep-buffers", action="store_true", dest="keep_buffers",
+                   help="keep every pass buffer (default: prune to the last two)")
+    p.add_argument("--claim-chunk", type=int, default=6, dest="claim_chunk", help="claim-queue chunk size per steal (default 6)")
+    p.add_argument("--device", default="cuda", help="cuda | cpu (single-instance only; default cuda)")
     p.add_argument("--attention-backend", dest="attention_backend", default=None, choices=_BACKENDS,
                    help="SDPA kernel override (default: the recipe's; 'auto' is safe on any GPU)")
+
+
+def _add_infer_single(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("single-instance", help="full-volume sheet-surface inference on ONE box (fans across its GPUs)",
+                       description="Stream a scroll / zarr and run HercuViT over Gaussian-blended windows via the "
+                                   "shared engine; one worker per local GPU (single GPU → in-process; CPU fallback). "
+                                   "Writes {out}_pass0.zarr (uint8 surface prob). No cross-tile sheet-ID stitching.")
+    _add_infer_common(p)
     p.set_defaults(func=_infer_single)
+
+
+def _add_infer_multi(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("multi-instance", help="full-volume inference across MANY pods (shared network volume)",
+                       description="Run the SAME command on each pod with --out on shared storage; pass --leader on "
+                                   "exactly one pod. Each pod fans across its own GPUs on the shared .done claim-queue; "
+                                   "the leader finalises the pyramid + uploads.")
+    _add_infer_common(p)
+    p.add_argument("--leader", action="store_true",
+                   help="THIS pod is the leader (creates each pass zarr, finalises + uploads); pass on exactly one pod")
+    p.set_defaults(func=_infer_multi)
 
 
 # --------------------------------------------------------------------------------- dispatch --
@@ -269,6 +313,7 @@ def build_parser() -> argparse.ArgumentParser:
     infer = groups.add_parser("infer", help="full-volume inference")
     infer_cmds = infer.add_subparsers(dest="command", metavar="<mode>", required=True)
     _add_infer_single(infer_cmds)
+    _add_infer_multi(infer_cmds)
 
     return parser
 

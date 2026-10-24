@@ -234,9 +234,12 @@ S3 machinery. A model supplies only load + `norm_ct` + `base_input` + `forward` 
 rest (see Part II → "Model-agnostic inference engine").
 
 - HercuViT = `HercuvitSurfaceModel` (`hercunet/hercuvit/infer/model.py`): single-pass, 1-channel, surface blended on
-  the logit margin; **masks not emitted**. `hercuvit infer single-instance` drives the engine single-GPU in-process.
+  the logit margin; **masks not emitted**.
+- `hercuvit infer single-instance` (one box, fans across local GPUs, CPU fallback) and `hercuvit infer multi-instance`
+  (across pods, `--leader` on one) drive the SAME fan-out as `hercunet infer` (`run.run_fanout`): per-GPU/pod workers
+  on the shared `.done` claim-queue, leader-automatic pyramid finalise + S3 upload, pre-sync, region/full-volume, TTA.
 - v1 output: full-volume **semantic sheet-surface** (`{out}_pass0.zarr`). **No cross-tile sheet-ID stitching** in v1
-  (design §10/§12 → future); multi-GPU/pod + S3 for HercuViT is available in the engine (expose via CLI flags).
+  (design §10/§12 → future).
 
 ---
 
@@ -432,9 +435,13 @@ to `model/decoder_common.py` (above). What remains on the build path:
 - `infer/model.py` — `HercuvitSurfaceModel(InferenceModel)`: the HercuViT plug-in for the shared engine. `load`
   (via `load_hercuvit`, `with_instance=False`), `norm_ct` (`dinovol_normalise`), `base_input` (1-ch `[ct]`, prev
   ignored), `forward` (`sem_logits[:,:2]`, no aux), `passes=1`. Registered as `"hercuvit-surface"`.
-- `infer/infer.py` — `single_instance` drives `hercunet.infer.engine.run_inference(model_type="hercuvit-surface", …)`
-  single-GPU in-process (CPU fallback if no CUDA); the engine streams, tiles, Gaussian-blends the surface and writes
-  `{out}_pass0.zarr` + pyramid. Per-tile instance masks / cross-tile stitching = future.
+- `infer/infer.py` — `single_instance` / `multi_instance` drive the shared `run.run_fanout` with
+  `model_type="hercuvit-surface"` (+ `model_import` so worker subprocesses register the model): one worker per local
+  GPU on the `.done` claim-queue (single GPU / `--device cpu` → in-process), across pods with `--leader`. The engine
+  streams, tiles, Gaussian-blends the surface and writes `{out}_pass0.zarr` + pyramid; `_resolve_model` resolves the
+  checkpoint (local dir/.pth or HF snapshot) once in the parent. Per-tile masks / cross-tile stitching = future.
+  The hercuvit CLI (`infer single-instance` / `infer multi-instance`) carries the full fan-out flag set (`--gpus`,
+  `--pre-sync-source`, `--s3-prefix`/`--upload`, `--resume`, `--keep-buffers`, `--claim-chunk`, `--tta`, `--leader`, …).
 
 ### Model-agnostic inference engine (`hercunet/infer/`, migrated from the Jacobi engine)
 

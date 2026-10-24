@@ -142,39 +142,56 @@ def _maybe_presync(a, region):
     return presync_region(src, region, dst_dir, level=int(getattr(a, "level", 0)))
 
 
-def _common_jargs(a, region, source):
-    """The engine.run_inference kwargs shared by both modes, read off the parsed CLI args ``a`` (``source`` already
-    resolved by :func:`_maybe_presync`). The nnU-Net/Jacobi-specific knobs go in ``model_opts`` (JSON-serialisable,
-    so the per-GPU worker subprocess can carry them)."""
+def engine_jargs(a, region, source):
+    """The MODEL-AGNOSTIC ``engine.run_inference`` kwargs read off the parsed CLI args ``a`` (``source`` already
+    resolved by :func:`_maybe_presync`). The caller adds the model-specific ``model_type`` / ``model_opts`` /
+    ``model_import`` (all JSON-serialisable, so the per-GPU worker subprocess can carry them). Reusable by any model's
+    CLI (nnU-Net, HercuViT, …) — this is what lets a new model get the full fan-out without duplicating it."""
     return dict(
-        model_type="nnunet-jacobi",
-        model_opts=dict(affinity=not a.plain, keep_affinity=a.keep_affinity, n_orient=a.n_orient,
-                        passes=a.passes, overlap=a.overlap, compile=getattr(a, "compile", False)),
         source=source, out_prefix=a.out, ckpt=a.ckpt, air=a.air, level=int(getattr(a, "level", 0)),
-        region=region, keep_buffers=a.keep_buffers, finalise=a.finalise, resume=a.resume,
-        batch=a.batch, nb=a.nb, s3_prefix=a.s3_prefix, upload=a.upload, reclaim=a.resume, claim_chunk=a.claim_chunk,
-        readahead=a.readahead, prefetch_workers=a.prefetch_workers, tta=a.tta, tta_passes=a.tta_passes,
+        region=region, keep_buffers=getattr(a, "keep_buffers", False), finalise=a.finalise,
+        resume=getattr(a, "resume", False), batch=getattr(a, "batch", 4), nb=getattr(a, "nb", 4),
+        s3_prefix=getattr(a, "s3_prefix", None), upload=getattr(a, "upload", "last"),
+        reclaim=getattr(a, "resume", False), claim_chunk=getattr(a, "claim_chunk", 6),
+        readahead=getattr(a, "readahead", 2), prefetch_workers=getattr(a, "prefetch_workers", 3),
+        tta=getattr(a, "tta", "none"), tta_passes=getattr(a, "tta_passes", "all"),
     )
+
+
+def _common_jargs(a, region, source):
+    """nnU-Net/Jacobi jargs = the engine kwargs + the nnU-Net model (``model_type`` + ``model_opts``)."""
+    return dict(engine_jargs(a, region, source),
+                model_type="nnunet-jacobi",
+                model_opts=dict(affinity=not a.plain, keep_affinity=a.keep_affinity, n_orient=a.n_orient,
+                                passes=a.passes, overlap=a.overlap, compile=getattr(a, "compile", False)))
+
+
+def run_fanout(a, model_dir, jargs, *, across_pods):
+    """MODEL-AGNOSTIC fan-out. Resolve GPUs for THIS node and drive the engine: single GPU → in-process; multiple GPUs
+    (or ``across_pods``) → one ``_worker`` subprocess per GPU on the shared claim-queue. ``jargs`` is the full
+    ``run_inference`` kwargs (incl ``region``/``source``/``model_type``/``model_opts``/``model_import``). ``model_dir``
+    is the resolved LOCAL model path passed to each worker. Used by both ``hercunet infer`` and ``hercuvit infer``."""
+    gpus = resolve_gpus(a.gpus)
+    is_leader = a.leader if across_pods else True
+    print(f"[infer] {'multi' if across_pods else 'single'}-instance: {len(gpus)} GPU(s) {gpus}, "
+          f"model={model_dir}, source={jargs.get('source')}"
+          + (f", leader-node={is_leader}" if across_pods else ""), flush=True)
+    _run(model_dir, gpus, multi=(across_pods or len(gpus) > 1), is_leader_node=is_leader, jargs=jargs)
 
 
 def single_instance(a):
     """One box, all local GPUs (``--gpus`` to restrict). Multi-GPU → per-GPU workers on a local-FS claim-queue,
     rank-0 the leader; single GPU → the engine in-process."""
     model_dir = resolve_model(a.model, a.model_hf)
-    gpus = resolve_gpus(a.gpus)
     region = parse_region(a.region)
     source = _maybe_presync(a, region)
-    print(f"[infer] single-instance: {len(gpus)} GPU(s) {gpus}, model={model_dir}, source={source}", flush=True)
-    _run(model_dir, gpus, multi=(len(gpus) > 1), is_leader_node=True, jargs=_common_jargs(a, region, source))
+    run_fanout(a, model_dir, _common_jargs(a, region, source), across_pods=False)
 
 
 def multi_instance(a):
     """Many pods. Run this SAME command on each pod (``--out`` on shared storage); pass ``--leader`` on exactly
     one pod. Each pod fans across its own local GPUs; the leader pod's rank-0 worker is the single global leader."""
     model_dir = resolve_model(a.model, a.model_hf)
-    gpus = resolve_gpus(a.gpus)
     region = parse_region(a.region)
     source = _maybe_presync(a, region)
-    print(f"[infer] multi-instance: {len(gpus)} local GPU(s) {gpus}, leader-node={a.leader}, model={model_dir}, "
-          f"source={source}", flush=True)
-    _run(model_dir, gpus, multi=True, is_leader_node=a.leader, jargs=_common_jargs(a, region, source))
+    run_fanout(a, model_dir, _common_jargs(a, region, source), across_pods=True)

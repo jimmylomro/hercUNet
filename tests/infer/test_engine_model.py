@@ -116,3 +116,18 @@ def test_tta_surface_equivariant_model_is_invariant():
 def test_aux_spec_fields():
     a = AuxSpec(name="aff", channels=9, offsets=[(1, 0, 0)])
     assert a.channels == 9 and a.final_pass_only is True and a.name == "aff"
+
+
+def test_hercuvit_infer_cli_fanout_flags():
+    """The hercuvit infer CLI exposes the full fan-out flag set (single + multi) and maps to the engine jargs."""
+    from hercunet.hercuvit.cli import build_parser
+    from hercunet.infer.run import engine_jargs
+    p = build_parser()
+    a = p.parse_args(["infer", "single-instance", "PHerc1447", "--model", "m", "--out", "o",
+                      "--gpus", "0,1", "--s3-prefix", "s3://b/x", "--pre-sync-source", "--resume"])
+    assert a.func.__name__ == "_infer_single" and a.gpus == "0,1" and a.s3_prefix == "s3://b/x" and a.resume
+    b = p.parse_args(["infer", "multi-instance", "PHerc1447", "--model-hf", "--out", "o", "--leader"])
+    assert b.func.__name__ == "_infer_multi" and b.leader is True
+    # engine_jargs (model-agnostic) builds cleanly from the parsed args — no model bits leak in
+    j = engine_jargs(a, None, "src")
+    assert "model_type" not in j and j["out_prefix"] == "o" and j["claim_chunk"] == 6 and j["tta"] == "none"
