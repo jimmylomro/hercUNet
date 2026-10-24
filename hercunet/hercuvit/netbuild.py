@@ -95,7 +95,7 @@ def build_from_cfg(
     learned_queries: bool = False,
     fps_queries: bool = False,
     cross_attn: str = "deformable",
-    decoder: str = "unet",
+    decoder: str = "decoupled",
     neck: str = "none",
     neck_layers: int = 6,
     neck_heads: int = 4,
@@ -130,6 +130,8 @@ def build_from_cfg(
     net = HercuVitNet(
         backbone,
         token_dim=int(model_cfg["embed_dim"]),
+        # stem skip widths read from the built stem (as build_hercuvit does) so a 480 encoder (32,64,128) loads too.
+        skip_channels=tuple(backbone.down_projection.skip_channels),
         decoder_channels=tuple(arch.get("decoder_channels", DEFAULT_DECODER_CHANNELS)),
         n_sem_classes=n_sem_classes,
         mask_dim=mask_dim,

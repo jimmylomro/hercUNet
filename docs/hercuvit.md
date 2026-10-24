@@ -239,12 +239,29 @@ come from `VARIANT_ARCH` (single source of truth); the recipe carries the distil
 
 Console script `hercuvit = "hercunet.hercuvit.cli:main"`; also `python -m hercunet.hercuvit`. Hyphenated flags,
 no env-var config, British spelling. Subparsers mirror hercunet's `set_defaults(func=…)` + lazy-import pattern.
+**The recipe YAML defines the NETWORK only; all training config is CLI flags** (unset flags keep code defaults).
 
-- `hercuvit train chain --corpus <dir> | --corpus-hf jimmylomro/hercunet-corpus --dinovol-hf scrollprize/dinovol_ps8_9.6um_101626 --out <dir> [--recipe hercuvit.yml] [--epochs N]`
-- `hercuvit train fit … [--continue]`
-- `hercuvit infer single-instance <scroll|zarr-url> --model <dir> | --model-hf <repo> --out <prefix> [--region …]`
+```
+hercuvit train chain  --encoder-hf [REPO]          # bare = raw Dinovol 288 (scrollprize/dinovol_ps8_9.6um_101626);
+                                                   #   pass scrollprize/dinovol_8um_ps192_102126 for the 480 encoder
+                      --corpus-hf [REPO]           # bare = jimmylomro/hercunet-corpus
+                      --out DIR  --recipe FILE.yml # recipe = the NET (e.g. recipes/full_decoupled.yml)
+                      [--train-cache DIR]          # local pre-extracted window cache (default {out}/train_cache)
+                      [--init-from CKPT]           # warm-start model weights only (e.g. the author's surface decoder)
+                      [--epochs N --batch-size N --base-lr LR --lr-schedule constant|cosine]
+                      [--freeze-warmup-epochs N]   # encoder frozen for N epochs (= all N → permanently frozen)
+                      [--encoder-lr-mult M --decoder-lr-mult M]  # separate LR for encoder / warm-started pixel decoder
+                      [--w-surface W --w-malis W --w-symskel W --denoise/--no-denoise]
+                      [--val-interval N --val-windows N --val-fold N]
+hercuvit train fit    … [--continue]               # same flags; --continue resumes {out}/checkpoint_latest.pth
+hercuvit train prep-shard …                        # (internal) one shard of the local window pre-extraction
+hercuvit distill      --teacher … --student small|tiny|nano --out …   # (lead-owned) distil a slim encoder
+hercuvit infer single-instance SOURCE  --model DIR|--model-hf [REPO]  --out PREFIX  [--region … --level L]
+```
 
-`--dinovol-hf` default const = `scrollprize/dinovol_ps8_9.6um_101626`.
+Encoder source: `--encoder-hf [REPO]` (HF repo; bare = raw Dinovol 288) or `--encoder CKPT` (a local Dinovol
+teacher, or a `hercuvit distill` output — the windowed variant is then read from the file), with `--encoder-file`
+for a non-default filename. `--model-hf` default const = `jimmylomro/hercuvit-v0`.
 
 ---
 
@@ -271,67 +288,87 @@ on fibre and ink labels (the author's SSL recipe) without re-architecting.
 
 ---
 
-## 13. TODOs (confirm / implement; written here if not yet possible)
-
-- [x] **Exact Dinovol normalisation** — extracted from villa `ssl_zarr_dataset.py` (`_finalize_crop` →
-  `self.normalizer.run(crop)` then trilinear resize) + `dataset/normalization.py`. The released checkpoint's
-  `config.dataset` has **no** `normalization_scheme` key → villa default **`robust`** (percentile 1–99 clip, then
-  median / 1.4826·MAD). Replicated faithfully in `data/normalize.py` (`normalize_robust`); villa's `gaussian_blur`
-  is deliberately NOT applied (§8). *Verify:* if a future checkpoint sets `normalization_scheme` explicitly, match
-  it there.
-- [x] **Semantic sheet-surface target derivation** — confirmed against `docs/herculabels.md`: `V_k` meshes are the
-  per-sheet medial surfaces; `rasterise_owner_full` paints them into a thin `owner` volume, so the semantic
-  sheet-surface class is exactly `owner > 0` (`data/dataset.py`).
-- [x] **Corpus native voxel size + resampling** — corpus npz carries `voxel_um` (7–10 µm) + `shape`/`org`/`scroll`
-  per window; **no CT is stored**, so CT is streamed from the scroll via `open_source`. Resampling choice: centre-
-  crop the native cube to the `128·9.6 µm` physical FOV, then trilinear-resize to 128³ (owner nearest) — keeps the
-  encoder at ~9.6 µm and the 1–2-voxel separation (§12 #3) rather than squashing a whole window to 128³.
-- [x] **Bring `tracer/labels.py` + `DeformableCrossAttn`** — present on this branch (`hercunet/tracer/`); used by
-  the dataset and the instance head.
-- [x] **Attention backend** — `--attention-backend` flag + recipe field + `netbuild.apply_attention_backend`
-  (§12 #4). Default `auto`.
-- [ ] **Point-sampling approximation** — the instance mask loss uses a cheap importance mix (half GT-sheet voxels,
-  half uniform) instead of full PointRend/Mask2Former uncertainty sampling (needs a first forward). Revisit if
-  mask quality plateaus.
-- [ ] **hercuvit-tiny / -nano** — arch presets live in `VARIANT_ARCH`; the slim nets are **distilled** from a
-  trained `hercuvit-small` teacher via `hercuvit distill` (`model/distill.py`, `train/distill.py`, lead-owned),
-  then trained supervised through the same chain. Deferred, depends on a validated `small`.
-  - Inference note: the self-contained `netbuild.build_from_cfg` (used by `infer/loader.py`, no Dinovol ckpt)
-    reconstructs the Eva-key overrides but **not** `global_attention="spatial_reduction"`; rebuild tiny/nano
-    inference via the Dinovol ckpt + `netbuild.build` until that path is extended.
-- [ ] ResEnc-L logit distillation (semantic stage) — FUTURE (needs a ResEnc-L teacher).
-- [ ] Cross-tile sheet-ID stitching — FUTURE (design §10/§12); v1 infer emits the semantic surface only.
-- [ ] Fibre/ink head activation — FUTURE (§11).
-
----
-
 ## Part II — Implementation description
 
-Faithful, file-by-file account of what was built around the three pillars. The pillar / `model/` modules and the
-vendored `dinovol/` were **read only** (interfaces); the plumbing below is everything else. British spelling,
-hyphenated flags, no env-var config throughout. Validated on the vesuvius pipenv (torch 2.6, timm 1.0.22) against
-the cached Dinovol checkpoint `/tmp/dino_ck/teacher_305k.pt`.
+The shipped architecture is **v2 "decoupled"** (`docs/hercuvit-mask-architecture.md` §10). It is what the PoC
+(Part III) and the subsequent frozen-encoder study drove the design to, and it **supersedes Part I's windowed
+Variant-A path on two counts**:
 
-### Pillar / model modules (read-only — described for completeness)
+1. **Encoder frozen and all-global (no windowing).** Windowing measurably halved frozen sheet-identity and opened a
+   window seam (Part III); the retrofit (`model/windowed.py`) is retained but off. The recipe uses `variant: full`,
+   `global_attention: full`, `global_blocks: all`. The encoder can be the raw Dinovol **288** teacher or the larger
+   **480** teacher (`scrollprize/dinovol_8um_ps192_102126`); the stem's skip widths are read from the checkpoint,
+   so the decoder adapts automatically.
+2. **Decoupled Mask2Former head.** The pixel-decoder surface head *is* the objectness, so the mask decoder has **no
+   null query and no class head** — it answers only "which sheet owns this voxel". Removing the null was the fix for
+   the design-C blocker (null-dominance crushed ownership accuracy to ≤0.009; decoupled reaches 0.27 at ep0).
+
+Part I §1–§9 / §11–§12 remain the original spec and the Dinovol-config record; this part describes what is built
+and runs now. British spelling, hyphenated flags, no env-var config throughout.
+
+### Architecture v2 "decoupled" (`recipes/full_decoupled.yml`) — the current net
+
+- `model/decoupled_pixel_encoder.py` — **`DecoupledPixelEncoder`**, a CNN-UNET on the frozen Dinovol stem, built
+  PRECISE to the author's Vesuvius surface `Decoder` (`third-party/villa` `dinovol/evals/kaggle_surfaces`): **no
+  bottleneck** (the 1/8 ViT tokens feed straight into the first `ConvTranspose3d`), each stage = transpconv →
+  **CONCAT** stem skip → `2× BasicBlockD`. Stage widths DERIVE from the skips `(s0,s1,s2)` so there is no
+  `decoder_channels` knob; the final stage outputs `mask_dim` (32), i.e. **`U1 @1/1` IS `mask_features`**. The
+  decoupled **surface head** is a `1×1` conv straight off U1 (`[bg, surface]` = the objectness), matching the
+  author's `seg_layers[-1]`. The attention **memory pyramid is a trilinear down-sample of U1 kept at `mask_dim`**
+  (NO up-projection to 128) — the decoder runs natively at 32-d and never attends finer than 1/8. Deep supervision
+  (1/1, 1/2, 1/4) is optional (on in the recipe; the author had it off but with a far larger encoder).
+- `model/resblocks.py` — **`BasicBlockD` / `StackedResidualBlocks`**, a 3-D-only subset ported math-identical from
+  the upstream Vesuvius `Decoder` (`Conv3d → InstanceNorm3d → LeakyReLU(0.01)`, `conv_bias=True`; the 1×1 residual
+  skip projection has `bias=False`, matching the author — this is what lets his checkpoint load 100% clean).
+- `model/decoupled_mask_decoder.py` — **`DecoupledMaskDecoder`**, vanilla Mask2Former, deliberately NOT reusing the
+  design-C `MaskDecoder` (memory `build-precise-to-spec-graph`). **Learned content/positional queries** (`nn.Embedding`)
+  + a train-only **denoising (DN)** group seeded from the thin GT owner (each GT sheet → `dn_groups` fixed queries
+  whose initial mask is the dilated sheet). **Plain dot** readout (`mask_embed · U1`, NO `F.normalize`, NO
+  temperature — the decoupling removes the null-magnitude cheat those fixed). `n_layers` (6) round-robins masked
+  cross-attention over the `[1/32, 1/16, 1/8]` memory; the dense 1/1 mask logits are materialised only **detached**
+  to build the next layer's attention mask (`max-pool logits > 0 ⟺ sigmoid > 0.5`). `neck_heads=4` → 8 dims/head on
+  the 32-d space (8 heads would starve each head). No null, no class head; unmatched queries are suppressed for free
+  by the ownership softmax.
+- `train/losses.py` — the decoupled objective. **`instance_loss_decoupled`** (`_instance_item_softmax` /
+  `_softmax_ownership_terms`): Hungarian match on **ownership-CE cost only** (no dice/class/obj cost), then a no-null
+  **fg-gated softmax-over-Q ownership CE** balanced 50/50 fg/bg, in fp32. **`affinity_malis_loss`**: soft same-owner
+  affinity from `softmax_Q(mask_embed · U1)` → AffMALIS separation (CLI `--w-malis`); sliced to `n_match` so the
+  train-only DN queries are excluded (matches inference). **`_denoise_item`**: the DN group under the SAME ownership
+  objective (fixed sheet assignment, no Hungarian). `semantic_loss` + `surface_loss.py` carry the thin-surface head.
+- `model/hercuvit_net.py` — `decoder_kind == "decoupled"` builds `DecoupledPixelEncoder` + `DecoupledMaskDecoder`;
+  `skip_channels` are read straight from the built stem (`backbone.down_projection.skip_channels`, so 288 → (16,48,128)
+  and 480 → (32,64,128) with no hard-coding). `forward(x, dn_owner=…)` threads the thin GT owner to the DN builder.
+  **`param_groups(base_lr, encoder_lr_mult, decoder_lr_mult)`** puts the pixel decoder in a separate group at
+  `decoder_lr_mult × base_lr` **only when `decoder_lr_mult ≠ 1`** — the lever for fine-tuning a warm-started decoder
+  gently while the fresh mask decoder trains at base LR.
+- `train/chain.py` — **`_remap_vesuvius_decoder`** maps the author's Vesuvius `Decoder` checkpoint keys onto our pixel
+  decoder (`stages.i → block{i}`, `transpconvs.i → up{i}`, `seg_layers.{0,1,2} → surf_head_{4,2,∅}`, `.conv.→.0.` /
+  `.norm.→.1.`, drops `.all_modules.`, prefixes `pixel_decoder.`). `--init-from` detects his `decoder`-key checkpoint
+  and loads it remapped (verified **69/69** clean name+shape against the 480 encoder) — this is what warm-starts the
+  surface decoder + head so the frozen-480 run gets the author's trained surface predictor for free.
+
+### Encoder + build modules (live path)
+
+The v1 design-A/B/C decoder+head modules (`pixel_decoder.py`, `patch_decoder.py`, `mask_pixel_encoder.py`,
+`mask_decoder.py`, `instance_head.py`, `neck.py`, `heads_future.py`) and their experimental recipes
+(`full{,_fps*,_mask2former,_patchdecode*}.yml`) were **removed** — the public repo carries only the decoupled path.
+Their small reusable primitives (the dot-product readouts, `MaskDecoderLayer`, `_mlp`, `_sine_pe_3d`) were extracted
+to `model/decoder_common.py` (above). What remains on the build path:
 
 - `model/encoder.py` — builds the vendored Dinovol `Eva` from the checkpoint's own `config['model']`
   (`build_dinovol_backbone`) and loads the `teacher.*` → `backbone.*` weights (`build_and_load_backbone`, clean
   missing/unexpected). Exposes `DINOVOL_HF_REPO` / `DINOVOL_CKPT_FILE`, `load_dinovol_checkpoint` (→ teacher sd +
-  `model_cfg`), the stem skips + 288-d token grid + cls/reg tokens via `forward_features(x, view_kind="global")`.
-- `model/windowed.py` — Pillar 1. `WindowedEvaAttention` (reassigns `attn.__class__`, parameter-preserving) runs
-  non-overlapping 8³-token windowed SDPA on the patch tokens, RoPE at absolute 16³ coords, the 5 special tokens
-  passed through unchanged. `retrofit_windowed(backbone, global_blocks, window_size)`.
-- `model/pixel_decoder.py` — Pillar 2. Additive-skip UNet decoder (token grid + `[s0,s1,s2]` → full-res); semantic
-  head (+ deep sup at 1/2, 1/4), 32-d mask features, and `feat_14` (1/4) for the instance head.
-- `model/instance_head.py` — Pillar 3. Two-stage query selection (objectness over 4096 tokens → top-64 anchored
-  queries) + query decoder (self-attn + `DeformableCrossAttn` over 1/8 tokens & 1/4 feats) → per-query
-  class/mask-embed/anchor. Mask helpers `mask_logits_from_embed` (full) / `mask_logits_at_points` (training).
-- `model/hercuvit_net.py` — assembles encoder → windowed retrofit → pixel decoder → heads; `forward(x)` → the
-  output dict. `build_hercuvit(ckpt, arch_override=…, …)` is the **single** build entry; `VARIANT_ARCH` +
-  `build_variant` are the canonical per-variant arch source of truth. `param_groups` / `set_transformer_trainable`
-  drive staged training. `model/heads_future.py` stubs the inactive fibre/ink/region heads (§11).
+  `model_cfg`), the stem skips + token grid + cls/reg tokens via `forward_features(x, view_kind="global")`.
+- `model/windowed.py` — the windowed-attention retrofit (`retrofit_windowed`, `WindowedEvaAttention`). **Inert for the
+  shipped `full` encoder** (all-global → no block is windowed); kept because once the encoder is *unfrozen*, windowed
+  attention is a planned next step.
+- `model/hercuvit_net.py` — assembles encoder → (windowed retrofit, inert) → `DecoupledPixelEncoder` →
+  `DecoupledMaskDecoder`; `forward(x, dn_owner=…)` → the output dict. `build_hercuvit(ckpt, arch_override=…)` is the
+  single build entry; `skip_channels` are read from the stem (288 → (16,48,128); 480 → (32,64,128)). `param_groups`
+  (encoder / pixel-decoder / rest LR groups), `set_encoder_trainable`, `set_decoder_trunk_trainable` drive staged
+  training. `model/distill.py` + `train/distill.py` (lead-owned) distil the slim `small/tiny/nano` windowed encoders.
 
-### Plumbing built (this task)
+### Plumbing (data, training, inference, tooling)
 
 - `data/normalize.py` — **Dinovol robust normalisation**, ported faithfully from villa `dataset/normalization.py`
   (`normalize_robust`: percentile 1–99 clip, then `(x−median)/(1.4826·MAD)` with villa's fallback ladder +
@@ -346,28 +383,44 @@ the cached Dinovol checkpoint `/tmp/dino_ck/teacher_305k.pt`.
   = flips + axis permutation (no blur), same transform to CT + targets. `identity_only` filters to herculabels
   samples (instance loss gated by `has_identity` regardless). `hercuvit_collate` keeps per-item flags as lists. CT
   reader is injectable for offline tests.
-- `train/recipe.py` — `@dataclass(frozen=True) HercuvitRecipe` + shipped `recipes/hercuvit.yml` (package data) +
-  `active()/set_active()/load()`, mirroring `hercunet/training/recipe.py`. Fields: window/arch, `attention_backend`
-  (default `auto`), `variant` + `arch_override` tweak (arch numbers live in `VARIANT_ARCH`), data, optimiser/stage
-  schedule, semantic + instance loss weights + Hungarian costs + point-sample, and the `distill_*` knobs. `VARIANTS`
-  = names only (no duplicated arch numbers).
+- `train/recipe.py` — `@dataclass(frozen=True) HercuvitRecipe` + shipped recipes (package data) +
+  `active()/set_active()/load()`, mirroring `hercunet/training/recipe.py`. **The shipped v2 recipe is
+  `recipes/full_decoupled.yml`** (`decoder: decoupled`, `global_blocks: all`, `mask_dim: 32`, `neck_heads: 4`,
+  `instance_layers: 6`, `learned_queries: true`, `add_null_query: false`, `deep_supervision: true`). Per the
+  "recipe = the NET only" rule, training config (epochs, batch, LR, schedule, loss weights, AffMALIS, `decoder_lr_mult`)
+  is set on the CLI, not the YAML. Other fields: `attention_backend` (default `auto`), `variant` + `arch_override`
+  (arch numbers live in `VARIANT_ARCH`), and the `distill_*` knobs. `VARIANTS` = names only.
 - `netbuild.py` — build plumbing OUTSIDE `model/`. `apply_attention_backend(net, backend)` sets each attention
   module's `attention_priority` (§12 #4 fix). `build(ckpt, variant, arch_override, attention_backend, …)` = single
   entry (`resolve_arch` merges the recipe tweak over `VARIANT_ARCH[variant]` → `build_hercuvit` → backend fix;
   stashes `_hercuvit_arch`). `build_from_cfg(model_cfg, arch_override, …)` rebuilds the architecture from the stored
   cfg with **no** Dinovol weights (inference), patching the Eva keys for slim variants (spatial-reduction not
   reconstructed here — §13).
-- `train/losses.py` — `semantic_loss` (Dice+CE, deep sup; targets max-pooled per scale to keep thin surfaces) and
-  `instance_loss` (per item, per decoder layer: Hungarian `linear_sum_assignment` on class + point-mask BCE/Dice
-  cost → matched mask BCE+Dice at importance-sampled points via `mask_logits_at_points`, sheet/no-object CE, token
-  objectness BCE, aux per layer). `has_identity=False` → a grad-connected zero over every instance output.
-- `train/trainer.py` — `HercuvitTrainer`: standalone bf16-autocast AdamW loop on `net.param_groups`, grad-clip,
-  warmup + constant/cosine LR; 3-stage schedule (semantic → unfreeze transformer 0.1× → +instance), optimiser
-  rebuilt per stage; single-line `[ep N] loss …` logging; checkpoint save (model + `model_cfg` + resolved
+- `train/losses.py` — `semantic_loss` (Dice+CE, deep sup; targets max-pooled per scale to keep thin surfaces); the
+  **v2 decoupled objective** (`instance_loss_decoupled` / `affinity_malis_loss` / `_denoise_item`, described above);
+  and the retained v1 `instance_loss` (Hungarian on class + point-mask BCE/Dice → matched mask BCE+Dice, no-object
+  CE, objectness BCE, aux). `has_identity=False` → a grad-connected zero over every instance output.
+- `train/surface_loss.py` — self-contained thin-surface stack for the surface head (`--w-surface`): fg-weighted CE +
+  Focal-Tversky + clDice skeleton-recall + separation penalty, **no nnU-Net dep**. The surface CE is **plain /
+  unweighted and the ignore handling is nnU-Net-exact** (matching HercUNet's loss precisely — skeleton-recall
+  denominator re-masked by the valid region); confidence is expected to rise over epochs rather than being forced by
+  a class weight.
+- `train/trainer.py` — `HercuvitTrainer`: standalone bf16-autocast AdamW loop on `net.param_groups` (passing
+  `encoder_lr_mult` + `decoder_lr_mult`), grad-clip, warmup + constant/cosine LR. `--freeze-warmup-epochs` freezes the
+  encoder for the first N epochs (= all N → permanently frozen, the frozen-480 run); `--freeze-decoder-epochs`
+  additionally freezes the warm-started decoder trunk + surface head during instance-head warmup. The decoupled
+  decoder routes to `instance_loss_decoupled`; single-line `[ep N] loss | surf … pdice … | inst [own-ce … dn …]
+  own-acc … | malis …` logging with an online surface pseudo-Dice; validation uses the decoupled coverage path
+  (`mask_mode="decoupled"`: argmax-q gated by the surface objectness). Checkpoint save (model + `model_cfg` + resolved
   `arch_override`/`variant` + optim) and resume.
-- `train/chain.py` — `resolve_corpus` (local / HF dataset `snapshot_download`), `resolve_dinovol` (reuses
-  `hercunet.train.launch.resolve_pretrained`), `run_training` (build + dataset + loader + trainer), and the `fit` /
-  `chain` CLI handlers.
+- `train/chain.py` — `resolve_corpus` (local / HF dataset `snapshot_download`), `resolve_encoder` (reuses
+  `hercunet.train.launch.resolve_pretrained`; bare `--encoder-hf` = the 288 teacher, or an explicit repo for the 480),
+  the warm-start `_remap_vesuvius_decoder` + `--init-from` loader (above), `run_training` (build + dataset + loader +
+  trainer), and the `fit` / `chain` CLI handlers.
+- `train/preextract.py` + `prep-shard` — the training set is pulled to a **local window cache** (`--train-cache`) by N
+  shard processes (`--prep-shards`, each single-threaded S3) before the fit; the trainer then reads locally. The live
+  S3 path deadlocks under DataLoader-worker concurrency and re-streams every epoch, so pre-extraction is the default
+  (`--no-pre-extract` opts out). Each cache entry is a `sample_*.npz` of native CT + thin surface + owner.
 - `infer/loader.py` — `load_hercuvit` resolves a trained checkpoint (local / HF), rebuilds via `build_from_cfg`
   (no Dinovol ckpt needed) and loads the trained weights; returns `(net, recipe, model_cfg)`. Instance-head keys
   are allowed to be "unexpected" when loading a full checkpoint into a semantic-only net.
@@ -376,10 +429,11 @@ the cached Dinovol checkpoint `/tmp/dino_ck/teacher_305k.pt`.
   (uint8 surface prob) via `create_surface_zarr` + `finalize_pyramid`; single pass, no prev channel. `single_instance`
   is the CLI handler (CPU fallback if no CUDA). Per-tile instance masks / cross-tile stitching = future (§13).
 - `cli.py` + `__main__.py` — `hercuvit` console script mirroring `hercunet/cli.py` (argparse subparsers +
-  `set_defaults(func=…)` + lazy imports): `train chain`, `train fit [--continue]`, `distill`, `infer
-  single-instance`. Hyphenated flags; `--variant`, `--attention-backend`, `--corpus/--corpus-hf`,
-  `--dinovol/--dinovol-hf` (default const `scrollprize/dinovol_ps8_9.6um_101626`). `distill` lazy-imports
-  `train.distill:run`.
+  `set_defaults(func=…)` + lazy imports): `train chain`, `train fit [--continue]`, `train prep-shard`, `distill`,
+  `distill-prep`, `infer single-instance`. The encoder source is `--encoder` / `--encoder-hf` / `--encoder-file`
+  (there is no `--dinovol*` flag); the full training-config flag set (`--init-from`, `--decoder-lr-mult`,
+  `--freeze-warmup-epochs`, `--freeze-decoder-epochs`, `--w-surface/-malis/-symskel`, `--denoise`, `--softmax-temp`,
+  `--train-cache/--prep-shards/--no-pre-extract`, …) is listed in §10. `distill` lazy-imports `train.distill:run`.
 - `pyproject.toml` — `[project.scripts] hercuvit = "hercunet.hercuvit.cli:main"`, a `hercuvit` optional-deps extra
   (torch/timm/einops/scipy/huggingface_hub/pyyaml/zarr/blosc2), `full` extended, and package-data for
   `hercunet.hercuvit.recipes = ["*.yml"]`. Existing `hercunet` entry/extras untouched.
@@ -390,6 +444,22 @@ the cached Dinovol checkpoint `/tmp/dino_ck/teacher_305k.pt`.
   source-of-truth / `resolve_arch`; recipe YAML round-trip; distill fields; CLI parse of every subcommand; and a
   real-Dinovol build + 128³ forward (skipped unless the checkpoint is cached). 19 tests, all passing.
 
+- `hercunet/train/dataset.py` — `_build_surface_label` default changed to **`confidence_ignore=False`** to match the
+  HercUNet defaults exactly (the npz-confidence ignore and the render-geometric ignore are the two parts; both are now
+  handled as HercUNet did). The loss ignore handling is nnU-Net-exact (see `surface_loss.py`).
+- `train/metrics.py` — adds the `mask_mode="decoupled"` coverage path used by validation (per-sheet coverage from the
+  argmax-over-queries ownership gated by the surface objectness; no `class_logits`, which the decoupled head does not emit).
+- `hercuvit/probes/` — a proper repo module for the frozen-encoder study (not scratch scripts). `frozen_encoder.py`
+  (runnable: `python -m hercunet.hercuvit.probes.frozen_encoder`) runs the FROZEN encoder over held-out windows and
+  measures (A) sheet-vs-background linear decodability (per-window prototype Dice + held-out Fisher-LDA AUC), (B)
+  intrinsic dimensionality (participation ratio / effective rank + fg/bg AUC vs #PCA dims), (C) sheet identity
+  (within/between-sheet cosine + ranking AUC), (D) embedding norms; writes `stats.json` + paper JPG figures.
+  `stats.py` holds the primitives (auc, best_dice, lda_dir, spectrum, token_labels); `surface_confidence.py` the
+  P-on-medial threshold sweep + ±1-tolerant Dice.
+- `submission/` — the frozen-encoder write-up (`writeup/hercuvit.md`, evidence-backed, with the 1/8-token-grid
+  caveat stated up front) + its figures (`images/frozen-{fgbg-separability,dims-fgbg,spectra,identity}.jpg`), sourced
+  from the probes module.
+
 ### Deviations / notes
 
 - **No `--epochs` per-stage control** — `--epochs` overrides the *total* `num_epochs` (as hercunet's does); the
@@ -398,7 +468,8 @@ the cached Dinovol checkpoint `/tmp/dino_ck/teacher_305k.pt`.
   the lead putting `VARIANT_ARCH`/`build_variant` in `hercuvit_net.py`. All variants go through `build_hercuvit`.
 - **Inference tuple** diverges from `load_affinity_net`'s nnU-Net tuple (`(net, recipe, model_cfg)`) — HercuViT is
   not an nnU-Net, so there is no plans/label manager; the recipe carries the working scale + class count.
-- Everything flagged best-effort (Dinovol norm, semantic target, resampling, point-sampling) is recorded in §13.
+- The v1 design-A/B/C decoder+head modules and their recipes were **removed** (above); only `windowed.py` (inert, for a
+  future unfrozen-encoder step) and the `small/tiny/nano` windowed-encoder distill path remain alongside v2 decoupled.
 
 ---
 

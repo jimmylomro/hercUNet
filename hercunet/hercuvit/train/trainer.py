@@ -105,7 +105,8 @@ class HercuvitTrainer:
 
     def _build_optimiser(self) -> None:
         groups = self.net.param_groups(base_lr=self.recipe.base_lr,
-                                       encoder_lr_mult=self.recipe.encoder_lr_mult)
+                                       encoder_lr_mult=self.recipe.encoder_lr_mult,
+                                       decoder_lr_mult=getattr(self.recipe, "decoder_lr_mult", 1.0))
         for g in groups:                                        # remember the base LR to scale by the schedule
             g["base_lr"] = g["lr"]
         self.optim = torch.optim.AdamW(groups, lr=self.recipe.base_lr, weight_decay=self.recipe.weight_decay)
@@ -180,8 +181,9 @@ class HercuvitTrainer:
                         ignore_i = F.max_pool3d((sem == 2).float()[:, None], r, r)[:, 0] > 0.5
                     else:
                         owner_i, ignore_i = owner_thin, (sem == 2)
-                    it = L.instance_loss(inst, mf, owner_i, has_id, self.recipe,
-                                         ignore=ignore_i, seed=self.global_step)
+                    # v2 decoupled: no-null fg-gated ownership CE (no class/obj/mask-Dice)
+                    it = L.instance_loss_decoupled(inst, mf, owner_i, has_id, self.recipe,
+                                                   ignore=ignore_i, seed=self.global_step)
                     loss = it["inst"] if loss is None else loss + it["inst"]
                     if self.recipe.w_symskel > 0 and inst is not None:
                         sk, skt = L.m2f_symskel_mask_loss(inst, out["mask_features"], sem, owner, has_id, self.recipe,
@@ -275,8 +277,8 @@ class HercuvitTrainer:
             )
             return float(m["sdice_tol1"])
         from .metrics import coverage_metrics
-        m = coverage_metrics(self.net, val_loader, self.device, max_windows=mw,
-                             mask_mode=getattr(self.recipe, "mask_mode", "sigmoid"))
+        mm = "decoupled" if self.recipe.decoder == "decoupled" else getattr(self.recipe, "mask_mode", "sigmoid")
+        m = coverage_metrics(self.net, val_loader, self.device, max_windows=mw, mask_mode=mm)
         print(
             f"{_C['sem']}[val ep {epoch}] coverage: IoU mean {m['iou_mean']:.3f} med {m['iou_median']:.3f} "
             f"p90 {m['iou_p90']:.3f} | captured >0.1 {m['cap010']*100:.0f}% >0.5 {m['cap050']*100:.0f}% | "

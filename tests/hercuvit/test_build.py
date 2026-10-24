@@ -93,7 +93,7 @@ def test_cli_parses_all_subcommands():
 @pytest.mark.skipif(not os.path.exists("/tmp/dino_ck/teacher_305k.pt"),
                     reason="Dinovol checkpoint not cached at /tmp/dino_ck/teacher_305k.pt")
 def test_real_build_forward_cpu():
-    """Build the REAL small net from the cached Dinovol ckpt and run one 128³ forward (auto backend, CPU)."""
+    """Build the REAL net (decoupled decoder) from the cached Dinovol ckpt and run one 128³ forward (CPU)."""
     ck = "/tmp/dino_ck/teacher_305k.pt"
     net = netbuild.build(ck, device="cpu", attention_backend="auto", arch_override=None,
                          with_instance=True)
@@ -103,4 +103,5 @@ def test_real_build_forward_cpu():
         out = net(x)
     assert out["sem_logits"][0].shape == (1, 2, 128, 128, 128)
     assert out["mask_features"].shape[1] == 32
-    assert out["instance"] is not None and len(out["instance"]["layers"]) == 3
+    # decoupled decoder: default instance_layers=3 → 3 decoder layers + the pre-layer-0 prediction = 4 entries.
+    assert out["instance"] is not None and len(out["instance"]["layers"]) == 4

@@ -320,7 +320,7 @@ def _window_passes(per_sheet, gate_score=0.85, gate_count=2):
 
 
 def _build_surface_label(mag, owner_full, weight, per_sheet, *, surface_tau=0.91, ignore_score=0.80,
-                         confidence_ignore=True):
+                         confidence_ignore=False):
     """The 3-class surface label {0 bg, 1 surface, 2 ignore}. surface = ``|∇φ| >= surface_tau``. IGNORE(2) is the
     union of: COLLAPSED-SHEET (always) — a sheet whose congruence < ``ignore_score`` is geometrically wrong, so
     its FULL unbounded Voronoi territory (``owner_full`` == that sheet) is ignored; and CONFIDENCE (only if

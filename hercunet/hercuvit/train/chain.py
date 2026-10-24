@@ -6,7 +6,35 @@ One command end to end (§3/§7/§10). Reuses hercunet's HF plumbing: the corpus
 """
 from __future__ import annotations
 
+import re
 from dataclasses import replace
+
+
+def _remap_vesuvius_decoder(his: dict) -> dict:
+    """Map the Dinovol author's Vesuvius ``Decoder`` state-dict onto our ``DecoupledPixelEncoder`` names, prefixed
+    ``pixel_decoder.`` for loading into the whole net. His ``stages.i`` → our ``block{i}``; ``transpconvs.i`` →
+    ``up{i}``; ``seg_layers.{0,1,2}`` (coarse→fine, widths 128/64/32) → ``surf_head_4/surf_head_2/surf_head``. Within
+    a block his ``ConvDropoutNormReLU`` names its conv/norm (``.conv.``/``.norm.``); ours is a plain ``Sequential``
+    (``.0.``/``.1.``). His ``.all_modules.*`` is a redundant duplicate view and is dropped. Shapes are identical
+    when the 480 encoder is used (its stem widths make our deconv widths equal his)."""
+    seg = {0: "surf_head_4", 1: "surf_head_2", 2: "surf_head"}
+    out: dict = {}
+    for k, v in his.items():
+        if ".all_modules." in k:
+            continue
+        m = re.match(r"stages\.(\d+)\.(.*)$", k)
+        if m:
+            rest = m.group(2).replace(".conv.", ".0.").replace(".norm.", ".1.")
+            out[f"pixel_decoder.block{m.group(1)}.{rest}"] = v
+            continue
+        m = re.match(r"transpconvs\.(\d+)\.(.*)$", k)
+        if m:
+            out[f"pixel_decoder.up{m.group(1)}.{m.group(2)}"] = v
+            continue
+        m = re.match(r"seg_layers\.(\d+)\.(.*)$", k)
+        if m and int(m.group(1)) in seg:
+            out[f"pixel_decoder.{seg[int(m.group(1))]}.{m.group(2)}"] = v
+    return out
 
 
 def resolve_corpus(corpus=None, corpus_hf=None, *, allow_patterns=None) -> str:
@@ -126,7 +154,27 @@ def run_training(
 
     if init_from:                                                    # WARM-START: load model weights only (fresh
         blob = torch.load(init_from, map_location="cpu", weights_only=False)   # schedule/optimiser), e.g. a
-        sd = blob["model"] if isinstance(blob, dict) and "model" in blob else blob   # surface-only run → M2F-active run.
+        if isinstance(blob, dict) and "decoder" in blob and "model" not in blob:
+            # the Dinovol author's surface-decoder checkpoint (scrollprize/dinovol_eval_surfaces, `last.pt`): a
+            # Vesuvius `Decoder` state-dict (stages/transpconvs/seg_layers). Remap its keys onto our pixel decoder
+            # (block*/up*/surf_head*) and load the trained TRUNK + surface head; the mask machinery trains fresh.
+            # Only the channels match when the matching (480) encoder is used, so shapes are filtered as usual.
+            remapped = _remap_vesuvius_decoder(blob["decoder"])
+            cur = net.state_dict()
+            kept = {k: v for k, v in remapped.items() if k in cur and tuple(cur[k].shape) == tuple(v.shape)}
+            bad = [k for k, v in remapped.items() if k in cur and tuple(cur[k].shape) != tuple(v.shape)]
+            orphan = [k for k in remapped if k not in cur]
+            net.load_state_dict(kept, strict=False)
+            pd_total = sum(1 for k in cur if k.startswith("pixel_decoder."))
+            print(f"[hercuvit] warm-started PIXEL DECODER from author checkpoint {init_from}: loaded {len(kept)} "
+                  f"remapped tensors ({len(kept)}/{pd_total} of pixel_decoder); shape-skipped {len(bad)}, "
+                  f"unmapped {len(orphan)}", flush=True)
+            if bad[:4] or orphan[:4]:
+                print(f"  shape-skip[:4]={bad[:4]}\n  unmapped[:4]={orphan[:4]}", flush=True)
+            sd = None
+        else:
+            sd = blob["model"] if isinstance(blob, dict) and "model" in blob else blob   # surface-only→M2F warm-start
+    if init_from and sd is not None:
         # SHAPE-FILTER: a warm-start may cross an architecture change (e.g. the design-B surface-concat widens the
         # instance head mask_dim→n_sem+mask_dim). Keep only tensors whose shape matches the current model; the rest
         # (re-shaped / fresh) train from init. strict=False ignores missing/unexpected but NOT size mismatches.
@@ -185,7 +233,7 @@ def run_training(
 #: train fields settable on the CLI (the yaml is model-only); unset flags keep the recipe defaults.
 _TRAIN_FLAGS = ("epochs", "freeze_warmup_epochs", "freeze_decoder_epochs", "softmax_temp", "mask_loss_chunks",
                 "val_fold", "val_interval", "val_windows",
-                "batch_size", "base_lr", "encoder_lr_mult",
+                "batch_size", "base_lr", "encoder_lr_mult", "decoder_lr_mult",
                 "weight_decay", "grad_clip", "warmup_steps", "lr_schedule", "augment",
                 "target_voxel_um", "attention_backend", "w_symskel", "w_malis", "denoise", "dn_weight",
                 "w_mask_bce", "w_mask_dice", "w_surface", "surface_only")

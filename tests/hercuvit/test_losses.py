@@ -1,4 +1,5 @@
-"""HercuViT losses — semantic deep-sup downsampling, Hungarian identity recovery, has_identity gating, e2e."""
+"""HercuViT losses — semantic deep-sup downsampling, and the v2 DECOUPLED instance loss (no-null fg-gated ownership
+CE): has_identity gating + grad-connected zero, supervision, and a tiny end-to-end through the real decoupled heads."""
 import numpy as np
 import torch
 
@@ -30,94 +31,73 @@ def test_semantic_loss_runs_and_backprops():
     assert logits[0].grad is not None and torch.isfinite(logits[0].grad).all()
 
 
-def test_hungarian_recovers_identity():
-    # 3 disjoint GT masks over P points; predictions are the same masks in a known permutation.
-    torch.manual_seed(0)
-    P = 30
-    gt = torch.zeros(3, P)
-    gt[0, 0:10] = 1.0
-    gt[1, 10:20] = 1.0
-    gt[2, 20:30] = 1.0
-    perm = [2, 0, 1]                              # query i predicts GT perm[i]
-    pred = torch.stack([(2 * gt[perm[i]] - 1) * 10.0 for i in range(3)], 0)   # confident logits
-    cost = (HERCUVIT.cost_mask_bce * L._bce_cost(pred, gt)
-            + HERCUVIT.cost_mask_dice * L._dice_cost(torch.sigmoid(pred), gt))
-    from scipy.optimize import linear_sum_assignment
-    rows, cols = linear_sum_assignment(cost.numpy())
-    recovered = {int(r): int(c) for r, c in zip(rows, cols)}
-    assert recovered == {0: 2, 1: 0, 2: 1}
+def _toy_decoupled_instance(B=1, Q=4, C=3, L_layers=2, requires_grad=False):
+    """A minimal decoupled instance dict: per-layer ``mask_embed`` (B,Q,C) + ``n_match`` (no null, no class)."""
+    layers = [{"mask_embed": torch.randn(B, Q, C, requires_grad=requires_grad)} for _ in range(L_layers)]
+    return {"layers": layers, "n_match": Q}
 
 
-def _toy_instance(B=1, Q=4, C=3, side=8, mask_dim=3, requires_grad=False):
-    g = side ** 3
-    objectness = torch.randn(B, g, requires_grad=requires_grad)
-    layers = [{
-        "class_logits": torch.randn(B, Q, 2, requires_grad=requires_grad),
-        "mask_embed": torch.randn(B, Q, mask_dim, requires_grad=requires_grad),
-        "anchors": torch.zeros(B, Q, 3),
-    } for _ in range(2)]
-    return {"objectness": objectness, "query_idx": torch.zeros(B, Q, dtype=torch.long), "layers": layers}
-
-
-def test_instance_loss_zero_and_zero_grad_when_no_identity():
+def test_decoupled_loss_zero_and_grad_connected_when_no_identity():
     torch.manual_seed(0)
     side, mask_dim = 8, 3
-    inst = _toy_instance(side=side, mask_dim=mask_dim, requires_grad=True)
+    inst = _toy_decoupled_instance(C=mask_dim, requires_grad=True)
     mask_features = torch.randn(1, mask_dim, side, side, side, requires_grad=True)
     owner = torch.zeros(1, side, side, side, dtype=torch.long)
-    out = L.instance_loss(inst, mask_features, owner, has_identity=[False], recipe=HERCUVIT)
+    out = L.instance_loss_decoupled(inst, mask_features, owner, has_identity=[False], recipe=HERCUVIT)
     # gated off → exactly zero, but STILL grad-connected (so the optimiser step is well-defined / DDP-safe).
-    assert float(out["inst"]) == 0.0
+    assert float(out["inst"].detach()) == 0.0
     assert out["inst"].requires_grad
     out["inst"].backward()
-    assert torch.count_nonzero(inst["objectness"].grad) == 0           # grad exists and is all-zero
-    assert torch.count_nonzero(inst["layers"][-1]["mask_embed"].grad) == 0
+    assert torch.count_nonzero(inst["layers"][-1]["mask_embed"].grad) == 0   # grad exists and is all-zero
 
 
-def test_instance_loss_supervises_with_identity():
+def test_decoupled_loss_supervises_with_identity():
     torch.manual_seed(0)
     side, mask_dim = 8, 3
-    inst = _toy_instance(side=side, mask_dim=mask_dim, requires_grad=True)
+    inst = _toy_decoupled_instance(C=mask_dim, requires_grad=True)
     mask_features = torch.randn(1, mask_dim, side, side, side, requires_grad=True)
     owner = torch.zeros(1, side, side, side, dtype=torch.long)
-    owner[0, 1:4, 1:4, 1:4] = 1
+    owner[0, 1:4, 1:4, 1:4] = 1                   # two thin "sheets" (ids 1,2)
     owner[0, 5:7, 5:7, 5:7] = 2
-    out = L.instance_loss(inst, mask_features, owner, has_identity=[True], recipe=HERCUVIT)
+    out = L.instance_loss_decoupled(inst, mask_features, owner, has_identity=[True], recipe=HERCUVIT)
     assert out["inst"].requires_grad and torch.isfinite(out["inst"])
-    assert float(out["inst"]) > 0.0
+    assert float(out["inst"].detach()) > 0.0
     out["inst"].backward()
     assert mask_features.grad is not None and torch.isfinite(mask_features.grad).all()
 
 
-def test_end_to_end_pillars_forward_backward():
-    """Tiny end-to-end through the REAL pillar heads (pixel decoder + instance head) + both losses."""
+def test_end_to_end_decoupled_forward_backward():
+    """Tiny end-to-end through the REAL decoupled heads (pixel encoder + mask decoder) + semantic & instance losses."""
     torch.manual_seed(0)
-    from hercunet.hercuvit.model.pixel_decoder import PixelDecoder
-    from hercunet.hercuvit.model.instance_head import InstanceHead
+    from hercunet.hercuvit.model.decoupled_pixel_encoder import DecoupledPixelEncoder
+    from hercunet.hercuvit.model.decoupled_mask_decoder import DecoupledMaskDecoder
 
     token_dim, mask_dim = 8, 3
-    dec = PixelDecoder(token_dim=token_dim, skip_channels=(2, 4, 6),
-                       decoder_channels=(8, 6, 4, 2), n_sem_classes=2, mask_dim=mask_dim, deep_supervision=True)
-    inst = InstanceHead(token_dim=token_dim, feat_14_dim=6, dim=4, n_queries=4, n_layers=2, mask_dim=mask_dim)
+    dec = DecoupledPixelEncoder(token_dim=token_dim, skip_channels=(2, 4, 6),
+                                n_sem_classes=2, mask_dim=mask_dim, deep_supervision=True)
+    head = DecoupledMaskDecoder(dim=mask_dim, mask_dim=mask_dim, n_heads=1, n_queries=4, n_layers=3)
 
     B = 1
-    tokens = torch.randn(B, token_dim, 2, 2, 2)                        # 1/8 token grid, side 2 → output 16³
-    skips = [torch.randn(B, 2, 16, 16, 16), torch.randn(B, 4, 8, 8, 8), torch.randn(B, 6, 4, 4, 4)]
-    dec_out = dec(tokens, skips)
-    instance = inst(tokens, dec_out["feat_14"])
-    assert dec_out["sem_logits"][0].shape == (B, 2, 16, 16, 16)
-    assert dec_out["mask_features"].shape == (B, mask_dim, 16, 16, 16)
+    tokens = torch.randn(B, token_dim, 4, 4, 4)                        # 1/8 token grid, side 4 → output 32³
+    skips = [torch.randn(B, 2, 32, 32, 32), torch.randn(B, 4, 16, 16, 16), torch.randn(B, 6, 8, 8, 8)]
+    d = dec(tokens, skips)
+    assert d["sem_logits"][0].shape == (B, 2, 32, 32, 32)
+    assert d["mask_features"].shape == (B, mask_dim, 32, 32, 32)
+    assert len(d["memory"]) == 3                                       # [1/32,1/16,1/8]
 
-    sem_t = torch.zeros(B, 16, 16, 16, dtype=torch.long)
-    sem_t[0, 4:9, 4:9, 4:9] = 1
-    owner = torch.zeros(B, 16, 16, 16, dtype=torch.long)
-    owner[0, 4:9, 4:9, 4:9] = 1
+    instance = head(d["memory"], d["mask_features"], dn_owner=None)
 
-    sem = L.semantic_loss(dec_out["sem_logits"], sem_t, HERCUVIT)
-    ins = L.instance_loss(instance, dec_out["mask_features"], owner, has_identity=[True], recipe=HERCUVIT)
+    sem_t = torch.zeros(B, 32, 32, 32, dtype=torch.long)
+    sem_t[0, 8:18, 8:18, 8:18] = 1
+    owner = torch.zeros(B, 32, 32, 32, dtype=torch.long)
+    owner[0, 10, 10:14, 10:14] = 1                                     # a thin sheet
+    owner[0, 20, 20:24, 20:24] = 2
+
+    sem = L.semantic_loss(d["sem_logits"], sem_t, HERCUVIT)
+    ins = L.instance_loss_decoupled(instance, d["mask_features"], owner, has_identity=[True], recipe=HERCUVIT)
     total = sem["sem"] + ins["inst"]
     assert torch.isfinite(total)
     total.backward()
-    # gradients reach the decoder's semantic head and the instance head's mask embedding.
-    assert dec.sem_head.weight.grad is not None
-    assert inst.mask_embed.weight.grad is not None
+    # gradients reach the decoder's surface head and the mask decoder's mask-embed MLP.
+    assert dec.surf_head.weight.grad is not None
+    assert head.mask_embed[-1].weight.grad is not None

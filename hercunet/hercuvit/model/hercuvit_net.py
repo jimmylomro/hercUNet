@@ -1,16 +1,18 @@
-"""HercuViT network — assembles the three pillars on the Dinovol encoder.
+"""HercuViT network (architecture v2 "decoupled") — assembled on the Dinovol encoder.
 
-``encoder (windowed-retrofit Dinovol) → pixel decoder (skips) → {semantic head, Mask2Former instance head}``.
+``Dinovol encoder → DecoupledPixelEncoder (CNN-UNET, concat stem skips → U1@1/1 = mask_features + a 1×1 surface head
+= objectness) → DecoupledMaskDecoder (learned + DN queries, no null, plain dot)``.
 
-Build it with :func:`build_hercuvit` (pulls / loads the Dinovol checkpoint, applies the windowed retrofit, and
-attaches the decoder + heads). The fibre / ink / region heads (``heads_future``) are attached but inactive in
-v1 (``docs/hercuvit.md`` §11).
+Build it with :func:`build_hercuvit` (pulls / loads the Dinovol checkpoint, applies the windowed retrofit — a no-op
+for the all-global ``full`` encoder, kept for a future unfrozen-encoder windowing — and attaches the decoupled
+pixel encoder + mask decoder). See ``docs/hercuvit.md`` and ``docs/hercuvit-mask-architecture.md`` §10.
 """
 from __future__ import annotations
 
 from typing import Sequence
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from .encoder import (  # noqa: F401 (re-export)
@@ -23,11 +25,8 @@ from .encoder import (  # noqa: F401 (re-export)
     DINOVOL_CKPT_FILE,
 )
 from .windowed import retrofit_windowed, DEFAULT_GLOBAL_BLOCKS, DEFAULT_WINDOW_SIZE
-from .pixel_decoder import PixelDecoder
-from .patch_decoder import PatchDecoder
-from .instance_head import InstanceHead
-from .mask_pixel_encoder import MaskPixelEncoder
-from .mask_decoder import MaskDecoder
+from .decoupled_pixel_encoder import DecoupledPixelEncoder
+from .decoupled_mask_decoder import DecoupledMaskDecoder
 
 #: Canonical pixel-decoder widths ``(1/8, 1/4, 1/2, 1/1)``. Only ``d8`` (the 1/8 width) is free — ``(d4,d2,d1)``
 #: are LOCKED to the stem skip channels ``(128,48,16)`` by the additive skips. A slim variant sets a smaller d8 in
@@ -63,7 +62,7 @@ class HercuVitNet(nn.Module):
         learned_queries: bool = False,
         fps_queries: bool = False,
         cross_attn: str = "deformable",
-        decoder: str = "unet",
+        decoder: str = "decoupled",
         neck: str = "none",
         neck_layers: int = 6,
         neck_heads: int = 4,
@@ -74,61 +73,19 @@ class HercuVitNet(nn.Module):
         self.backbone = backbone
         self.backbone.return_embed_skips = True
         self.decoder_kind = str(decoder)
-        if self.decoder_kind == "patchdecode":                              # design B: deformable neck + PatchDecode tail
-            self.pixel_decoder = PatchDecoder(
-                token_dim=token_dim,
-                s2_dim=int(skip_channels[2]),
-                mask_dim=mask_dim,
-                n_sem_classes=n_sem_classes,
-                neck=neck, neck_layers=neck_layers, neck_heads=neck_heads, neck_points=neck_points,
-                surface_gate=surface_gate,
-                deep_supervision=deep_supervision,
-            )
-        elif self.decoder_kind == "unet":
-            self.pixel_decoder = PixelDecoder(
-                token_dim=token_dim,
-                skip_channels=skip_channels,
-                decoder_channels=decoder_channels,
-                n_sem_classes=n_sem_classes,
-                mask_dim=mask_dim,
-                deep_supervision=deep_supervision,
-            )
-        elif self.decoder_kind == "mask2former":                             # design C: 4-level deformable encoder
-            self.pixel_decoder = MaskPixelEncoder(                            # (docs/hercuvit-mask-architecture.md)
-                token_dim=token_dim, s2_dim=int(skip_channels[2]), dim=128,
-                n_layers=neck_layers, n_heads=neck_heads, n_points=neck_points,
-                n_sem_classes=n_sem_classes, mask_dim=mask_dim, deep_supervision=deep_supervision,
-            )
-        else:
-            raise ValueError(f"decoder must be 'unet', 'patchdecode' or 'mask2former', got {decoder!r}.")
-        # design B feeds the instance head SURFACE-CONCAT features (mask-feat ⊕ softmax(surface)): sheet-ness is a
-        # direction (null keys on it), identity is the mask-feat direction. The per-voxel feature width the head
-        # reads/writes is then n_sem+mask_dim (not mask_dim) — passed as feat_dim.
-        self._gated_kv = (self.decoder_kind == "patchdecode" and bool(surface_gate))
+        if self.decoder_kind != "decoupled":
+            raise ValueError(f"decoder must be 'decoupled', got {decoder!r}.")
+        # v2 decoupled (docs/hercuvit-mask-architecture.md §10): CNN-UNET pixel encoder on the frozen stem; U1@1/1 IS
+        # mask_features, a 1×1 surface head off U1 is the objectness. Widths derive from the stem skips + mask_dim.
+        self.pixel_decoder = DecoupledPixelEncoder(
+            token_dim=token_dim, skip_channels=skip_channels,
+            n_sem_classes=n_sem_classes, mask_dim=mask_dim, deep_supervision=deep_supervision,
+        )
         self.with_instance = bool(with_instance)
-        feat_dim = int(getattr(self.pixel_decoder, "instance_feat_dim", mask_dim))  # concat width when design B
-        if not self.with_instance:
-            self.instance_head = None
-        elif self.decoder_kind == "mask2former":                             # design C: seeded masked-attn decoder
-            self.instance_head = MaskDecoder(
-                dim=128, mask_dim=mask_dim, n_heads=neck_heads, n_queries=n_queries,
-                n_layers=instance_layers, add_null=add_null_query,
-            )
-        else:
-            self.instance_head = InstanceHead(
-                token_dim=token_dim,
-                feat_14_dim=int(decoder_channels[1]),
-                dim=query_dim,
-                n_queries=n_queries,
-                n_layers=instance_layers,
-                mask_dim=mask_dim,
-                feat_dim=feat_dim,
-                add_null=add_null_query,
-                learned_queries=learned_queries,
-                fps_queries=fps_queries,
-                cross_attn=cross_attn,
-                gated_kv=self._gated_kv,
-            )
+        # learned + DN queries, NO null, plain dot; the decoder runs NATIVELY at mask_dim (no up-projection).
+        self.instance_head = None if not self.with_instance else DecoupledMaskDecoder(
+            dim=mask_dim, mask_dim=mask_dim, n_heads=neck_heads, n_queries=n_queries, n_layers=instance_layers,
+        )
 
     def forward(self, x: torch.Tensor, dn_owner: torch.Tensor | None = None, run_instance: bool = True) -> dict:
         """``run_instance=False`` skips the instance head entirely (surface-only training/validation) — the net then
@@ -140,31 +97,12 @@ class HercuVitNet(nn.Module):
         side = round(G ** (1 / 3))
         tokens_grid = tokens_seq.transpose(1, 2).reshape(B, C, side, side, side)  # (B, C, 16,16,16)
 
-        if self.decoder_kind == "mask2former":                       # design C: 4-level deformable encoder + seeded decoder
-            dec = self.pixel_decoder(tokens_grid, skips[2])          # 1/4 (s2) is a FULL encoder level
-            out = {"sem_logits": dec["sem_logits"], "mask_features": dec["mask_features"], "instance": None}
-            if "surf_share" in dec:
-                out["surf_share"] = dec["surf_share"]                 # ‖f[0:surf_dim]‖² monitor (≈0.19; →1 = collapse)
-            if self.instance_head is not None and run_instance:
-                surf4 = torch.softmax(dec["sem_logits"][-1].float(), dim=1)[:, 1]   # P(surface) @1/4 for seeding
-                dn4 = None
-                if dn_owner is not None:                             # thin GT owner → 1/4 (nearest via max-pool)
-                    r = dn_owner.shape[-1] // dec["mask_features"].shape[-1]
-                    dn4 = torch.nn.functional.max_pool3d(dn_owner.float()[:, None], r, r)[:, 0].long()
-                out["instance"] = self.instance_head(dec["memory"], dec["feat4"], dec["mask_features"], surf4, dn_owner=dn4)
-            return out
-
-        if self.decoder_kind == "patchdecode":
-            dec = self.pixel_decoder(tokens_grid, skips[2])          # the neck consumes the 1/4 stem skip (s2)
-            mf_inst = dec.get("instance_features", dec["mask_features"])  # mask-feat ⊕ softmax(surface) (concat, §3)
-            feat_14 = None                                           # design B: no 1/4 decoder feat (concat-K/V instead)
-        else:
-            dec = self.pixel_decoder(tokens_grid, skips)
-            mf_inst = dec["mask_features"]
-            feat_14 = dec["feat_14"]
-        out = {"sem_logits": dec["sem_logits"], "mask_features": mf_inst, "instance": None}
+        # v2 decoupled: CNN-UNET pixel encoder → surface @1/1 (own head) + mask_features=U1@1/1 + the U1 memory pyramid.
+        dec = self.pixel_decoder(tokens_grid, skips)
+        out = {"sem_logits": dec["sem_logits"], "mask_features": dec["mask_features"], "instance": None}
         if self.instance_head is not None and run_instance:
-            out["instance"] = self.instance_head(tokens_grid, feat_14, mask_features=mf_inst, dn_owner=dn_owner)
+            # learned + DN queries (DN seeded from the THIN GT owner @1/1, train only); no FPS/surface seeding.
+            out["instance"] = self.instance_head(dec["memory"], dec["mask_features"], dn_owner=dn_owner)
         return out
 
     # --- staged training helpers (the trainer drives the schedule; see docs/hercuvit.md §7) ---
@@ -175,33 +113,35 @@ class HercuVitNet(nn.Module):
             p.requires_grad = bool(flag)
 
     def set_decoder_trunk_trainable(self, flag: bool) -> None:
-        """Freeze/unfreeze the WARM-STARTED decoder trunk — the deformable neck + PatchDecode upsample tail + the
-        **surface head** — while keeping the (fresh, untrained) **mask-feature head** trainable. For an instance-head
-        warmup after a surface-only warm-start: the instance head then learns against a FIXED good surface gate
-        (``mask_feat · σ(surface)``), and the big early instance gradients cannot drag the trunk or surface head off
-        their trained optimum, while the mask features (never trained in the surface-only run) still adapt. The
-        surface head and mask head are sibling 1×1 convs off the same tail features, so freezing one leaves the other
-        free. patchdecode decoder only (no-op for the UNet decoder)."""
-        pd = getattr(self, "pixel_decoder", None)
-        if not isinstance(pd, PatchDecoder):
-            return
-        keep = {id(p) for p in pd.mask_head.parameters()}        # mask head stays trainable (it is untrained)
-        for p in pd.parameters():
-            if id(p) not in keep:
-                p.requires_grad = bool(flag)
-        for p in pd.mask_head.parameters():
-            p.requires_grad = True
+        """Freeze/unfreeze the WARM-STARTED pixel decoder (deconv trunk + surface head). For an instance-head warmup
+        after warm-starting the author's surface decoder: freezing it lets the fresh instance head (``DecoupledMaskDecoder``)
+        train against a FIXED surface + FIXED ``mask_features`` (= U1), so the big early instance gradients cannot drag
+        the trained decoder off its optimum; unfreeze later for joint fine-tuning (``--freeze-decoder-epochs``)."""
+        for p in self.pixel_decoder.parameters():
+            p.requires_grad = bool(flag)
 
-    def param_groups(self, *, base_lr: float, encoder_lr_mult: float = 0.1) -> list[dict]:
-        """Two LR groups: the whole pretrained ENCODER (backbone: stem + transformer) at ``encoder_lr_mult`` ×
-        ``base_lr``, and the fresh decoder + heads at ``base_lr``."""
+    def param_groups(self, *, base_lr: float, encoder_lr_mult: float = 0.1,
+                     decoder_lr_mult: float = 1.0) -> list[dict]:
+        """LR groups: the pretrained ENCODER (backbone: stem + transformer) at ``encoder_lr_mult`` × ``base_lr``;
+        the PIXEL DECODER at ``decoder_lr_mult`` × ``base_lr`` (a separate group only when ``decoder_lr_mult != 1`` —
+        e.g. a warm-started decoder fine-tuned gently while the fresh instance head trains at full LR); everything
+        else (instance head + any fresh heads) at ``base_lr``."""
         enc_ids = {id(p) for p in self.backbone.parameters()}
-        enc, rest = [], []
+        pd_ids = ({id(p) for p in self.pixel_decoder.parameters()}
+                  if decoder_lr_mult != 1.0 else set())
+        enc, pd, rest = [], [], []
         for p in self.parameters():
             if not p.requires_grad:
                 continue
-            (enc if id(p) in enc_ids else rest).append(p)
+            if id(p) in enc_ids:
+                enc.append(p)
+            elif id(p) in pd_ids:
+                pd.append(p)
+            else:
+                rest.append(p)
         groups = [{"params": rest, "lr": base_lr}]
+        if pd:
+            groups.append({"params": pd, "lr": base_lr * decoder_lr_mult})
         if enc:
             groups.append({"params": enc, "lr": base_lr * encoder_lr_mult})
         return groups
@@ -274,7 +214,7 @@ def build_hercuvit(
     learned_queries: bool = False,
     fps_queries: bool = False,
     cross_attn: str = "deformable",
-    decoder: str = "unet",
+    decoder: str = "decoupled",
     neck: str = "none",
     neck_layers: int = 6,
     neck_heads: int = 4,
@@ -346,6 +286,10 @@ def build_hercuvit(
     net = HercuVitNet(
         backbone,
         token_dim=int(cfg["embed_dim"]),
+        # stem skip channels read straight from the built stem (PatchEmbedDeeper.skip_channels = stage_channels[:-1]),
+        # exactly as the author reads them — NO hardcode. So any "deeper" encoder (288 → (16,48,128); 480 →
+        # (32,64,128)) just works.
+        skip_channels=tuple(backbone.down_projection.skip_channels),
         decoder_channels=tuple(arch.get("decoder_channels", DEFAULT_DECODER_CHANNELS)),
         n_sem_classes=n_sem_classes,
         mask_dim=mask_dim,

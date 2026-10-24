@@ -36,15 +36,18 @@ def soft_skel(img: torch.Tensor, iters: int) -> torch.Tensor:
 
 
 def focal_tversky(prob_fg: torch.Tensor, gt_fg: torch.Tensor, *, alpha: float, beta: float,
-                  gamma: float, smooth: float = 1e-5) -> torch.Tensor:
+                  gamma: float, smooth: float = 1e-5, mask: torch.Tensor | None = None) -> torch.Tensor:
     """Focal-Tversky loss on the foreground. ``prob_fg``/``gt_fg``: ``(B,1,D,H,W)``.
 
     ``TI = (TP+s)/(TP + α·FP + β·FN + s); loss = (1 − TI)^γ``. γ=1 is plain Tversky; α=β=0.5 = Dice-like precision
-    (the champion), β>α tilts toward recall. Per-sample then mean (``batch_dice=False`` path)."""
+    (the champion), β>α tilts toward recall. Per-sample then mean (``batch_dice=False`` path). ``mask`` (``(B,1,…)``
+    1=keep, 0=ignore) excludes ignore voxels from TP/FP/FN, matching nnU-Net's ``loss_mask`` — without it a surface
+    prediction in an ignore region is wrongly counted as a false positive."""
     axes = tuple(range(2, prob_fg.ndim))
-    tp = (prob_fg * gt_fg).sum(axes, dtype=torch.float32)
-    fp = (prob_fg * (1.0 - gt_fg)).sum(axes, dtype=torch.float32)
-    fn = ((1.0 - prob_fg) * gt_fg).sum(axes, dtype=torch.float32)
+    m = 1.0 if mask is None else mask
+    tp = (prob_fg * gt_fg * m).sum(axes, dtype=torch.float32)
+    fp = (prob_fg * (1.0 - gt_fg) * m).sum(axes, dtype=torch.float32)
+    fn = ((1.0 - prob_fg) * gt_fg * m).sum(axes, dtype=torch.float32)
     ti = (tp + smooth) / (tp + alpha * fp + beta * fn + smooth).clamp_min(1e-8)
     return (1.0 - ti).clamp_min(0.0).pow(gamma).mean()
 
@@ -56,7 +59,8 @@ def skeleton_recall(prob_fg: torch.Tensor, gt_fg: torch.Tensor, *, iters: int = 
     g = gt_fg if mask is None else gt_fg * mask
     skel = soft_skel(g, iters)
     p = prob_fg if mask is None else prob_fg * mask
-    rec = (p * skel).sum() / skel.sum().clamp_min(1.0)
+    sk = skel if mask is None else skel * mask            # re-mask the skeleton (soft_skel can bleed ≤1vx onto
+    rec = (p * sk).sum() / sk.sum().clamp_min(1.0)        # ignore voxels); matches nnU-Net SkeletonRecallLoss exactly
     return 1.0 - rec
 
 
@@ -71,18 +75,18 @@ def separation_penalty(prob_fg: torch.Tensor, target: torch.Tensor, *, radius: i
     return (prob_fg * gap).sum() / gap.sum().clamp_min(1.0)
 
 
-def surface_terms(logits: torch.Tensor, target: torch.Tensor, *, fg_weight: float = 30.0,
+def surface_terms(logits: torch.Tensor, target: torch.Tensor, *,
                   tversky_alpha: float = 0.5, tversky_beta: float = 0.5, tversky_gamma: float = 1.0,
                   skel_iters: int = 3, sep_radius: int = 2, ignore_label: int | None = None) -> dict:
     """All surface terms for ONE resolution. ``logits`` ``(B,C,D,H,W)``, ``target`` ``(B,D,H,W)`` int.
 
     Returns ``{"ce", "tversky", "skel", "sep"}`` scalar tensors; the caller weights + sums them (and over
-    deep-supervision scales). CE is foreground-weighted (imbalance); Tversky + skeleton-recall are the thin-surface
-    precision/recall pair; separation is the anti-merge term.
+    deep-supervision scales). CE is PLAIN (unweighted) — matching HercUNet's ``build_surface_loss`` (``DC_and_CE_loss``
+    with ``ce_kwargs={}``): imbalance is carried by Focal-Tversky (α=β=0.5) + skeleton-recall, NOT by a CE class
+    weight. Tversky + skeleton-recall are the thin-surface precision/recall pair; separation is the anti-merge term.
     """
     tl = target.long()
-    cw = torch.tensor([1.0, float(fg_weight)], device=logits.device, dtype=logits.dtype)
-    ce = F.cross_entropy(logits, tl, weight=cw,
+    ce = F.cross_entropy(logits, tl,
                          ignore_index=(-100 if ignore_label is None else int(ignore_label)))
     prob_fg = torch.softmax(logits, 1)[:, 1:2]
     t1 = tl.unsqueeze(1)
@@ -90,7 +94,7 @@ def surface_terms(logits: torch.Tensor, target: torch.Tensor, *, fg_weight: floa
     mask = (t1 != ignore_label).float() if ignore_label is not None else None
     return {
         "ce": ce,
-        "tversky": focal_tversky(prob_fg, gt_fg, alpha=tversky_alpha, beta=tversky_beta, gamma=tversky_gamma),
+        "tversky": focal_tversky(prob_fg, gt_fg, alpha=tversky_alpha, beta=tversky_beta, gamma=tversky_gamma, mask=mask),
         "skel": skeleton_recall(prob_fg, gt_fg, iters=skel_iters, mask=mask),
         "sep": separation_penalty(prob_fg, t1, radius=sep_radius),
     }

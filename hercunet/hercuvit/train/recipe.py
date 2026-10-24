@@ -75,9 +75,9 @@ class HercuvitRecipe:
                                                     # (per-voxel ownership over queries, null=background — exclusive)
     add_null_query: bool = True                     # reserved null/no-sheet query (index 0) for the softmax ownership
 
-    # --- pixel decoder (design B, docs/dinovol_sheet_architecture.md §3) ---
-    decoder: str = "unet"                           # "unet" (lean additive-skip UNet) | "patchdecode" (deformable neck
-                                                    #   + author-style PatchDecode upsample + surface gate = design B)
+    # --- pixel decoder (v2 "decoupled", docs/hercuvit-mask-architecture.md §10) ---
+    decoder: str = "decoupled"                      # "decoupled": CNN-UNET pixel encoder (concat stem skips → U1@1/1 =
+                                                    #   mask_features + a 1×1 surface head = objectness). The only kind.
     neck: str = "none"                              # patchdecode only: "deformable" (6× MS-deformable-attn over
                                                     #   {1/8,1/4}, part A) | "none" (author-exact: tokens → upsample)
     neck_layers: int = 6                            # deformable-neck layers
@@ -97,6 +97,8 @@ class HercuvitRecipe:
     # --- optimiser / schedule ---
     base_lr: float = 1.0e-4
     encoder_lr_mult: float = 0.1                    # the whole encoder (stem+transformer) trains at 0.1× (after unfreeze)
+    decoder_lr_mult: float = 1.0                    # pixel-decoder LR multiplier (1.0 = base; <1 fine-tunes a
+                                                    # warm-started decoder gently while the fresh instance head is at base)
     weight_decay: float = 0.05
     grad_clip: float = 1.0
     warmup_steps: int = 200
@@ -202,7 +204,7 @@ _TUPLE_FIELDS = {"global_blocks", "window_size", "deep_sup_weights", "sr_factor"
 #: is model-from-yaml + training-from-CLI; the split is enforced at the yaml boundary, below.)
 _TRAIN_FIELDS = frozenset({
     "attention_backend", "target_voxel_um", "augment", "batch_size",
-    "base_lr", "encoder_lr_mult", "weight_decay", "grad_clip", "warmup_steps", "lr_schedule",
+    "base_lr", "encoder_lr_mult", "decoder_lr_mult", "weight_decay", "grad_clip", "warmup_steps", "lr_schedule",
     "epochs", "freeze_warmup_epochs", "freeze_decoder_epochs", "softmax_temp", "mask_loss_chunks",
     "val_fold", "val_interval", "val_windows",
     "w_surface", "surface_only",
@@ -263,11 +265,12 @@ def load(path=None) -> HercuvitRecipe:
 
 
 def variant_recipe(name: str) -> HercuvitRecipe:
-    """The shipped full-architecture recipe for a variant (``small`` | ``tiny`` | ``nano``) — ``recipes/<name>.yml``.
-    Used when training/distilling a variant without an explicit ``--recipe``: the yaml IS the net definition."""
+    """The shipped full-architecture recipe for a variant (``full`` | ``small`` | ``tiny`` | ``nano``). The yaml IS
+    the net definition; used when training/distilling a variant without an explicit ``--recipe``. The ``full`` variant
+    (raw all-global Dinovol) ships as ``recipes/full_decoupled.yml``; the windowed variants as ``recipes/<name>.yml``."""
     if name not in VARIANTS:
         raise SystemExit(f"hercuvit: unknown variant {name!r}; expected one of {VARIANTS}.")
-    return _load_builtin(name)
+    return _load_builtin("full_decoupled" if name == "full" else name)
 
 
 #: The default recipe, loaded from the shipped YAML.

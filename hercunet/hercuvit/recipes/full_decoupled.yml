@@ -1,0 +1,37 @@
+# HercuViT MODEL — architecture v2 "decoupled" (docs/hercuvit-mask-architecture.md §10): the `full` frozen Dinovol
+# encoder + a CNN-UNET pixel encoder with CONCATENATION stem skips to 1/1. The last deconv output U1 @1/1 IS the
+# mask_features (dim 32); a 1×1 conv off U1 is the DECOUPLED 2-class surface head = the objectness (no null query,
+# no no-object class). A 6-layer vanilla-Mask2Former decoder (learned + DN queries, PLAIN dot, no cosine/temp)
+# reads a U1-downsampled ≤1/8 attention pyramid and emits per-voxel masks at 1/1 by a plain dot against U1.
+# Losses: decoupled no-null fg-gated softmax-over-Q ownership-CE (+ AffMALIS for separation, CLI --w-malis) and the
+# thin-surface stack on the surface head (CLI --w-surface). A recipe yaml defines THE NETWORK ONLY; training config
+# (epochs, batch, lr, schedule, loss weights, AffMALIS) is set on the `hercuvit train` CLI as flags.
+name: full_decoupled
+variant: full
+
+# --- encoder arch (raw Dinovol teacher, all-global, no windowing) ---
+global_attention: full
+global_blocks: all
+window: 128
+
+# --- pixel encoder (v2 decoupled) ---
+decoder: decoupled
+# The deconv stages match the Dinovol author's surface decoder EXACTLY: NO bottleneck conv (ViT tokens fed straight
+# into the first transpconv), each stage = transpconv → CONCAT stem skip → 2× BasicBlockD residual blocks. The stage
+# widths are DERIVED from the stem skips (128,48) with the final = mask_dim (32) = U1 = mask_features, so there is no
+# decoder_channels knob. The decoder runs NATIVELY at mask_dim (32) — the pyramid is NOT up-projected; 4 heads →
+# 8 dims/head (8 heads would be only 4 dims/head, starving each head on a 32-d space).
+neck_heads: 4
+
+# --- heads / decoder ---
+n_sem_classes: 2
+mask_dim: 32
+n_queries: 64
+instance_layers: 6                     # decoder layers (MUST be a multiple of 3: round-robin over 1/32,1/16,1/8)
+deep_supervision: true                 # surface DS ON (1/1,1/2,1/4 heads, weights 1/0.5/0.25) — HercUNet-style, boosts
+                                       # the surface-head gradient without touching the mask loss (the villa author
+                                       # had it off, but with a far bigger encoder; HercUNet kept it on)
+learned_queries: true                  # the decoupled decoder always uses learned + DN queries
+fps_queries: false
+cross_attn: masked
+add_null_query: false                  # NO null query — the decoupled surface head is the objectness

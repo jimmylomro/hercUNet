@@ -26,7 +26,7 @@ import torch.nn.functional as F
 
 import torch.nn.functional as F
 
-from ..model.instance_head import mask_logits_at_points, mask_logits_from_embed
+from ..model.decoder_common import mask_logits_at_points, mask_logits_from_embed
 
 
 # --------------------------------------------------------------------------- semantic
@@ -55,7 +55,6 @@ def semantic_loss(sem_logits, sem_target: torch.Tensor, recipe) -> dict:
         tl = F.interpolate(sem_f, size=(side, side, side), mode="nearest")[:, 0].long()  # nearest keeps {0,1,2}
         terms = surface_terms(
             logits.float(), tl,
-            fg_weight=recipe.sem_fg_weight,
             tversky_alpha=recipe.tversky_alpha, tversky_beta=recipe.tversky_beta, tversky_gamma=recipe.tversky_gamma,
             skel_iters=recipe.skel_iters, sep_radius=recipe.sep_radius, ignore_label=2,
         )
@@ -186,7 +185,9 @@ def affinity_malis_loss(instance: dict, mask_features: torch.Tensor, owner: torc
     crop = int(recipe.malis_crop)
     malis = ConstrainedMalisLoss(offsets=offsets, crop=None)   # we crop the features ourselves (cheaper)
     lay = instance["layers"][-1]
-    me = lay["mask_embed"].float()                             # (B, Q, C)
+    n_match = instance.get("n_match")                          # exclude the train-only DN queries from the membership
+    me = lay["mask_embed"]                                     # (B, Q(+DN), C)
+    me = (me[:, :n_match] if n_match is not None else me).float()   # matching queries only (matches inference)
     B = mask_features.shape[0]
     total = mask_features.sum() * 0.0                          # grad-connected zero (no-identity / empty batch)
     grow = sep = 0.0
@@ -233,454 +234,142 @@ def _sample_points(owner_flat: torch.Tensor, ignore_flat: torch.Tensor, n: int, 
     return torch.cat(out, 0) if out else torch.zeros(0, dtype=torch.long, device=dev)
 
 
-def _bce_cost(pred_logits: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
-    """Mean-over-points BCE cost matrix. ``pred_logits`` (Q,P), ``gt`` (G,P) → (Q,G)."""
-    Q, P = pred_logits.shape
-    G = gt.shape[0]
-    pl = pred_logits.unsqueeze(1).expand(Q, G, P)
-    gg = gt.unsqueeze(0).expand(Q, G, P)
-    return F.binary_cross_entropy_with_logits(pl, gg, reduction="none").mean(-1)
+# --------------------------------------------------------------------------- v2 decoupled instance loss
+def _decoupled_item(me_L, feat_pts, owner_pts, ids, mf_flat, owner_flat, recipe):
+    """v2 no-null ownership losses for ONE item, ALL L layers batched. ``me_L`` (L,Q,C); ``feat_pts`` (C,P) /
+    ``owner_pts`` (P,) = point-sampled features/owner (Hungarian COST only); ``mf_flat`` (C,N) = mask_features @1/1;
+    ``owner_flat`` (N,) = THIN owner ids (0 = bg/ignore).
 
-
-def _dice_cost(prob: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
-    """Soft-Dice cost matrix. ``prob`` (Q,P) in [0,1], ``gt`` (G,P) → (Q,G)."""
-    num = 2.0 * torch.einsum("qp,gp->qg", prob, gt)
-    den = prob.sum(-1).unsqueeze(1) + gt.sum(-1).unsqueeze(0)
-    return 1.0 - (num + 1.0) / (den + 1.0)
-
-
-def _instance_item(layer_out_b, feat_pts, owner_pts, ids, mask_features_b, owner_b, valid_b, recipe):
-    """Matched set-prediction losses for ONE item at ONE decoder layer. Hungarian assignment uses the cheap
-    point-sampled cost, but the **mask loss is DENSE** — the matched queries' full-resolution masks (``mask_embed
-    · mask_features``) are supervised against the GT sheet over every valid (non-ignore) voxel. Dense is essential
-    here: sparse point-sampled mask loss leaves the full-res mask features sheet-uncorrelated (measured AUC≈0.5).
-
-    ``feat_pts`` (C,P) / ``owner_pts`` (P,) = sampled features/owner (cost only); ``mask_features_b`` (C,D,H,W),
-    ``owner_b`` (D,H,W), ``valid_b`` (D,H,W bool) = dense. Returns ``{class, mask_bce, mask_dice}``.
+    Match: per-layer Hungarian on **ownership-CE cost ONLY** (``cost[q,s] = -mean_{v∈s} log softmax_Q(dot)[q]``) —
+    no Dice, no class (they would compete with the decoupled surface head). Supervise: **fg-gated no-null
+    softmax-over-Q ownership CE** — each sheet voxel → its matched query, softmax over the Q queries; background is
+    NOT a class (the surface head gates it at inference). Returns the aux-weighted CE + final-layer metrics.
     """
-    class_logits = layer_out_b["class_logits"]                         # (Q,2)
-    mask_embed = layer_out_b["mask_embed"]                             # (Q,C)
-    Q = class_logits.shape[0]
-    device = class_logits.device
-    G = len(ids)
-    if G == 0:
-        cls_target = torch.zeros(Q, dtype=torch.long, device=device)   # all no-object
-        cw = torch.tensor([recipe.no_object_weight, 1.0], device=device)
-        loss_class = F.cross_entropy(class_logits, cls_target, weight=cw)
-        zero = mask_embed.sum() * 0.0
-        return {"class": loss_class, "mask_bce": zero, "mask_dice": zero}
-
-    # --- Hungarian assignment on the cheap sampled cost ---
-    pred_pts = mask_logits_at_points(mask_embed.unsqueeze(0), feat_pts.unsqueeze(0))[0]  # (Q,P)
-    gt_pts = torch.stack([(owner_pts == i).float() for i in ids], 0)   # (G,P)
-    with torch.no_grad():
-        cls_prob = torch.softmax(class_logits, dim=-1)
-        cost = (recipe.cost_class * (-cls_prob[:, 1].unsqueeze(1).expand(Q, G))
-                + recipe.cost_mask_bce * _bce_cost(pred_pts, gt_pts)
-                + recipe.cost_mask_dice * _dice_cost(torch.sigmoid(pred_pts), gt_pts))
-        from scipy.optimize import linear_sum_assignment
-        rows, cols = linear_sum_assignment(cost.detach().float().cpu().numpy())
-    rows_t = torch.as_tensor(rows, dtype=torch.long, device=device)
-
-    cls_target = torch.zeros(Q, dtype=torch.long, device=device)
-    cls_target[rows_t] = 1                                             # matched queries → sheet
-    cw = torch.tensor([recipe.no_object_weight, 1.0], device=device)
-    loss_class = F.cross_entropy(class_logits, cls_target, weight=cw)
-
-    # --- DENSE mask loss on the matched queries (full-res, ignore-masked) ---
-    me_m = mask_embed[rows_t]                                          # (M,C)
-    mlog = mask_logits_from_embed(me_m.unsqueeze(0), mask_features_b.unsqueeze(0))[0]     # (M,D,H,W)
-    gt_m = torch.stack([(owner_b == int(ids[c])).float() for c in cols.tolist()], 0)     # (M,D,H,W)
-    v = valid_b.float().unsqueeze(0)                                   # (1,D,H,W)
-    bce = F.binary_cross_entropy_with_logits(mlog, gt_m, reduction="none")
-    loss_bce = (bce * v).sum() / (v.sum() * mlog.shape[0]).clamp_min(1.0)
-    p = torch.sigmoid(mlog)
-    num = 2.0 * (p * gt_m * v).sum(dim=(1, 2, 3)) + 1.0
-    den = (p * v).sum(dim=(1, 2, 3)) + (gt_m * v).sum(dim=(1, 2, 3)) + 1.0
-    loss_dice = (1.0 - num / den).mean()
-    return {"class": loss_class, "mask_bce": loss_bce, "mask_dice": loss_dice}
-
-
-def _softmax_ownership_terms(mask_embed, mask_features_b, tgt, valid_b, matched_rows, *, temp, chunks):
-    """Balanced-50/50 fg/bg ownership CROSS-ENTROPY ONLY — no mask-Dice. The instance head does per-voxel ID, not
-    region reconstruction; tracing ("is this a sheet") is the surface head's job and the surface-concat carries it
-    as a direction (§3). Streamed in ``chunks`` SPATIAL chunks so the full ``(Q,128³)`` logits are never
-    materialised at once; each chunk for ``chunks>1`` is gradient-CHECKPOINTED (logits recomputed in backward), so
-    peak memory is one chunk while gradients/loss are IDENTICAL to the dense path (``chunks=1`` == dense). ``tgt``
-    (D,H,W long): -100 ignore, 0 background (the null query, which keys on the surface-concat bg-direction), ``r`` =
-    the matched query that owns a sheet voxel. ``valid_b``/``matched_rows`` kept for signature stability. Returns ``ce``."""
-    import torch.utils.checkpoint as _ckpt
-    mask_embed = mask_embed.float()                                   # fp32 loss math — bf16 softmax/CE of fresh-head
-    mask_features_b = mask_features_b.float()                         # logits is numerically unstable (NaN pitfall)
-    C = mask_features_b.shape[0]
-    mf_flat = mask_features_b.reshape(C, -1)                           # (C,N)
-    tgt_flat = tgt.reshape(-1)                                         # (N,)
-    N = mf_flat.shape[1]
-    z = mask_embed.new_zeros(())
-    fg_sum = bg_sum = fg_cnt = bg_cnt = z
-
-    Q = mask_embed.shape[0]
-    own_correct = z                                                  # sheet voxels whose argmax-query == matched query
-    used = torch.zeros(Q, dtype=torch.bool, device=mask_embed.device)  # which queries win ANY sheet voxel (firing)
-
-    def _term(me, mf_c, tgt_c):
-        mlog = (me @ mf_c) / temp                                     # (Q,cn) — the only large tensor, chunk-local
-        ce = F.cross_entropy(mlog.transpose(0, 1), tgt_c, ignore_index=-100, reduction="none")  # (cn,)
-        fgm = tgt_c > 0; bgm = tgt_c == 0
-        with torch.no_grad():                                         # ownership-quality metric (detached, ~free)
-            pf = mlog.argmax(0)[fgm]                                  # winning query per sheet voxel
-            corr = (pf == tgt_c[fgm]).sum().float()
-            u = torch.zeros(Q, dtype=torch.bool, device=mlog.device)
-            if pf.numel():
-                u[pf.unique()] = True
-        return ce[fgm].sum(), fgm.sum().float(), ce[bgm].sum(), bgm.sum().float(), corr, u
-
-    bounds = [int(round(x)) for x in torch.linspace(0, N, int(chunks) + 1).tolist()]
-    for i in range(int(chunks)):
-        s, e = bounds[i], bounds[i + 1]
-        if e <= s:
-            continue
-        args = (mask_embed, mf_flat[:, s:e], tgt_flat[s:e])
-        out = _ckpt.checkpoint(_term, *args, use_reentrant=False) if int(chunks) > 1 else _term(*args)
-        fg_sum = fg_sum + out[0]; fg_cnt = fg_cnt + out[1]
-        bg_sum = bg_sum + out[2]; bg_cnt = bg_cnt + out[3]
-        own_correct = own_correct + out[4]; used = used | out[5]
-
-    ce = 0.5 * fg_sum / fg_cnt.clamp_min(1.0) + 0.5 * bg_sum / bg_cnt.clamp_min(1.0)   # balanced 50/50
-    n_fire = used[1:].sum().float()                                  # # real queries firing (exclude null at idx 0)
-    return ce, own_correct.detach(), fg_cnt.detach(), n_fire.detach()
-
-
-def _instance_item_softmax(layer_out_b, feat_pts, owner_pts, ids, mask_features_b, owner_b, valid_b, recipe):
-    """SOFTMAX-OWNERSHIP variant of :func:`_instance_item` (``mask_mode="softmax"``). The ``n_match`` queries'
-    logits are read out as a **per-voxel softmax over queries** (``temp=recipe.softmax_temp``) — each voxel is
-    owned by exactly ONE query (the null query, index 0, is the background class), so queries COMPETE and redundant
-    same-sheet queries are driven to background (the consolidation sigmoid lacks). Hungarian still assigns one query
-    per GT sheet (so each sheet maps to one ownership channel). The ownership CE is **balanced 50/50 foreground/
-    background** (per the author's point-SupCon lesson: a flat background weight lets the >99% background swamp the
-    thin targets). Plus soft-Dice on the matched channels. The dense masks are streamed in ``recipe.mask_loss_chunks``
-    checkpointed spatial chunks (never the full ``Q×128³`` at once). Returns ``{class, mask_bce, mask_dice}``."""
-    class_logits = layer_out_b["class_logits"].float()                 # (Q,2) — fp32 loss math (bf16 is NaN-prone)
-    mask_embed = layer_out_b["mask_embed"].float()                     # (Q,C)
-    mask_features_b = mask_features_b.float()
-    Q = class_logits.shape[0]
-    device = class_logits.device
-    T = float(getattr(recipe, "softmax_temp", 1.0)) or 1.0
-    null = 0                                                           # add_null_query → the background channel
-    if len(ids) == 0:                                                  # no sheets → everything is background (null)
-        cw = torch.tensor([recipe.no_object_weight, 1.0], device=device)
-        loss_class = F.cross_entropy(class_logits, torch.zeros(Q, dtype=torch.long, device=device), weight=cw)
-        mlog = mask_logits_from_embed(mask_embed.unsqueeze(0), mask_features_b.unsqueeze(0))[0] / T
-        tgt = torch.full(owner_b.shape, null, dtype=torch.long, device=device)
-        tgt[~valid_b] = -100
-        ce = F.cross_entropy(mlog.unsqueeze(0), tgt.unsqueeze(0), ignore_index=-100)
-        z = mask_embed.sum() * 0.0
-        return {"class": loss_class, "mask_bce": ce, "mask_dice": z,
-                "own_correct": z, "own_fg": z, "n_fire": z}            # no sheets → ownership metric undefined (0)
-
-    # --- Hungarian assignment (cheap sampled cost — no dense logits needed) ---
-    pred_pts = mask_logits_at_points(mask_embed.unsqueeze(0), feat_pts.unsqueeze(0))[0]
-    gt_pts = torch.stack([(owner_pts == i).float() for i in ids], 0)
-    with torch.no_grad():
-        cls_prob = torch.softmax(class_logits, dim=-1)
-        cost = (recipe.cost_class * (-cls_prob[:, 1].unsqueeze(1).expand(Q, len(ids)))
-                + recipe.cost_mask_bce * _bce_cost(pred_pts, gt_pts)
-                + recipe.cost_mask_dice * _dice_cost(torch.sigmoid(pred_pts), gt_pts))
-        from scipy.optimize import linear_sum_assignment
-        rows, cols = linear_sum_assignment(cost.detach().float().cpu().numpy())
-    rows_t = torch.as_tensor(rows, dtype=torch.long, device=device)
-    cls_target = torch.zeros(Q, dtype=torch.long, device=device); cls_target[rows_t] = 1
-    cw = torch.tensor([recipe.no_object_weight, 1.0], device=device)
-    loss_class = F.cross_entropy(class_logits, cls_target, weight=cw)
-
-    # --- per-voxel owner target: sheet-surface voxels → their matched query; else → null (background) ---
-    # VECTORISED (no per-sheet python loop / int() syncs — a lookup + gather; §profiling): matched sheet ids and
-    # their queries as tensors, then map each voxel's owner id through them.
-    ids_t = torch.as_tensor([ids[int(c)] for c in cols], dtype=owner_b.dtype, device=device)  # (S,) matched sheet ids
-    of = owner_b.reshape(-1)
-    match = of[:, None] == ids_t[None, :]                            # (N,S) which matched sheet each voxel is
-    has = match.any(dim=1)
-    qi = match.float().argmax(dim=1)                                # (N,) index into rows_t
-    tgt = of.new_full((of.numel(),), null, dtype=torch.long)
-    tgt[has] = rows_t[qi[has]]
-    tgt[~valid_b.reshape(-1)] = -100
-    tgt = tgt.reshape(owner_b.shape)
-    loss_ce, own_correct, own_fg, n_fire = _softmax_ownership_terms(
-        mask_embed, mask_features_b, tgt, valid_b, rows_t,
-        temp=T, chunks=int(getattr(recipe, "mask_loss_chunks", 1)))
-    return {"class": loss_class, "mask_bce": loss_ce, "mask_dice": mask_embed.sum() * 0.0,
-            "own_correct": own_correct, "own_fg": own_fg, "n_fire": n_fire}
-
-
-def _denoise_item(lay_b, mask_features_b, owner_b, valid_b, dn_sheet_b, dn_valid_b, recipe):
-    """DENOISE group losses for ONE item at ONE layer (§13.2): each valid denoise query is FIXED-assigned to its
-    sheet ``dn_sheet_b`` (no Hungarian) and supervised by the SAME ownership objective as the matching queries — a
-    per-voxel softmax OVER THE DENOISE QUERIES, each sheet voxel → the query that owns its sheet (no mask-Dice, no
-    region BCE: ID only, §3). ``lay_b`` holds ONLY the denoise queries' ``class_logits (n_dn,2)`` / ``mask_embed
-    (n_dn,C)``. Returns ``{class, mask_bce, mask_dice}`` (grad-connected zeros if no valid query)."""
-    device = lay_b["class_logits"].device
-    vq = dn_valid_b.nonzero(as_tuple=False).squeeze(1)
-    if vq.numel() == 0:
-        z = lay_b["mask_embed"].sum() * 0.0
-        return {"class": lay_b["class_logits"].sum() * 0.0, "mask_bce": z, "mask_dice": z}
-    cls = lay_b["class_logits"][vq].float()                           # (M,2) — target: all sheet; fp32 loss math
-    me = lay_b["mask_embed"][vq].float()                              # (M,C)
-    mask_features_b = mask_features_b.float()
-    sheets = dn_sheet_b[vq].tolist()
-    T = float(getattr(recipe, "softmax_temp", 1.0)) or 1.0
-    cw = torch.tensor([recipe.no_object_weight, 1.0], device=device)
-    loss_class = F.cross_entropy(cls, torch.ones(len(vq), dtype=torch.long, device=device), weight=cw)
-    # per-voxel ownership CE over the M denoise queries: voxel of sheet s → its fixed query j; non-dn-sheet → -100.
-    C = mask_features_b.shape[0]
-    mlog = (me @ mask_features_b.reshape(C, -1)) / T                  # (M, N) — ownership logits over denoise queries
-    owner_flat = owner_b.reshape(-1)
-    # VECTORISED fixed assignment (no per-sheet python loop / kernels): voxel of sheet s → its dn query j (last-wins
-    # on duplicate groups, matching the original loop). §profiling.
-    sheets_t = torch.as_tensor(sheets, dtype=owner_b.dtype, device=device)      # (M,)
-    match = owner_flat[:, None] == sheets_t[None, :]                            # (N,M)
-    has = match.any(dim=1)
-    pref = torch.arange(sheets_t.numel(), device=device).float() + 1.0          # last matching column wins
-    qi = (match.float() * pref[None, :]).argmax(dim=1)
-    tgt = owner_flat.new_full((owner_flat.numel(),), -100, dtype=torch.long)
-    tgt[has] = qi[has]
-    tgt[~valid_b.reshape(-1)] = -100                                  # ignore-masked voxels excluded
-    loss_ce = F.cross_entropy(mlog.unsqueeze(0), tgt.unsqueeze(0), ignore_index=-100)
-    return {"class": loss_class, "mask_bce": loss_ce, "mask_dice": me.sum() * 0.0}
-
-
-def _bce_cost_L(pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
-    """Batched-over-layers BCE cost. ``pred`` (L,Q,P), ``gt`` (G,P) → (L,Q,G)."""
-    Lx, Q, P = pred.shape
-    G = gt.shape[0]
-    pl = pred[:, :, None, :].expand(Lx, Q, G, P)
-    gg = gt[None, None, :, :].expand(Lx, Q, G, P)
-    return F.binary_cross_entropy_with_logits(pl, gg, reduction="none").mean(-1)
-
-
-def _dice_cost_L(prob: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
-    """Batched-over-layers soft-Dice cost. ``prob`` (L,Q,P), ``gt`` (G,P) → (L,Q,G)."""
-    num = 2.0 * torch.einsum("lqp,gp->lqg", prob, gt)
-    den = prob.sum(-1)[:, :, None] + gt.sum(-1)[None, None, :]
-    return 1.0 - (num + 1.0) / (den + 1.0)
-
-
-def _item_softmax_L(class_L, me_L, feat_pts, owner_pts, ids, mf_b, owner_b, valid_b, recipe):
-    """ALL L decoder layers of ONE item in batched ops (one einsum + one cross_entropy over layers) — the dispatch
-    fix (§profiling). Numerically equal (to fp tolerance) to the per-layer ``_instance_item_softmax`` summed with
-    aux weights. ``class_L`` (L,Q,2), ``me_L`` (L,Q,C), ``mf_b`` (C,N). Returns the aux-weighted sums + final-layer
-    metrics, matching what ``instance_loss`` accumulated across the old per-layer loop."""
-    Lx, Q, _ = class_L.shape
-    device = class_L.device
-    T = float(getattr(recipe, "softmax_temp", 1.0)) or 1.0
-    cw = torch.tensor([recipe.no_object_weight, 1.0], device=device)
-    wl = torch.tensor([1.0 if li == Lx - 1 else recipe.aux_weight for li in range(Lx)], device=device)  # (L,)
-    mf_flat = mf_b.reshape(mf_b.shape[0], -1).float()                             # (C,N)
-    N = owner_b.numel()
-    of = owner_b.reshape(-1)
-    valid_flat = valid_b.reshape(-1)
+    Lx, Q, C = me_L.shape
+    device = me_L.device
+    wl = torch.tensor([1.0 if li == Lx - 1 else recipe.aux_weight for li in range(Lx)], device=device)
     z = me_L.sum() * 0.0
+    if len(ids) == 0:                                                   # no sheets → no ownership supervision
+        return {"ce": z, "own_correct": z, "own_fg": z, "n_fire": z}
 
-    if len(ids) == 0:                                                 # no sheets → all background / null
-        cls_t = torch.zeros(Lx, Q, dtype=torch.long, device=device)
-        ce_c = F.cross_entropy(class_L.reshape(Lx * Q, 2).float(), cls_t.reshape(-1), weight=cw, reduction="none").reshape(Lx, Q)
-        loss_class = ((ce_c.sum(1) / cw[cls_t].sum(1).clamp_min(1e-6)) * wl).sum()
-        mlog = torch.einsum("lqc,cn->lqn", me_L.float(), mf_flat) / T
-        tgt = torch.zeros(Lx, N, dtype=torch.long, device=device); tgt[:, ~valid_flat] = -100
-        ce = F.cross_entropy(mlog, tgt, ignore_index=-100, reduction="none")      # (L,N) all-bg
-        bg = tgt == 0
-        loss_ce = ((ce * bg).sum(1) / bg.sum(1).clamp_min(1) * wl).sum()
-        return {"class": loss_class, "mask_bce": loss_ce, "mask_dice": z,
-                "own_correct": z, "own_fg": z, "n_fire": z}
-
-    # --- per-layer Hungarian on the point-sampled cost (one GPU→CPU transfer for all L) ---
-    pred_pts = torch.einsum("lqc,cp->lqp", me_L.float(), feat_pts.float())        # (L,Q,P)
-    gt_pts = torch.stack([(owner_pts == i).float() for i in ids], 0)              # (S,P)
+    # --- per-layer Hungarian on the point-sampled ownership-CE cost (one GPU→CPU transfer for all L) ---
     S = len(ids)
+    pred_pts = torch.einsum("lqc,cp->lqp", me_L.float(), feat_pts.float())          # (L,Q,P)
+    logp = F.log_softmax(pred_pts, dim=1)                                           # softmax OVER QUERIES
+    gt_pts = torch.stack([(owner_pts == i).float() for i in ids], 0)                # (S,P)
+    cnt = gt_pts.sum(-1).clamp_min(1.0)                                             # (S,)
     with torch.no_grad():
-        cls_prob = torch.softmax(class_L.float(), dim=-1)[..., 1]                 # (L,Q)
-        cost = (recipe.cost_class * (-cls_prob[:, :, None].expand(Lx, Q, S))
-                + recipe.cost_mask_bce * _bce_cost_L(pred_pts, gt_pts)
-                + recipe.cost_mask_dice * _dice_cost_L(torch.sigmoid(pred_pts), gt_pts))  # (L,Q,S)
+        cost = -torch.einsum("lqp,sp->lqs", logp, gt_pts) / cnt[None, None, :]      # (L,Q,S) ownership-CE cost
         from scipy.optimize import linear_sum_assignment
-        cc = cost.cpu().numpy()                                                   # ONE transfer
+        cc = cost.float().cpu().numpy()                                             # ONE transfer
         rows_L = [None] * Lx; cols_L = [None] * Lx
         for li in range(Lx):
             rows_L[li], cols_L[li] = linear_sum_assignment(cc[li])
-    # class targets (L,Q)
-    cls_t = torch.zeros(Lx, Q, dtype=torch.long, device=device)
-    qmap = torch.zeros(Lx, S, dtype=torch.long, device=device)                    # sheet-index → matched query, per layer
+    qmap = torch.zeros(Lx, S, dtype=torch.long, device=device)                      # sheet-index → matched query, per layer
     for li in range(Lx):
         rt = torch.as_tensor(rows_L[li], dtype=torch.long, device=device)
         ct = torch.as_tensor(cols_L[li], dtype=torch.long, device=device)
-        cls_t[li, rt] = 1
         qmap[li, ct] = rt
-    ce_c = F.cross_entropy(class_L.reshape(Lx * Q, 2).float(), cls_t.reshape(-1), weight=cw, reduction="none").reshape(Lx, Q)
-    loss_class = ((ce_c.sum(1) / cw[cls_t].sum(1).clamp_min(1e-6)) * wl).sum()
-    # per-voxel owner target (L,N): map voxel owner id → matched query (per layer); non-sheet → null; ignore → -100
-    ids_t = torch.as_tensor(ids, dtype=owner_b.dtype, device=device)              # (S,)
-    match = of[:, None] == ids_t[None, :]                                         # (N,S)
-    has = match.any(dim=1)
-    sidx = match.float().argmax(dim=1)                                            # (N,) sheet index per voxel
-    tgt = qmap[:, sidx]                                                           # (L,N) matched query per voxel
-    tgt = torch.where(has[None, :], tgt, torch.zeros_like(tgt))                   # non-sheet → null (0)
-    tgt[:, ~valid_flat] = -100
-    # ownership CE, balanced 50/50 fg/bg per layer, batched over L
-    mlog = torch.einsum("lqc,cn->lqn", me_L.float(), mf_flat) / T            # (L,Q,N)
-    ce = F.cross_entropy(mlog, tgt, ignore_index=-100, reduction="none")         # (L,N)
-    fg = tgt > 0; bg = tgt == 0
-    ce_bal = 0.5 * (ce * fg).sum(1) / fg.sum(1).clamp_min(1) + 0.5 * (ce * bg).sum(1) / bg.sum(1).clamp_min(1)
-    loss_ce = (ce_bal * wl).sum()
-    with torch.no_grad():                                                        # metrics from the FINAL layer
-        pred = mlog[-1].argmax(0)
-        fgm = tgt[-1] > 0
-        pf = pred[fgm]
-        own_correct = (pf == tgt[-1][fgm]).sum().float()
-        own_fg = fgm.sum().float()
+
+    # --- fg-gated no-null ownership CE (gather ONLY the thin sheet voxels — bg is never materialised) ---
+    fg_idx = (owner_flat > 0).nonzero(as_tuple=False).squeeze(1)                    # (n_fg,) thin sheet voxels
+    mf_fg = mf_flat[:, fg_idx].float()                                             # (C, n_fg)
+    owner_fg = owner_flat[fg_idx]                                                  # (n_fg,)
+    ids_t = torch.as_tensor(ids, dtype=owner_flat.dtype, device=device)            # (S,)
+    sidx = (owner_fg[:, None] == ids_t[None, :]).float().argmax(1)                 # (n_fg,) sheet index per fg voxel
+    mlog_fg = torch.einsum("lqc,cf->lqf", me_L.float(), mf_fg)                     # (L,Q,n_fg) ownership logits
+    tgt = qmap[:, sidx]                                                            # (L,n_fg) matched query per fg voxel
+    ce = F.cross_entropy(mlog_fg, tgt, reduction="none")                           # (L,n_fg) softmax over Q
+    loss_ce = (ce.mean(1) * wl).sum()
+    with torch.no_grad():                                                          # metrics from the FINAL layer
+        pred = mlog_fg[-1].argmax(0)                                               # winning query per fg voxel
+        own_correct = (pred == tgt[-1]).sum().float()
+        own_fg = torch.tensor(float(tgt.shape[1]), device=device)
         used = torch.zeros(Q, dtype=torch.bool, device=device)
-        if pf.numel():
-            used[pf.unique()] = True
-        n_fire = used[1:].sum().float()
-    return {"class": loss_class, "mask_bce": loss_ce, "mask_dice": z,
-            "own_correct": own_correct, "own_fg": own_fg, "n_fire": n_fire}
+        if pred.numel():
+            used[pred.unique()] = True
+        n_fire = used.sum().float()
+    return {"ce": loss_ce, "own_correct": own_correct, "own_fg": own_fg, "n_fire": n_fire}
 
 
-def _denoise_L(cls_L, me_L, mf_b, owner_b, valid_b, dn_sheet_b, dn_valid_b, recipe):
-    """ALL L layers of the denoise group for ONE item, batched. Fixed assignment is layer-invariant, so the target
-    is built once and shared. Returns the aux-weighted sum of (w_class·class + w_mask_bce·ce) over layers."""
-    Lx = cls_L.shape[0]
-    device = cls_L.device
+def _decoupled_dn(dn_me_L, mf_flat, owner_flat, dn_sheet_b, dn_valid_b, recipe):
+    """DN group for ONE item, ALL L layers. Fixed assignment (no Hungarian): each sheet voxel → its FIXED dn query,
+    same fg-gated no-null softmax-over-the-DN-queries CE. Returns the aux-weighted CE (grad-connected zero if none)."""
+    Lx = dn_me_L.shape[0]
+    device = dn_me_L.device
     wl = torch.tensor([1.0 if li == Lx - 1 else recipe.aux_weight for li in range(Lx)], device=device)
     vq = dn_valid_b.nonzero(as_tuple=False).squeeze(1)
     if vq.numel() == 0:
-        return cls_L.sum() * 0.0
-    cw = torch.tensor([recipe.no_object_weight, 1.0], device=device)
-    T = float(getattr(recipe, "softmax_temp", 1.0)) or 1.0
-    cls = cls_L[:, vq].float()                                                    # (L,M,2) target = sheet (class 1)
-    me = me_L[:, vq].float()                                                      # (L,M,C)
-    sheets = dn_sheet_b[vq]
-    ce_c = F.cross_entropy(cls.reshape(-1, 2), torch.ones(Lx * vq.numel(), dtype=torch.long, device=device),
-                           weight=cw, reduction="none").reshape(Lx, -1)
-    loss_class = ((ce_c.sum(1) / (cw[1] * vq.numel()).clamp_min(1e-6)) * wl).sum()
-    of = owner_b.reshape(-1)
-    match = of[:, None] == sheets[None, :]                                        # (N,M)
+        return dn_me_L.sum() * 0.0
+    me = dn_me_L[:, vq].float()                                                    # (L,M,C) the valid DN queries
+    sheets = dn_sheet_b[vq]                                                        # (M,) their fixed sheet ids
+    fg_idx = (owner_flat > 0).nonzero(as_tuple=False).squeeze(1)                   # thin sheet voxels
+    if fg_idx.numel() == 0:
+        return dn_me_L.sum() * 0.0
+    mf_fg = mf_flat[:, fg_idx].float()                                            # (C,n_fg)
+    owner_fg = owner_flat[fg_idx]                                                 # (n_fg,)
+    match = owner_fg[:, None] == sheets[None, :]                                  # (n_fg,M)
     has = match.any(dim=1)
-    pref = torch.arange(sheets.numel(), device=device).float() + 1.0
-    qi = (match.float() * pref[None, :]).argmax(dim=1)                            # last-wins on duplicate groups
-    tgt = torch.where(has, qi, torch.full_like(qi, -100))
-    tgt[~valid_b.reshape(-1)] = -100
-    mlog = torch.einsum("lmc,cn->lmn", me, mf_b.reshape(mf_b.shape[0], -1).float()) / T   # (L,M,N)
-    ce_none = F.cross_entropy(mlog, tgt[None, :].expand(Lx, -1), ignore_index=-100, reduction="none")  # (L,N), 0 at ignored
-    ce = ce_none.sum(1) / (tgt != -100).sum().clamp_min(1)            # mean over NON-ignored voxels (== reduction="mean")
-    loss_ce = (ce * wl).sum()
-    return recipe.w_class * loss_class + recipe.w_mask_bce * loss_ce
+    pref = torch.arange(sheets.numel(), device=device).float() + 1.0             # last-wins on duplicate groups
+    qi = (match.float() * pref[None, :]).argmax(1)                                # (n_fg,) dn-query index
+    mlog = torch.einsum("lmc,cf->lmf", me, mf_fg)                                 # (L,M,n_fg) over the DN queries
+    tgt = torch.where(has, qi, torch.full_like(qi, -100))                         # (n_fg,) non-dn-sheet voxels → -100
+    ce = F.cross_entropy(mlog, tgt[None, :].expand(Lx, -1), ignore_index=-100, reduction="none")  # (L,n_fg)
+    ce = ce.sum(1) / (tgt != -100).sum().clamp_min(1)                             # mean over supervised voxels
+    return (ce * wl).sum()
 
 
-def instance_loss(instance: dict, mask_features: torch.Tensor, owner: torch.Tensor,
-                  has_identity, recipe, *, ignore: torch.Tensor | None = None, seed: int = 0,
-                  batched: bool = True) -> dict:
-    """Mask2Former set-prediction + objectness loss over the batch. Returns ``{inst, class, mask_bce, mask_dice,
-    obj}`` (``inst`` = the weighted total). Per item without identity → a grad-connected zero (no supervision).
+def instance_loss_decoupled(instance: dict, mask_features: torch.Tensor, owner: torch.Tensor,
+                            has_identity, recipe, *, ignore: torch.Tensor | None = None, seed: int = 0) -> dict:
+    """v2 DECOUPLED set-prediction loss (``docs/hercuvit-mask-architecture.md`` §10). No null, no class head, no
+    objectness (the surface head is the objectness), no mask-Dice. ``mask_features`` and ``owner`` are @1/1; ``owner``
+    is the THIN owner (sheet id only on the medial, 0 elsewhere), which is naturally fg-gated and ignore-free.
 
-    ``ignore`` (B,D,H,W bool, from the surface label ``== 2``): confidence-/collapsed-sheet-masked voxels, excluded
-    from the point-sampled negatives and from the objectness target — never supervised as background."""
+    Returns ``inst`` (= weighted total) plus per-term entries for the trainer's logging (``class``/``mask_dice``/``obj``
+    are 0 — not used by the decoupled head); the ownership CE sits in the ``mask_bce`` slot (weight ``w_mask_bce``)."""
     B = mask_features.shape[0]
     C = mask_features.shape[1]
     layers = instance["layers"]
-    objectness = instance.get("objectness")                           # (B,G_tok) or None (design C seeds from surface)
-    n_match = instance.get("n_match")                                 # matching(+null) queries; rest are denoise (§13.2)
-    dn_valid = instance.get("dn_valid")
-    dn_sheet = instance.get("dn_sheet")
+    n_match = instance.get("n_match")
+    dn_valid = instance.get("dn_valid"); dn_sheet = instance.get("dn_sheet")
     has_dn = dn_valid is not None
     device = mask_features.device
-    rng = torch.Generator(device=device)
-    rng.manual_seed(int(seed))
+    rng = torch.Generator(device=device); rng.manual_seed(int(seed))
 
-    tot_class = mask_features.new_zeros(())
-    tot_bce = mask_features.new_zeros(())
-    tot_dice = mask_features.new_zeros(())
-    tot_obj = mask_features.new_zeros(())
-    tot_dn = mask_features.new_zeros(())                              # denoise-group loss (class + mask, fixed-assigned)
-    own_correct = mask_features.new_zeros(())                         # ownership quality (final layer): sheet voxels
-    own_fg = mask_features.new_zeros(())                              # correctly claimed by their matched query / total
-    fire_sum = mask_features.new_zeros(())                            # # queries firing (final layer), summed over items
+    tot_ce = mask_features.new_zeros(())
+    tot_dn = mask_features.new_zeros(())
+    own_correct = mask_features.new_zeros(()); own_fg = mask_features.new_zeros(()); fire_sum = mask_features.new_zeros(())
     n_ident = 0
-
     for b in range(B):
         if not bool(has_identity[b]):
-            # grad-connected zero over EVERY instance output so the step is well-defined (DDP-safe).
-            z = (objectness[b].sum() * 0.0) if objectness is not None else (layers[0]["mask_embed"][b].sum() * 0.0)
+            z = layers[0]["mask_embed"][b].sum() * 0.0
             for lay in layers:
-                z = z + lay["class_logits"][b].sum() * 0.0 + lay["mask_embed"][b].sum() * 0.0
-            tot_class = tot_class + z
+                z = z + lay["mask_embed"][b].sum() * 0.0
+            tot_ce = tot_ce + z
             continue
         n_ident += 1
-
         owner_flat = owner[b].reshape(-1)
         ign_b = (ignore[b] if ignore is not None else torch.zeros_like(owner[b], dtype=torch.bool)).bool()
-        ignore_flat = ign_b.reshape(-1)
-        valid_b = ~ign_b                                              # (D,H,W) non-ignore voxels (dense mask loss)
         ids = [int(i) for i in torch.unique(owner_flat).tolist() if i > 0]
-        pts = _sample_points(owner_flat, ignore_flat, recipe.point_sample, rng)  # for the Hungarian COST only
-        mf_flat = mask_features[b].reshape(C, -1)                     # (C, Nvox)
-        feat_pts = mf_flat[:, pts]                                    # (C,P)
-        owner_pts = owner_flat[pts]                                   # (P,)
-
-        softmax_mode = getattr(recipe, "mask_mode", "sigmoid") == "softmax"
-        if batched and softmax_mode:                                  # ALL layers at once (dispatch fix, §profiling)
-            class_L = torch.stack([lay["class_logits"][b][:n_match] for lay in layers])   # (L,Q,2)
-            me_L = torch.stack([lay["mask_embed"][b][:n_match] for lay in layers])        # (L,Q,C)
-            out = _item_softmax_L(class_L, me_L, feat_pts, owner_pts, ids, mask_features[b], owner[b], valid_b, recipe)
-            tot_class = tot_class + out["class"]                      # already aux-weighted + summed over layers
-            tot_bce = tot_bce + out["mask_bce"]
-            tot_dice = tot_dice + out["mask_dice"]
-            own_correct = own_correct + out["own_correct"]; own_fg = own_fg + out["own_fg"]; fire_sum = fire_sum + out["n_fire"]
-            if has_dn:
-                dn_cls_L = torch.stack([lay["class_logits"][b][n_match:] for lay in layers])
-                dn_me_L = torch.stack([lay["mask_embed"][b][n_match:] for lay in layers])
-                tot_dn = tot_dn + _denoise_L(dn_cls_L, dn_me_L, mask_features[b], owner[b], valid_b, dn_sheet[b], dn_valid[b], recipe)
-        else:
-            item_fn = _instance_item_softmax if softmax_mode else _instance_item
-            for li, lay in enumerate(layers):
-                lay_b = {"class_logits": lay["class_logits"][b][:n_match], "mask_embed": lay["mask_embed"][b][:n_match]}
-                is_final = (li == len(layers) - 1)
-                w = 1.0 if is_final else recipe.aux_weight
-                out = item_fn(lay_b, feat_pts, owner_pts, ids, mask_features[b], owner[b], valid_b, recipe)
-                tot_class = tot_class + w * out["class"]
-                tot_bce = tot_bce + w * out["mask_bce"]
-                tot_dice = tot_dice + w * out["mask_dice"]
-                if is_final:                                          # ownership-quality metric from the FINAL layer only
-                    own_correct = own_correct + out.get("own_correct", tot_class.new_zeros(()))
-                    own_fg = own_fg + out.get("own_fg", tot_class.new_zeros(()))
-                    fire_sum = fire_sum + out.get("n_fire", tot_class.new_zeros(()))
-                if has_dn:                                            # fixed-assignment denoise group (§13.2)
-                    dn_b = {"class_logits": lay["class_logits"][b][n_match:], "mask_embed": lay["mask_embed"][b][n_match:]}
-                    dn_out = _denoise_item(dn_b, mask_features[b], owner[b], valid_b, dn_sheet[b], dn_valid[b], recipe)
-                    tot_dn = tot_dn + w * (recipe.w_class * dn_out["class"] + recipe.w_mask_bce * dn_out["mask_bce"]
-                                           + recipe.w_mask_dice * dn_out["mask_dice"])
-
-        if objectness is not None:
-            # token objectness: 16³ cell is positive iff a sheet voxel falls in it; cells that are >=50% ignore are
-            # excluded from the objectness BCE (not forced to either class).
-            side = round(objectness.shape[1] ** (1 / 3))
-            k = owner[b].shape[-1] // side
-            pool = (owner[b] > 0).float()[None, None]
-            obj_target = (F.max_pool3d(pool, kernel_size=k, stride=k) > 0).reshape(-1).float()
-            obj_valid = (F.avg_pool3d(ign_b.float()[None, None], kernel_size=k, stride=k) < 0.5).reshape(-1).float()
-            obj_bce = F.binary_cross_entropy_with_logits(objectness[b], obj_target, reduction="none")
-            tot_obj = tot_obj + (obj_bce * obj_valid).sum() / obj_valid.sum().clamp_min(1.0)
+        pts = _sample_points(owner_flat, ign_b.reshape(-1), recipe.point_sample, rng)   # Hungarian COST only
+        mf_flat = mask_features[b].reshape(C, -1)
+        feat_pts = mf_flat[:, pts]; owner_pts = owner_flat[pts]
+        me_L = torch.stack([lay["mask_embed"][b][:n_match] for lay in layers])          # (L,Q,C)
+        out = _decoupled_item(me_L, feat_pts, owner_pts, ids, mf_flat, owner_flat, recipe)
+        tot_ce = tot_ce + out["ce"]
+        own_correct = own_correct + out["own_correct"]; own_fg = own_fg + out["own_fg"]; fire_sum = fire_sum + out["n_fire"]
+        if has_dn:
+            dn_me_L = torch.stack([lay["mask_embed"][b][n_match:] for lay in layers])
+            tot_dn = tot_dn + _decoupled_dn(dn_me_L, mf_flat, owner_flat, dn_sheet[b], dn_valid[b], recipe)
 
     denom = max(n_ident, 1)
-    dn_w = float(getattr(recipe, "dn_weight", 1.0))                   # scales the whole denoise block (§13.2)
-    inst = (recipe.w_class * tot_class + recipe.w_mask_bce * tot_bce
-            + recipe.w_mask_dice * tot_dice + recipe.w_objectness * tot_obj + dn_w * tot_dn) / denom
+    dn_w = float(getattr(recipe, "dn_weight", 1.0))
+    z = mask_features.new_zeros(())
+    inst = (recipe.w_mask_bce * tot_ce + dn_w * recipe.w_mask_bce * tot_dn) / denom
     return {
         "inst": inst,
-        "class": (tot_class / denom).detach(),
-        "mask_bce": (tot_bce / denom).detach(),
-        "mask_dice": (tot_dice / denom).detach(),
-        "obj": (tot_obj / denom).detach(),
+        "class": z, "mask_bce": (tot_ce / denom).detach(), "mask_dice": z, "obj": z,
         "dn": (tot_dn / denom).detach(),
-        "own_correct": own_correct.detach(),                          # epoch micro-accuracy numerator (sheet voxels)
-        "own_fg": own_fg.detach(),                                    # … denominator
-        "n_fire": (fire_sum / denom).detach(),                        # mean # queries firing per window (final layer)
+        "own_correct": own_correct.detach(), "own_fg": own_fg.detach(),
+        "n_fire": (fire_sum / denom).detach(),
     }

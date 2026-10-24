@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from ..model.instance_head import mask_logits_from_embed
+from ..model.decoder_common import mask_logits_from_embed
 
 
 @torch.no_grad()
@@ -79,9 +79,8 @@ def coverage_metrics(net, loader, device, *, max_windows: int = 64, prob_thresh:
         with torch.autocast(device_type=device.type if hasattr(device, "type") else "cuda", dtype=torch.bfloat16):
             out = net(ct, dn_owner=None)                                   # inference: no denoise queries
         lay = out["instance"]["layers"][-1]
-        cls = torch.softmax(lay["class_logits"][0].float(), dim=-1)[:, 1]  # (Q,) P(sheet)
         mlog = mask_logits_from_embed(lay["mask_embed"][0:1].float(), out["mask_features"][0:1].float())[0]  # (Q,D,H,W)
-        # masks live at mask_features resolution (1/4 in design C) — bring the GT to the same grid (nearest/max-pool)
+        # masks live at mask_features resolution (1/4 in design C, 1/1 in v2) — bring the GT to the same grid
         mside = out["mask_features"].shape[-1]
         if mside != owner_thin.shape[-1]:
             r = owner_thin.shape[-1] // mside
@@ -90,12 +89,24 @@ def coverage_metrics(net, loader, device, *, max_windows: int = 64, prob_thresh:
         else:
             owner_g, surf = owner_thin, (sem == 1)
         ids = [int(i) for i in torch.unique(owner_g[0]).tolist() if i > 0]
-        if mask_mode == "softmax":                                     # exclusive ownership: argmax query owns the voxel
+        if mask_mode == "decoupled":                                   # v2: argmax-query ownership (NO null) gated by the
+            # DECOUPLED surface objectness — the inference `final = sigmoid(obj) × mask`. No class head here.
+            sm = out["sem_logits"][0].shape[-1]
+            sp = torch.softmax(out["sem_logits"][0][0:1].float(), dim=1)[:, 1]           # (1,·) P(surface) = objectness
+            if sm != mside:
+                sp = F.max_pool3d(sp[:, None], sm // mside, sm // mside)[:, 0]
+            gate = sp[0] > prob_thresh                                 # (D,H,W) objectness gate
+            owner_q = mlog.argmax(0)                                   # argmax over ALL Q (no null query)
+            masks = torch.stack([(owner_q == q) & gate for q in range(mlog.shape[0])], 0)
+            fires.append(int((masks.flatten(1).any(1)).sum()))
+        elif mask_mode == "softmax":                                   # design C: exclusive ownership, null (0)=background
             owner_q = mlog.argmax(0)                                   # (D,H,W)
-            masks = torch.stack([(owner_q == q) & (q != 0) for q in range(mlog.shape[0])], 0)  # null (0) = background
-        else:
+            masks = torch.stack([(owner_q == q) & (q != 0) for q in range(mlog.shape[0])], 0)
+            fires.append(int((masks.flatten(1).any(1)).sum()))
+        else:                                                          # design A/B: independent sigmoid masks + class fire
+            cls = torch.softmax(lay["class_logits"][0].float(), dim=-1)[:, 1]  # (Q,) P(sheet)
             masks = torch.sigmoid(mlog) > prob_thresh                  # (Q,D,H,W) independent
-        fires.append(int((masks.flatten(1).any(1)).sum()) if mask_mode == "softmax" else int((cls > fire_thresh).sum()))
+            fires.append(int((cls > fire_thresh).sum()))
         surf = surf[0]
         for sid in ids:
             gt = (owner_g[0] == sid) & surf
