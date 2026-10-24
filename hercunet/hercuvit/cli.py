@@ -49,8 +49,6 @@ def _add_train_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--freeze-decoder-epochs", dest="freeze_decoder_epochs", type=int, default=None, metavar="N",
                    help="instance-head warmup: epochs with the warm-started decoder trunk + surface head frozen "
                         "(mask head + instance head still train), then unfreeze for joint fine-tuning (default 0)")
-    p.add_argument("--softmax-temp", dest="softmax_temp", type=float, default=None, metavar="T",
-                   help="temperature for the softmax-ownership readout (mask_mode=softmax; default 1.0)")
     p.add_argument("--mask-loss-chunks", dest="mask_loss_chunks", type=int, default=None, metavar="N",
                    help="stream the dense mask loss in N checkpointed spatial chunks (never the full Q×128³; 1=dense)")
     p.add_argument("--val-fold", dest="val_fold", type=int, default=None, metavar="N",
@@ -103,9 +101,7 @@ def _add_train_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--dn-weight", dest="dn_weight", type=float, default=None,
                    help="weight of the denoise-group loss (default 1.0)")
     p.add_argument("--w-mask-bce", dest="w_mask_bce", type=float, default=None,
-                   help="weight of the mask/ownership CE term (default 5.0)")
-    p.add_argument("--w-mask-dice", dest="w_mask_dice", type=float, default=None,
-                   help="weight of the mask-Dice term (default 5.0; set 0 for ownership-CE-only, design B §3)")
+                   help="weight of the ownership-CE instance term (default 5.0)")
     p.add_argument("--variant", default=None, choices=_VARIANTS,
                    help="FROM-SCRATCH training of this variant (no encoder) — mutually exclusive with --encoder; "
                         "NOT supported yet (raises). Normal training deduces the variant from --encoder.")

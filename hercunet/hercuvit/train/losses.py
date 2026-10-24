@@ -3,12 +3,14 @@
 Semantic (``docs/hercuvit.md`` §6/§7): soft-Dice + cross-entropy on the full-res sheet-surface logits, with the
 same loss at 1/2 and 1/4 (targets max-pooled to each scale so the thin surface survives the downsample).
 
-Instance (§7): DETR/Mask2Former set prediction over the ``n_queries`` instance queries —
-  * **Hungarian matching** (scipy ``linear_sum_assignment``) per decoder layer on ``cost_class + cost_mask_bce +
-    cost_mask_dice``, evaluated on **importance-sampled points** (not all 128³) via ``mask_logits_at_points``;
-  * matched queries: mask **BCE + Dice** at those points; all queries: sheet / no-object **classification**;
-  * **token objectness** two-stage loss (which 16³ tokens sit on a sheet);
-  * **auxiliary** losses after every decoder layer.
+Instance (§7, v2 DECOUPLED — ``instance_loss_decoupled``): set prediction over the ``n_queries`` instance
+queries with NO class head and NO null query (surface presence is the separate surface head's job) —
+  * **Hungarian matching** (scipy ``linear_sum_assignment``) per decoder layer on the ownership cross-entropy
+    cost, evaluated on **importance-sampled points** (not all 128³) via ``mask_logits_at_points``;
+  * loss: fg-gated **ownership cross-entropy** (``w_mask_bce``) over the matched queries at the sheet voxels;
+  * **auxiliary** losses after every decoder layer (``aux_weight``).
+The legacy M2F-with-class terms (``w_class``/``no_object_weight``) survive only in the gated
+``m2f_symskel_mask_loss`` alternative; the decoupled path above does not use them.
 
 Per-sample gating (§7): instance losses are computed only for samples with ``has_identity``; for a sample
 without identity the instance loss is a **zero that is still grad-connected** to the instance outputs (so the

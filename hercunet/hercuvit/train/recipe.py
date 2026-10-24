@@ -123,7 +123,6 @@ class HercuvitRecipe:
     freeze_decoder_epochs: int = 0                  # epochs with the warm-started decoder TRUNK + surface head frozen
                                                     # (mask head + instance head still train) — instance-head warmup
                                                     # against a fixed surface gate after a surface-only warm-start
-    softmax_temp: float = 1.0                        # temperature for the softmax-ownership readout (mask_mode=softmax)
     mask_loss_chunks: int = 1                        # split the dense mask loss into N spatial chunks (checkpointed)
                                                     # so the full (Q,128³) logits are never materialised (1 = dense)
     val_fold: int = 0                               # nnU-Net-consistent 5-fold split (KFold seed 12345): which fold
@@ -164,19 +163,14 @@ class HercuvitRecipe:
     malis_offsets: tuple = ((1, 0, 0), (0, 1, 0), (0, 0, 1), (3, 0, 0), (0, 3, 0), (0, 0, 3),
                             (9, 0, 0), (0, 9, 0), (0, 0, 9))   # 3 axes × {1,3,9} voxels (hercunet default)
 
-    # --- instance loss (Mask2Former set prediction) ---
-    w_class: float = 2.0                            # sheet / no-object classification
-    w_mask_bce: float = 5.0
-    w_mask_dice: float = 5.0
-    w_objectness: float = 1.0                       # token two-stage objectness
-    cost_class: float = 2.0                         # Hungarian matching costs
-    cost_mask_bce: float = 5.0
-    cost_mask_dice: float = 5.0
-    no_object_weight: float = 0.1                   # down-weight the no-object class (DETR)
-    aux_weight: float = 1.0                         # weight on each earlier decoder layer's aux loss
-    point_sample: int = 2048                        # points for point-sampled mask loss (PointRend/M2F)
-    oversample_ratio: float = 3.0
-    importance_ratio: float = 0.75
+    # --- instance loss (v2 DECOUPLED ownership-CE set prediction) ---
+    w_mask_bce: float = 5.0                          # weight of the ownership cross-entropy (the decoupled instance term)
+    aux_weight: float = 1.0                          # weight on each earlier decoder layer's aux (deep-supervision) loss
+    point_sample: int = 2048                         # points sampled for the Hungarian matching COST (not the loss)
+    # legacy M2F-with-class terms, used ONLY by the gated m2f_symskel_mask_loss (w_symskel>0); the decoupled head
+    # has no class/no-object head. Retire together with that loss if it is dropped.
+    w_class: float = 2.0                             # sheet / no-object classification (legacy m2f_symskel only)
+    no_object_weight: float = 0.1                    # down-weight the no-object class, DETR (legacy m2f_symskel only)
 
     # --- mask denoising (§13.2 / docs/dinovol_sheet_architecture.md): a train-only fixed-assignment query group
     #     that reconstructs each GT sheet, bypassing Hungarian. The standard DETR fix for query under-specialisation. ---
@@ -217,15 +211,13 @@ _TRAIN_FIELDS = frozenset({
     "attention_backend", "target_voxel_um", "augment", "batch_size",
     "base_lr", "encoder_lr_mult", "decoder_lr_mult", "weight_decay", "grad_clip", "warmup_steps", "lr_schedule",
     "epochs", "encoder_lr_schedule", "encoder_sigmoid_midpoint", "encoder_sigmoid_width",
-    "encoder_grad_enable_frac", "freeze_warmup_epochs", "freeze_decoder_epochs", "softmax_temp", "mask_loss_chunks",
+    "encoder_grad_enable_frac", "freeze_warmup_epochs", "freeze_decoder_epochs", "mask_loss_chunks",
     "val_fold", "val_interval", "val_windows",
     "w_surface", "surface_only",
     "sem_fg_weight", "w_sem_ce", "w_sem_tversky", "w_sem_skel", "w_sem_sep",
     "tversky_alpha", "tversky_beta", "tversky_gamma", "skel_iters", "sep_radius", "deep_sup_weights",
     "w_symskel", "w_malis", "malis_crop", "malis_offsets",
-    "w_class", "w_mask_bce", "w_mask_dice", "w_objectness",
-    "cost_class", "cost_mask_bce", "cost_mask_dice", "no_object_weight", "aux_weight",
-    "point_sample", "oversample_ratio", "importance_ratio",
+    "w_class", "w_mask_bce", "no_object_weight", "aux_weight", "point_sample",
     "denoise", "dn_weight",
 })
 #: MODEL fields — the only keys a recipe yaml may set (everything that is not training).

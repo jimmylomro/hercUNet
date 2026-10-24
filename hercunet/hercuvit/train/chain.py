@@ -231,13 +231,13 @@ def run_training(
 
 
 #: train fields settable on the CLI (the yaml is model-only); unset flags keep the recipe defaults.
-_TRAIN_FLAGS = ("epochs", "freeze_warmup_epochs", "freeze_decoder_epochs", "softmax_temp", "mask_loss_chunks",
+_TRAIN_FLAGS = ("epochs", "freeze_warmup_epochs", "freeze_decoder_epochs", "mask_loss_chunks",
                 "val_fold", "val_interval", "val_windows",
                 "encoder_lr_schedule", "encoder_sigmoid_midpoint", "encoder_sigmoid_width", "encoder_grad_enable_frac",
                 "batch_size", "base_lr", "encoder_lr_mult", "decoder_lr_mult",
                 "weight_decay", "grad_clip", "warmup_steps", "lr_schedule", "augment",
                 "target_voxel_um", "attention_backend", "w_symskel", "w_malis", "denoise", "dn_weight",
-                "w_mask_bce", "w_mask_dice", "w_surface", "surface_only")
+                "w_mask_bce", "w_surface", "surface_only")
 
 
 def _run_from_args(args) -> None:
