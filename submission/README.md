@@ -1,8 +1,7 @@
 # submission/
 
-Source material for the HercUNet submission write-up. The Markdown methodology documents in [`writeup/`](writeup/)
-are the source of truth; [`writeup/paper.tex`](writeup/paper.tex) folds both stages into one self-contained LaTeX
-paper for the PDF submission.
+Source material for the submission write-ups. The Markdown methodology documents in [`writeup/`](writeup/) are the
+source of truth.
 
 ## Methodology write-ups — [`writeup/`](writeup/)
 
