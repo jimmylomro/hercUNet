@@ -162,26 +162,30 @@ def analyse(d: dict, seed: int = 0) -> dict:
                      wi_cos=cfull[lab].tolist(), bt_cos=cfull[~lab].tolist())
 
 
-def figures(res: dict, aux: dict, out: str):
-    """Write the four paper JPGs (small, publication-ready)."""
+def figures(res: dict, aux: dict, out: str, *, prefix: str = "frozen", feat_label: str = "frozen-encoder",
+            unit: str = "token"):
+    """Write the four paper JPGs (small, publication-ready). ``prefix`` sets the filenames (``{prefix}-*.jpg``);
+    ``feat_label``/``unit`` set the titles — defaults reproduce the frozen-encoder figures exactly, and the
+    mask-feature probe passes ``prefix='maskfeat'``, ``feat_label='trained decoder (U1 @1/1)'``, ``unit='voxel'``."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     plt.rcParams.update({"font.size": 11, "figure.dpi": 150, "axes.grid": True, "grid.alpha": 0.25})
     jpg = {"pil_kwargs": {"quality": 90, "optimize": True}}
     C_S, C_B = "#c0392b", "#2c6fbb"
+    dim = int(res["embed_dim"])
 
     sp, bn = aux["Ste"] @ aux["w"], aux["Bte"] @ aux["w"]
     fig, ax = plt.subplots(1, 2, figsize=(9, 3.4))
     ax[0].hist(bn, bins=60, color=C_B, alpha=0.65, density=True, label="background")
     ax[0].hist(sp, bins=60, color=C_S, alpha=0.65, density=True, label="sheet surface")
-    ax[0].set_title(f"frozen-encoder sheet/bg (held-out)\nLDA AUC={res['lda_fgbg_auc_heldout']:.3f}  Dice={res['lda_fgbg_dice_heldout']:.3f}")
+    ax[0].set_title(f"{feat_label} sheet/bg (held-out)\nLDA AUC={res['lda_fgbg_auc_heldout']:.3f}  Dice={res['lda_fgbg_dice_heldout']:.3f}")
     ax[0].set_xlabel("linear projection (held-out windows)"); ax[0].set_ylabel("density"); ax[0].legend()
     alls = np.concatenate([sp, bn]); yb = np.concatenate([np.ones(len(sp)), np.zeros(len(bn))])
     order = np.argsort(-alls); tp = np.cumsum(yb[order]); fp = np.cumsum(1 - yb[order])
     ax[1].plot(alls[order], 2 * tp / (tp + fp + yb.sum() + 1e-9), color="#555")
     ax[1].set_title("Dice vs decision threshold"); ax[1].set_xlabel("threshold"); ax[1].set_ylabel("Dice"); ax[1].set_ylim(0, 1)
-    fig.tight_layout(); fig.savefig(f"{out}/frozen-fgbg-separability.jpg", **jpg); plt.close(fig)
+    fig.tight_layout(); fig.savefig(f"{out}/{prefix}-fgbg-separability.jpg", **jpg); plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(5.6, 3.8))
     ax.semilogx(aux["ks"], aux["auc_k"], "o-", color="#8e44ad",
@@ -191,21 +195,21 @@ def figures(res: dict, aux: dict, out: str):
     ax.axhline(0.5, color="k", lw=0.8, ls=":")
     ax.set_xlabel("# PCA directions"); ax.set_ylabel("held-out AUC")
     ax.set_title("how many directions carry the signal"); ax.legend(fontsize=8)
-    fig.tight_layout(); fig.savefig(f"{out}/frozen-dims-fgbg.jpg", **jpg); plt.close(fig)
+    fig.tight_layout(); fig.savefig(f"{out}/{prefix}-dims-fgbg.jpg", **jpg); plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(5.2, 3.6))
     ax.semilogy(aux["eig_s"] / aux["eig_s"].sum(), color=C_S, label=f"on-sheet  (PR={aux['pr_s']:.1f}, erank={aux['er_s']:.1f})")
     ax.semilogy(aux["eig_b"] / aux["eig_b"].sum(), color=C_B, label=f"background (PR={aux['pr_b']:.1f}, erank={aux['er_b']:.1f})")
     ax.set_xlabel("principal component"); ax.set_ylabel("normalised variance")
-    ax.set_title("token embedding spectra (288-d)"); ax.legend()
-    fig.tight_layout(); fig.savefig(f"{out}/frozen-spectra.jpg", **jpg); plt.close(fig)
+    ax.set_title(f"{unit} embedding spectra ({dim}-d)"); ax.legend()
+    fig.tight_layout(); fig.savefig(f"{out}/{prefix}-spectra.jpg", **jpg); plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(5.2, 3.6))
     ax.hist(aux["bt_cos"], bins=60, color=C_B, alpha=0.65, density=True, label="different sheets")
     ax.hist(aux["wi_cos"], bins=60, color=C_S, alpha=0.65, density=True, label="same sheet")
-    ax.set_title(f"sheet identity in frozen features\nwithin={res['within_sheet_cos_mean']:.2f} between={res['between_sheet_cos_mean']:.2f} AUC={res['identity_cos_auc']:.3f}")
-    ax.set_xlabel("cosine similarity (token pairs, same window)"); ax.set_ylabel("density"); ax.legend()
-    fig.tight_layout(); fig.savefig(f"{out}/frozen-identity.jpg", **jpg); plt.close(fig)
+    ax.set_title(f"sheet identity in {feat_label}\nwithin={res['within_sheet_cos_mean']:.2f} between={res['between_sheet_cos_mean']:.2f} AUC={res['identity_cos_auc']:.3f}")
+    ax.set_xlabel(f"cosine similarity ({unit} pairs, same window)"); ax.set_ylabel("density"); ax.legend()
+    fig.tight_layout(); fig.savefig(f"{out}/{prefix}-identity.jpg", **jpg); plt.close(fig)
 
 
 def main():
