@@ -277,12 +277,12 @@ flowchart TD
   subgraph DEC[M2F-style decoder and HercuViT additions]
     direction TB
 
-    U1 --> SURF["Surface Head\n1×1 conv → 2-class surface @1/1<br/>(deep-sup OFF)"]
+    U1 --> SURF["Surface Head\n1×1 conv → 2-class surface @1/1"]
     SURF .-> SURFL["thin-surface loss: fg-CE + Focal-Tversky + clDice + separation · ignore=2"]
 
     subgraph MDEC[M2F decoder]
         direction TB
-        FPYR[Feature Pyramid] --> MATTN[6x Masked Attn layers]
+        FPYR[Feature Pyramid] --> MATTN[6x Masked Attn layers<br/>QK-LayerNorm for stability]
         QRYS[Learned + Denoising queries] --> MATTN
         MATTN --> QOUT[Query output q]
         QOUT --> MEMBED["Mask-embed MLP → [Q, 32]"]
@@ -326,7 +326,48 @@ cross-entropy on foreground voxels plus an AffMALIS separation term, both on the
 **Inference.** For each query, the objectness is read from the surface head pooled over the query's mask, and the
 final score is `sigmoid(objectness) × mask_score`; queries above a threshold are emitted as sheet instances.
 
-### 5.1 Extending to ink and fibre masks
+### 5.1 Separating presence from ownership — and why the null query had to go
+
+The decoupling in §5 is the central departure from the Mask2Former recipe, and it was not a stylistic choice — it
+was forced. In the standard formulation a single decoder answers both questions at once: every query carries a class
+distribution that includes a **"no-object" (null) class**, and a query claims a region only if its class beats null.
+Presence and ownership are thus entangled in one set of queries, and the null class is the pressure-release valve for
+"nothing here".
+
+On our data that valve collapsed the whole decoder. With a null class present, the model discovered that the cheapest
+way to drive the loss down is to route almost every voxel to **no-object** and leave the real queries unspecialised —
+a degenerate optimum in which the null query (equivalently, the null logit) "eats everything". The symptom was
+unambiguous: **own-accuracy sat at ≤0.009 through early training with the null query, versus 0.273 at epoch 0 once it
+was removed** — not a slow start but a non-starter.
+
+We spent real effort trying to rescue the coupled design before abandoning it; none of it worked:
+- **FPS query initialisation** — seeding queries at farthest-point-sampled token locations so they start *on*
+  distinct sheets rather than at generic learned positions;
+- **softmax-over-queries ("exclusive") ownership**, with the null query as an explicit background class so assignment
+  is competitive across queries rather than independent per query;
+- **down-weighting no-object** (the DETR `no_object_weight`) and a range of loss re-weightings, to make claiming a
+  sheet cheaper than claiming null;
+- **denoising queries**, class-cost tuning in the Hungarian matcher, a temperature on the dot product, and several
+  smaller knobs.
+
+Each either left the collapse intact or traded it for a different degeneracy. The lesson was that we were patching a
+broken objective: as long as the mask decoder is *also* responsible for deciding presence, a null option is both
+necessary and fatal.
+
+So we took the decision out of the decoder entirely. Sheet **presence** is supervised early and separately by a
+dedicated dense surface head (the objectness of §4/§5), on the thin-surface label stack — a question the frozen
+features already answer well (§3). The mask decoder is then stripped of the null query, the class head and the
+temperature, and is left to do **only ownership**: which of the present voxels belong to which sheet. Its supervision
+is a **foreground-gated** ownership cross-entropy — computed only on the voxels the surface head is responsible for,
+so the decoder is never asked "is this background?" and has no null option to win. There is simply nothing for an
+"everything is no-object" solution to attach to, because *is there a sheet* is no longer in the decoder's loss.
+
+This is an uncommon split for a Mask2Former-style head — MaskFormer/Mask2Former deliberately fuse mask and class
+(with null) in one decoder — but it is the change that made the queries specialise, and it is why §6 can show
+ownership sharpening into a near-perfect, low-dimensional identity code while the surface head independently carries
+presence.
+
+### 5.2 Extending to ink and fibre masks
 
 HercuViT is single-class (sheet) by construction, but the same decoder extends to multi-class structures — ink,
 fibre — with four **additive** changes, none of which touch the frozen encoder or the surface/identity split:
