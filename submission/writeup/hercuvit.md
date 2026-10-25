@@ -587,6 +587,12 @@ into a single `.asv`.
 
 ### 8.4 Toward cross-window stitching (future work)
 
+![**Figure 7.** Fitted sheet meshes read straight from the `.asv` over a block of windows, coloured per sheet. Each
+window segments and labels its sheets independently, so the per-sheet colours do **not** carry across window
+boundaries — yet the sheet *surfaces* line up across those boundaries for the most part. The geometry already agrees
+window-to-window; only the identities need reconciling, which is what cross-window stitching (via the stored
+per-sheet embedding below) will do.](../images/hercuvit-disjoint-windows.jpg)
+
 Because the store is per-window, a sheet spanning several windows is, for now, several separate meshes; deciding
 which per-window sheets are the *same* physical wrap — cross-window stitching — is future work. §6 showed the decoder
 sharpens sheet identity into a near-perfect, essentially 2-dimensional **directional** code on the mask features —
