@@ -257,9 +257,9 @@ flowchart TD
 
   subgraph PENC["UNETR-style pixel encoder (concat stem skips)"]
     direction TB
-    BOT["bottleneck · 1/8 (16³)"] --> U4["deconv ↑ · 1/4 (32³)"]
-    U4 --> U2["deconv ↑ · 1/2 (64³)"]
-    U2 --> U1["deconv ↑ · 1/1 (128³)\n*AKA Mask Features*"]
+    BOT["bottleneck · 1/8"] --> U4["deconv ↑ · 1/4<br/>+LayerNorm"]
+    U4 --> U2["deconv ↑ · 1/2<br/>+LayerNorm"]
+    U2 --> U1["deconv ↑ · 1/1<br/>+LayerNorm<br/>AKA Mask Features"]
 
     VIT ==> BOT
     S2  -. "stem skip 1/4 · CONCAT" .-> U4
