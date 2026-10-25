@@ -14,7 +14,10 @@ Each is a standalone piece of work with its own module, CLI, and write-up; they 
 reader for teravoxel OME-Zarr scroll volumes. HercuLabels and HercUNet are the v0 submission; HercuViT is a newer
 third contribution (write-up in progress).
 
-🧠 **Model:** [`jimmylomro/hercunet-v0`](https://huggingface.co/jimmylomro/hercunet-v0) on 🤗 Hugging Face (warm-start / re-train with `hercunet train fit --pretrained-hf jimmylomro/hercunet-v0`) · 🗂️ **Training corpus:** [`jimmylomro/hercunet-corpus`](https://huggingface.co/datasets/jimmylomro/hercunet-corpus) — the 4031 HercuLabels pseudo-label bundles + m7 rehearsal manifest.
+
+🧠 **[HercuLabels](#-herculabels--unsupervised-pseudo-labels)** — unsupervised pseudo-labels (the training corpus)  
+🧠 **[HercUNet](#-hercunet--the-iterative-refiner)** — the iterative sheet refiner  
+🧠 **[HercuViT](#-hercuvit--sheet-segmentation-on-a-frozen-µct-encoder)** — sheet segmentation on a frozen µCT encoder
 
 ![The iterative refiner across passes (magenta) versus the m7 baseline (blue), on a 2 mm cross-section of PHerc1447.](submission/images/banner-PHerc1447-m7-passes.jpg)
 
@@ -41,6 +44,8 @@ topological mistakes (HercUNet), and reading the sheet primitive straight out of
 
 ## 🧩 HercuLabels — unsupervised pseudo-labels
 
+🗂️ **Corpus:** [`jimmylomro/hercunet-corpus`](https://huggingface.co/datasets/jimmylomro/hercunet-corpus) on 🤗 — the ~4000 HercuLabels pseudo-label bundles (+ m7 rehearsal manifest) that HercUNet/HercuViT train on.
+
 Fully unsupervised sheet instance-segmentation in small windows, purpose-built for pseudo-label generation (no
 annotation, multi-scroll, native resolution). It allows sheet-width, normal and sheet-membership supervision, and
 topological augmentations (merges/splits) that HercUNet trains against.
@@ -65,6 +70,8 @@ best run headless and left overnight; ~4000 were generated in the cloud and nnU-
 ---
 
 ## 🔁 HercUNet — the iterative refiner
+
+🧠 **Model:** [`jimmylomro/hercunet-v0`](https://huggingface.co/jimmylomro/hercunet-v0) on 🤗 (warm-start / re-train: `hercunet train fit --pretrained-hf jimmylomro/hercunet-v0`) · 🗂️ **Corpus:** [`jimmylomro/hercunet-corpus`](https://huggingface.co/datasets/jimmylomro/hercunet-corpus).
 
 A self-refining, growing sheet-detection U-Net: a stock, pinned `nnunetv2==2.8.1` wrapped so it conditions on its
 **own** previous output and corrects its own topological mistakes across passes.
@@ -98,14 +105,14 @@ pipenv run hercunet infer single-instance PHerc1447 \   # SOURCE: scroll id, or 
 
 ## 🧠 HercuViT — sheet segmentation on a frozen µCT encoder
 
+🧠 **Model:** [`jimmylomro/hercuvit_v0`](https://huggingface.co/jimmylomro/hercuvit_v0) on 🤗 (`hercuvit infer … --model-hf jimmylomro/hercuvit_v0`).
+
 Sheet **instance**-segmentation read straight out of a **frozen** self-supervised Dinovol µCT encoder: a lightweight
 CNN pixel-decoder learns a voxel-resolution upsample of the frozen tokens, a **decoupled** surface head answers
 *is there a sheet*, and a Mask2Former-style instance decoder answers *which sheet* — the sheet primitive is already
 present in the pretrained features, and a small decoder sharpens it to the voxel medial.
 
-> **Write-up in progress.** The architecture + representation-geometry analysis live in
-> **[docs/hercuvit.md](docs/hercuvit.md)** and **[submission/writeup/hercuvit.md](submission/writeup/hercuvit.md)**;
-> the CLI is **`hercuvit`** (`train` / `infer`).
+→ Guide: **[docs/hercuvit.md](docs/hercuvit.md)** (usage / CLI) · Methodology: **[submission/writeup/hercuvit.md](submission/writeup/hercuvit.md)** *(write-up in progress)*
 
 ![HercuViT on a scroll window — left→right: CT · frozen-encoder PCA · pixel-encoder PCA · predicted surface · predicted sheet masks · GT labels · Dinovol-encoder PCA · Dinovol surface.](submission/images/embeddings.jpg)
 
@@ -120,7 +127,7 @@ HercuViT's output as geometry: the per-sheet instance masks fit to sheet meshes,
 ```bash
 pipenv install ".[hercuvit]"                              # or in a venv: pip install ".[hercuvit]"
 pipenv run hercuvit infer single-instance PHerc1447 \     # SOURCE: scroll id, or an s3://|https://|file:// .zarr
-  --model-hf jimmylomro/hercuvit-v0 \
+  --model-hf jimmylomro/hercuvit_v0 \
   --region 11618:11810,3197:3389,3552:3744 \
   --mesh local --surf off --overlap 0 \
   --out ./hercuvit-demo                                   # -> ./hercuvit-demo_meshes.asv (the sheet store)
