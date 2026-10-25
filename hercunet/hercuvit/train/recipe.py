@@ -149,11 +149,6 @@ class HercuvitRecipe:
     sep_radius: int = 2
     deep_sup_weights: tuple = (1.0, 0.5, 0.25)      # full, 1/2, 1/4
 
-    # --- OPTIONAL SymSkel add-on (per-query thinness; train/losses.py:m2f_symskel_mask_loss) ---
-    # Off by default (w_symskel=0 → pure plain-M2F). >0 adds the per-query SymSkel thin-surface stack (fg-CE +
-    # Focal-Tversky + clDice skel-recall) on each matched sigmoid mask, for A/B against the plain-M2F baseline.
-    w_symskel: float = 0.0                            # weight of the per-query SymSkel term (0 = off)
-
     # --- OPTIONAL AffMALIS add-on (membership-derived affinity + constrained MALIS; hercunet.losses.malis) ---
     # Off by default (w_malis=0). aff_δ = Σ_q p(q|v)·p(q|v+δ) from the softmax membership, MALIS against owner — the
     # maximin attractive/repulsive passes for separation. See train/losses.py:affinity_malis_loss. Needs numba for a
@@ -167,10 +162,6 @@ class HercuvitRecipe:
     w_mask_bce: float = 5.0                          # weight of the ownership cross-entropy (the decoupled instance term)
     aux_weight: float = 1.0                          # weight on each earlier decoder layer's aux (deep-supervision) loss
     point_sample: int = 2048                         # points sampled for the Hungarian matching COST (not the loss)
-    # legacy M2F-with-class terms, used ONLY by the gated m2f_symskel_mask_loss (w_symskel>0); the decoupled head
-    # has no class/no-object head. Retire together with that loss if it is dropped.
-    w_class: float = 2.0                             # sheet / no-object classification (legacy m2f_symskel only)
-    no_object_weight: float = 0.1                    # down-weight the no-object class, DETR (legacy m2f_symskel only)
 
     # --- mask denoising (§13.2 / docs/dinovol_sheet_architecture.md): a train-only fixed-assignment query group
     #     that reconstructs each GT sheet, bypassing Hungarian. The standard DETR fix for query under-specialisation. ---
@@ -216,8 +207,8 @@ _TRAIN_FIELDS = frozenset({
     "w_surface", "surface_only",
     "sem_fg_weight", "w_sem_ce", "w_sem_tversky", "w_sem_skel", "w_sem_sep",
     "tversky_alpha", "tversky_beta", "tversky_gamma", "skel_iters", "sep_radius", "deep_sup_weights",
-    "w_symskel", "w_malis", "malis_crop", "malis_offsets",
-    "w_class", "w_mask_bce", "no_object_weight", "aux_weight", "point_sample",
+    "w_malis", "malis_crop", "malis_offsets",
+    "w_mask_bce", "aux_weight", "point_sample",
     "denoise", "dn_weight",
 })
 #: MODEL fields — the only keys a recipe yaml may set (everything that is not training).

@@ -9,8 +9,6 @@ queries with NO class head and NO null query (surface presence is the separate s
     cost, evaluated on **importance-sampled points** (not all 128³) via ``mask_logits_at_points``;
   * loss: fg-gated **ownership cross-entropy** (``w_mask_bce``) over the matched queries at the sheet voxels;
   * **auxiliary** losses after every decoder layer (``aux_weight``).
-The legacy M2F-with-class terms (``w_class``/``no_object_weight``) survive only in the gated
-``m2f_symskel_mask_loss`` alternative; the decoupled path above does not use them.
 
 Per-sample gating (§7): instance losses are computed only for samples with ``has_identity``; for a sample
 without identity the instance loss is a **zero that is still grad-connected** to the instance outputs (so the
@@ -66,87 +64,6 @@ def semantic_loss(sem_logits, sem_target: torch.Tensor, recipe) -> dict:
             acc[k] = acc[k] + w * terms[k]
     return {"sem": total, "ce": acc["ce"].detach(), "tversky": acc["tversky"].detach(),
             "skel": acc["skel"].detach(), "sep": acc["sep"].detach(), "dice": acc["tversky"].detach()}
-
-
-# --------------------------------------------------------------------------- SymSkel directly on matched masks (optional)
-def m2f_symskel_mask_loss(instance: dict, mask_features: torch.Tensor, sem: torch.Tensor, owner: torch.Tensor,
-                          has_identity, recipe, *, seed: int = 0, use_softmax: bool = False) -> tuple:
-    """OPTIONAL per-query thinness add-on (SymSkel, oldest-HercUNet supervision) over the plain-M2F default. Apply
-    the SymSkel thin-surface stack (fg-weighted CE precision + Focal-Tversky + clDice skeleton-recall) DIRECTLY to
-    each matched query's mask —
-    GT = that sheet's **thin medial surface** (``sem==1 & owner==k``). So each query's mask *is* a thin sheet, its
-    index *is* the membership, and the M2F readout ``max_q[P(sheet_q)·σ(mask_q)]`` is thin for free. Pair with
-    ``affinity_malis_loss`` for the SEPARATION that keeps neighbouring sigmoid masks from leaking into each other
-    (classical HercUNet's job for AffMALIS).
-
-    ``use_softmax=False`` (default, the chosen path): **independent per-query sigmoid** masks — the vanilla-M2F
-    readout that overfits cleanly; separation is carried by AffMALIS, not by exclusivity. ``use_softmax=True`` makes
-    the per-query mask the softmax-over-queries OWNERSHIP channel — DEAD END: the background-dominated null channel
-    starves the thin targets and everything collapses (``tv~0.97``). The fg-weighted CE is the precision term
-    (without it the recall-only skeleton term collapses the mask to all-foreground). Reuses ``surface_loss``
-    primitives + DETR class CE; Hungarian match on a cheap point-sampled dice cost. Returns ``(loss, terms)``."""
-    from scipy.optimize import linear_sum_assignment
-    from .surface_loss import focal_tversky, skeleton_recall
-
-    lay = instance["layers"][-1]
-    cls_all = lay["class_logits"]; me_all = lay["mask_embed"]
-    B, Q = cls_all.shape[:2]
-    C = mask_features.shape[1]
-    dev = mask_features.device
-    gen = torch.Generator(device=dev); gen.manual_seed(int(seed))
-    tot_cls = mask_features.new_zeros(()); tot_tv = mask_features.new_zeros(())
-    tot_sk = mask_features.new_zeros(()); tot_ce = mask_features.new_zeros(())
-    fgw = float(recipe.sem_fg_weight)
-    n_item = 0; n_mask = 0
-    cw = torch.tensor([recipe.no_object_weight, 1.0], device=dev)
-    for b in range(B):
-        if not bool(has_identity[b]):
-            tot_cls = tot_cls + cls_all[b].sum() * 0.0 + me_all[b].sum() * 0.0
-            continue
-        me = me_all[b].float()                                              # (Q,C)
-        sem_b = sem[b]; own_b = owner[b]
-        surf = (sem_b == 1); valid = (sem_b != 2)
-        ids = [int(i) for i in torch.unique(own_b[surf]).tolist() if i > 0]  # sheets that carry thin surface
-        if not ids:
-            tot_cls = tot_cls + cls_all[b].sum() * 0.0 + me.sum() * 0.0
-            continue
-        # per-query masks: SOFTMAX ownership (exclusive) or independent sigmoid. (Q,D,H,W)
-        mlog_all = torch.einsum("qc,cdhw->qdhw", me, mask_features[b].float())
-        p_all = (torch.softmax(mlog_all, dim=0) if use_softmax else torch.sigmoid(mlog_all))
-        p_flat = p_all.reshape(Q, -1)
-        # --- Hungarian on a cheap point-sampled dice cost (thin-surface targets), on the prob channels ---
-        sflat = surf.reshape(-1); oflat = own_b.reshape(-1); vflat = valid.reshape(-1)
-        pos = sflat.nonzero(as_tuple=False).squeeze(1)
-        neg = (vflat & ~sflat).nonzero(as_tuple=False).squeeze(1)
-        take = lambda idx, k: idx[torch.randint(0, int(idx.numel()), (k,), generator=gen, device=dev)] if idx.numel() else idx
-        pts = torch.cat([take(pos, min(1024, int(pos.numel()))), take(neg, min(1024, int(neg.numel())))], 0)
-        gt_pts = torch.stack([((oflat == k) & sflat)[pts].float() for k in ids], 0)   # (G,P)
-        with torch.no_grad():
-            pp = p_flat[:, pts]                                             # (Q,P) prob
-            num = 2.0 * torch.einsum("qp,gp->qg", pp, gt_pts)
-            den = pp.sum(1).unsqueeze(1) + gt_pts.sum(1).unsqueeze(0)
-            cost = (1.0 - (num + 1.0) / (den + 1.0)).cpu().numpy()
-            rows, cols = linear_sum_assignment(cost)
-        cls_t = torch.zeros(Q, dtype=torch.long, device=dev); cls_t[torch.as_tensor(rows, device=dev)] = 1
-        tot_cls = tot_cls + F.cross_entropy(cls_all[b], cls_t, weight=cw)
-        # --- SymSkel per matched ownership channel vs its sheet's THIN surface (dense, full-res) ---
-        v = valid.float()[None, None]
-        for r, c in zip(rows.tolist(), cols.tolist()):
-            p = p_all[r].float().unsqueeze(0).unsqueeze(0).clamp(1e-6, 1.0 - 1e-6)   # (1,1,D,H,W) fp32
-            gt = ((own_b == ids[c]) & surf).float()[None, None]
-            wmask = v * (1.0 + (fgw - 1.0) * gt)                            # fg-weighted CE = PRECISION term
-            bce = -(gt * torch.log(p) + (1.0 - gt) * torch.log1p(-p))
-            tot_ce = tot_ce + (bce * wmask).sum() / wmask.sum().clamp_min(1.0)
-            tot_tv = tot_tv + focal_tversky(p * v, gt, alpha=recipe.tversky_alpha, beta=recipe.tversky_beta,
-                                            gamma=recipe.tversky_gamma)
-            tot_sk = tot_sk + skeleton_recall(p, gt, iters=recipe.skel_iters, mask=v)
-            n_mask += 1
-        n_item += 1
-    di = max(n_item, 1); dm = max(n_mask, 1)
-    loss = (recipe.w_class * (tot_cls / di) + recipe.w_sem_ce * (tot_ce / dm)
-            + recipe.w_sem_tversky * (tot_tv / dm) + recipe.w_sem_skel * (tot_sk / dm))
-    return loss, {"class": (tot_cls / di).detach(), "ce": (tot_ce / dm).detach(),
-                  "tversky": (tot_tv / dm).detach(), "skel": (tot_sk / dm).detach(), "n_mask": float(n_mask)}
 
 
 # --------------------------------------------------------------------------- membership-affinity MALIS (AffMALIS)

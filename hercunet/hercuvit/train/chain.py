@@ -236,7 +236,7 @@ _TRAIN_FLAGS = ("epochs", "freeze_warmup_epochs", "freeze_decoder_epochs", "mask
                 "encoder_lr_schedule", "encoder_sigmoid_midpoint", "encoder_sigmoid_width", "encoder_grad_enable_frac",
                 "batch_size", "base_lr", "encoder_lr_mult", "decoder_lr_mult",
                 "weight_decay", "grad_clip", "warmup_steps", "lr_schedule", "augment",
-                "target_voxel_um", "attention_backend", "w_symskel", "w_malis", "denoise", "dn_weight",
+                "target_voxel_um", "attention_backend", "w_malis", "denoise", "dn_weight",
                 "w_mask_bce", "w_surface", "surface_only")
 
 

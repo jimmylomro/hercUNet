@@ -6,8 +6,8 @@ directive) that reuses hercunet machinery around it: the data layer (dataset), t
 ``net.param_groups``, grad-clip, warmup + constant (or cosine) LR.
 
 Loss: PLAIN Mask2Former on THIN labels every epoch (Hungarian + per-query sigmoid mask BCE+Dice + token
-objectness against each sheet's thin medial surface), with the OPTIONAL SymSkel (``w_symskel>0``) and AffMALIS
-(``w_malis>0``) add-ons. Schedule: **LP-FT** (Kumar et al., ICLR 2022) — the transformer is FROZEN for the first
+objectness against each sheet's thin medial surface), with the OPTIONAL AffMALIS
+(``w_malis>0``) add-on. Schedule: **LP-FT** (Kumar et al., ICLR 2022) — the transformer is FROZEN for the first
 ``freeze_warmup_epochs`` (train the head on the distilled encoder's features so the random head's early gradients
 do not distort them), then fine-tuned at ``encoder_lr_mult`` × LR for the rest. The optimiser is rebuilt on the
 freeze→unfreeze transition (the trainable set changes). Checkpoints save model + optimiser + epoch + the Dinovol
@@ -126,7 +126,7 @@ class HercuvitTrainer:
     def _run_epoch(self, loader, epoch: int) -> None:
         self.net.train()
         # accumulate on-GPU as tensors (one .item() per epoch at print time, NOT ~8 float() syncs/step — §profiling)
-        acc = {k: torch.zeros((), device=self.device) for k in ("loss", "own", "dn", "symskel", "malis", "surf", "fire", "share")}
+        acc = {k: torch.zeros((), device=self.device) for k in ("loss", "own", "dn", "malis", "surf", "fire", "share")}
         n_share = 0                                                    # count of steps that reported surf_share (subspace split)
         pdc = {k: torch.zeros((), device=self.device) for k in ("tp", "fp", "fn")}  # surface pseudo-Dice (nnU-Net-style)
         own = {"correct": torch.zeros((), device=self.device), "fg": torch.zeros((), device=self.device)}
@@ -159,12 +159,12 @@ class HercuvitTrainer:
                     st = L.semantic_loss(out["sem_logits"], sem, self.recipe)
                     w_surf = self.recipe.w_surface if self.recipe.w_surface > 0 else 1.0
                     loss = w_surf * st["sem"]
-                it = skt = mt = None
+                it = mt = None
                 if run_instance:
                     inst = out["instance"]
                     # PLAIN Mask2Former on THIN labels — Hungarian + per-query mask BCE+Dice (+token objectness) against
-                    # each sheet's THIN medial surface (owner & sem==1), ignore-masked. SymSkel / AffMALIS are optional
-                    # add-ons (w_symskel / w_malis > 0). In design B the readout uses the surface-GATED mask features.
+                    # each sheet's THIN medial surface (owner & sem==1), ignore-masked. AffMALIS is an optional add-on
+                    # (w_malis > 0). In design B the readout uses the surface-GATED mask features.
                     # design C: mask_features live at 1/4, so match the thin owner + ignore mask to that resolution
                     mf = out["mask_features"]
                     if mf.shape[-1] != owner_thin.shape[-1]:
@@ -177,10 +177,6 @@ class HercuvitTrainer:
                     it = L.instance_loss_decoupled(inst, mf, owner_i, has_id, self.recipe,
                                                    ignore=ignore_i, seed=self.global_step)
                     loss = it["inst"] if loss is None else loss + it["inst"]
-                    if self.recipe.w_symskel > 0 and inst is not None:
-                        sk, skt = L.m2f_symskel_mask_loss(inst, out["mask_features"], sem, owner, has_id, self.recipe,
-                                                          seed=self.global_step, use_softmax=False)
-                        loss = loss + self.recipe.w_symskel * sk
                     if self.recipe.w_malis > 0 and inst is not None:
                         ml, mt = L.affinity_malis_loss(inst, out["mask_features"], owner, has_id, self.recipe)
                         loss = loss + self.recipe.w_malis * ml
@@ -219,8 +215,6 @@ class HercuvitTrainer:
                 acc["own"] += it["mask_bce"]
                 acc["dn"] += it["dn"]; acc["fire"] += it["n_fire"]
                 own["correct"] += it["own_correct"]; own["fg"] += it["own_fg"]
-            if skt is not None:
-                acc["symskel"] += float(skt["tversky"])
             if mt is not None:
                 acc["malis"] += float(mt["malis"])
 
@@ -234,14 +228,12 @@ class HercuvitTrainer:
         parts = [f"{_C['tot']}[ep {epoch}] loss {m['loss']:.4f}{_C['r']}",
                  f"{_C['sem']}surf {m['surf']:.3f} pdice {pdice:.4f}{share_str}{_C['r']}"]
         if run_instance:
-            # own-acc = ownership quality (↑ = masks carve the surface into their matched sheets); fire = queries used
-            parts.append(f"{_C['inst']}inst [own-ce {m['own']:.3f} dn {m['dn']:.3f}] "
+            # own-acc = ownership quality (↑ = masks carve the surface into their matched sheets); fire = queries used.
+            # AffMALIS is an INSTANCE-side term (same-owner affinity on the mask membership → sheet separation), NOT a
+            # surface loss — so it lives in this instance group, not with surf/pdice.
+            malis_str = f" malis {m['malis']:.4f}" if self.recipe.w_malis > 0 else ""
+            parts.append(f"{_C['inst']}inst [own-ce {m['own']:.3f} dn {m['dn']:.3f}{malis_str}] "
                          f"own-acc {own_acc:.3f} fire {m['fire']:.1f}/{int(self.recipe.n_queries)}{_C['r']}")
-            extra = []
-            if self.recipe.w_symskel > 0: extra.append(f"symskel {m['symskel']:.3f}")
-            if self.recipe.w_malis > 0: extra.append(f"malis {m['malis']:.4f}")
-            if extra:
-                parts.append(f"{_C['sem']}{' '.join(extra)}{_C['r']}")
         tail = (f"{_C['dim']}lr {self.optim.param_groups[0]['lr']:.2e} {'frozen' if self._frozen else 'ft'}"
                 f"{f' skip {nan_skips}' if nan_skips else ''} {dt:.0f}s{_C['r']}")
         print(" | ".join(parts) + " | " + tail, flush=True)
