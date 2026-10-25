@@ -102,6 +102,10 @@ present in the pretrained features, and a small decoder sharpens it to the voxel
 
 ![HercuViT on a scroll window — left→right: CT · frozen-encoder PCA · pixel-encoder PCA · predicted surface · predicted sheet masks · GT labels · Dinovol-encoder PCA · Dinovol surface.](submission/images/embeddings.jpg)
 
+HercuViT's output as geometry: the per-sheet instance masks fit to sheet meshes, read back from the compact `.asv` store.
+
+![HercuViT fitted sheet meshes for a single 192³ window of PHerc1447 — the per-sheet surfaces from the `.asv`, coloured per sheet and lightly shaded.](submission/images/hercuvit-sheet-meshes.jpg)
+
 Fitted per-window sheet meshes, read straight from the compact `.asv` sheet store and coloured per sheet. Each window segments and labels its sheets independently, so the per-sheet colours do not carry across window boundaries — yet the sheet *surfaces* line up across them for the most part: the per-window geometry already agrees, and only the identities need reconciling (cross-window stitching, future work).
 
 ![HercuViT fitted sheet meshes across a block of windows, from the .asv, coloured per sheet — colours break at window seams (independent per-window IDs) but the sheet surfaces are continuous across them.](submission/images/hercuvit-disjoint-windows.jpg)
