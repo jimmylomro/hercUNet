@@ -54,10 +54,10 @@ def _hms(seconds):
 # (blocks are output-disjoint so parallel writes never race); passes are separated by a barrier + leader-finalize
 # (a block of pass p+1 reads pass p output ONE window over, via the ½-shift). ``donedir`` must be on storage
 # shared by all workers (a network volume across pods, or the local FS for multi-GPU on one box).
-def _n_blocks(shape, P, offset, region, nb):
+def _n_blocks(shape, P, offset, region, nb, stride=None):
     """Number of prefetch blocks a pass produces (for the barrier) — via ``pass_blocks`` so it can never drift
     from what ``run_pass`` actually claims."""
-    return len(pass_blocks(shape, P, offset, region, nb)[0])
+    return len(pass_blocks(shape, P, offset, region, nb, stride=stride)[0])
 
 
 # ----------------------------------------------------------------------------- tiling (pure, testable)
@@ -103,26 +103,29 @@ def pass_tiles(shape, P, offset, region=None):
 
 
 # ----------------------------------------------------------------------------- one pass (block + batch + prefetch)
-def _window_grid(dim, P, offset, r0, r1):
-    """Window START positions on the stride-P grid ``{offset + k*P}`` whose [s, s+P) intersects [r0, r1),
-    clamped to [0, dim-P] so every read is a full P^3 (no padding). Deduped + sorted."""
+def _window_grid(dim, P, offset, r0, r1, stride=None):
+    """Window START positions on the stride-``S`` grid ``{offset + k*S}`` (``S`` defaults to the window size ``P`` —
+    disjoint) whose [s, s+P) intersects [r0, r1), clamped to [0, dim-P] so every read is a full P^3 (no padding).
+    ``stride < P`` gives OVERLAPPING windows, each still processed exactly once (unlike the blend tile-halo).
+    Deduped + sorted."""
     import math
+    S = int(stride) if stride else P
     if dim <= P:
         return [0]
-    kmin = math.floor((r0 - offset - P) / P) + 1
-    kmax = math.ceil((r1 - offset) / P) - 1
-    return sorted({int(min(max(offset + k * P, 0), dim - P)) for k in range(kmin, kmax + 1)})
+    kmin = math.floor((r0 - offset - P) / S) + 1
+    kmax = math.ceil((r1 - offset) / S) - 1
+    return sorted({int(min(max(offset + k * S, 0), dim - P)) for k in range(kmin, kmax + 1)})
 
 
-def pass_blocks(shape, P, offset, region, nb, level=0):
+def pass_blocks(shape, P, offset, region, nb, level=0, stride=None):
     """The deterministic list of prefetch blocks for a pass (same on every worker → shared block ids). Each block
     = up to ``nb`` window-starts per axis; ``req`` is its CT read box (``level``-prefixed for ``read_window``), its
     ``wins`` the stride-P window origins. ``shape``/``region`` are in ``level``'s voxel grid."""
     Zf, Yf, Xf = (int(s) for s in shape)
     rz0, rz1, ry0, ry1, rx0, rx1 = region
-    gz = _window_grid(Zf, P, offset, rz0, rz1)
-    gy = _window_grid(Yf, P, offset, ry0, ry1)
-    gx = _window_grid(Xf, P, offset, rx0, rx1)
+    gz = _window_grid(Zf, P, offset, rz0, rz1, stride=stride)
+    gy = _window_grid(Yf, P, offset, ry0, ry1, stride=stride)
+    gx = _window_grid(Xf, P, offset, rx0, rx1, stride=stride)
     grp = lambda g: [g[i:i + nb] for i in range(0, len(g), nb)]
     blocks = []
     for zg in grp(gz):
@@ -273,7 +276,7 @@ def _tta_surface(model, xb_base, variants):
 def run_pass(model, vol, prev_arr, cur_arr, region, offset, P, device,
              air=25, batch=4, nb=4, log_every=40, donedir=None, reclaim=False, claim_chunk=6,
              readahead=2, prefetch_workers=3, tta_variants=None, pass_idx=0, passes=1, level=0,
-             mesh_sink=None, voxel_um=None, out_shape=None):
+             mesh_sink=None, voxel_um=None, out_shape=None, win_stride=None):
     """One disjoint (raw-write) Jacobi pass — BLOCK-batched + prefetched (fp16). Reads CT in big blocks (``nb``*P
     per axis) through the prefetched :func:`iter_windows` (S3 I/O overlaps GPU), reads the matching ``prev`` block
     from the ``prev_arr`` zarr once per block (None on pass 0 → prev=0), runs the P^3 windows in each block in
@@ -289,7 +292,7 @@ def run_pass(model, vol, prev_arr, cur_arr, region, offset, P, device,
     if not tta_variants:
         tta_variants = [((), None)]                                 # no TTA (single identity forward)
     blocks, (ngz, ngy, ngx) = pass_blocks(cur_arr.shape if cur_arr is not None else out_shape,
-                                          P, offset, region, nb, level=level)
+                                          P, offset, region, nb, level=level, stride=win_stride)
     total_win = sum(len(b["wins"]) for b in blocks)
     print(f"[pass] {len(blocks)} blocks / {total_win} windows (grid {ngz}x{ngy}x{ngx})"
           f"{' [claim-queue]' if donedir else ''}", flush=True)
@@ -654,8 +657,16 @@ def run_inference(source, out_prefix, *, model_type="nnunet-jacobi", model=None,
     ds_level = float(vol.meta.level_downsamples[level])                  # working level -> L0 voxel scale
     l0_voxel = float(vol.meta.voxel_size_um)
     mesh_frame = {"vc_open_data_coordinate_space": label}
+    # Meshes NEVER use the blend tile-halo (which re-runs each window per covering tile — huge duplication). When
+    # the surface is NOT stored, drop blend entirely and run a simple strided window grid (each window ONCE); a sub-P
+    # stride gives the requested small window overlap. When the surface IS blended, meshes ride those (overlapping)
+    # windows as-is (per-window, redundant) — use --overlap 0 for a clean mesh store alongside a disjoint surface.
+    use_blend = blend and want_surf
+    win_stride = (int(round(P * (1.0 - overlap))) if (want_mesh and not use_blend and overlap > 0) else P)
+    win_stride = int(min(max(win_stride, 1), P))
     print(f"[engine] outputs: surface={surf_store} mesh={mesh_store if want_mesh else 'off'} "
-          f"(L0 voxel {l0_voxel:.3f}µm, level downsample {ds_level:.0f})", flush=True)
+          f"(L0 voxel {l0_voxel:.3f}µm, level downsample {ds_level:.0f}; "
+          f"{'blend' if use_blend else f'disjoint stride {win_stride}'})", flush=True)
 
     # ---- STORAGE WARNING: each pass writes a full-resolution uint8 surface-prob buffer. For a whole scroll that
     # is HUNDREDS of GB (up to ~500 GB); the number below is an UPPER BOUND over the computed box (only material /
@@ -762,7 +773,7 @@ def run_inference(source, out_prefix, *, model_type="nnunet-jacobi", model=None,
             if multi:
                 open(os.path.join(donedir, f"_meshshard_{os.getpid()}.active"), "w").close()
             print(f"[engine] pass {p}: writing mesh shard -> {shard_path}", flush=True)
-        if blend:
+        if use_blend:
             run_pass_blend(m, vol, prev_arr, cur, region_full, offset, P, S, Tt, device, air=air,
                            batch=batch, donedir=(donedir if multi else None), reclaim=reclaim,
                            claim_chunk=claim_chunk,
@@ -773,7 +784,8 @@ def run_inference(source, out_prefix, *, model_type="nnunet-jacobi", model=None,
             run_pass(m, vol, prev_arr, cur, region_full, offset, P, device, air=air, batch=batch, nb=nb,
                      donedir=(donedir if multi else None), reclaim=reclaim, claim_chunk=claim_chunk,
                      readahead=readahead, prefetch_workers=prefetch_workers, tta_variants=pass_variants,
-                     pass_idx=p, passes=passes, level=level, mesh_sink=mesh_sink, voxel_um=vx, out_shape=shape)
+                     pass_idx=p, passes=passes, level=level, mesh_sink=mesh_sink, voxel_um=vx, out_shape=shape,
+                     win_stride=win_stride)
         if want_mesh:
             info = mesh_writer.close()
             print(f"[engine] pass {p}: mesh shard done ({info['sheet_count']} sheets, {info['vert_count']} verts)", flush=True)
@@ -822,8 +834,8 @@ def run_inference(source, out_prefix, *, model_type="nnunet-jacobi", model=None,
                         print(f"[engine] pass {pp} {aux_spec.name} upload FAILED: {e}", flush=True)
 
         if multi:
-            nbk = (len(pass_blend_tiles(shape, P, S, offset, region_full, Tt)) if blend
-                   else _n_blocks(shape, P, offset, region_full, nb))
+            nbk = (len(pass_blend_tiles(shape, P, S, offset, region_full, Tt)) if use_blend
+                   else _n_blocks(shape, P, offset, region_full, nb, stride=win_stride))
             print(f"[jacobi] pass {p}: barrier — waiting for all {nbk} {'tiles' if blend else 'blocks'} .done", flush=True)
             CQ.wait_all_done(donedir, nbk, what=f"pass {p}")
             if leader:
