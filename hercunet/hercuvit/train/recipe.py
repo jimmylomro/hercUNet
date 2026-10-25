@@ -149,11 +149,12 @@ class HercuvitRecipe:
     sep_radius: int = 2
     deep_sup_weights: tuple = (1.0, 0.5, 0.25)      # full, 1/2, 1/4
 
-    # --- OPTIONAL AffMALIS add-on (membership-derived affinity + constrained MALIS; hercunet.losses.malis) ---
-    # Off by default (w_malis=0). aff_δ = Σ_q p(q|v)·p(q|v+δ) from the softmax membership, MALIS against owner — the
-    # maximin attractive/repulsive passes for separation. See train/losses.py:affinity_malis_loss. Needs numba for a
-    # usable speed (the njit maximin/union-find); crop bounds the O(E log E) cost (full-window is minutes/step).
-    w_malis: float = 0.0                              # weight of the MALIS term (0 = off; try 1.0 to A/B separation)
+    # --- OPTIONAL AffMALIS add-on (SURFACE continuity + separation; hercunet.losses.malis) ---
+    # Off by default (w_malis=0). A 1×1 affinity head off U1 emits one sigmoid affinity per offset; constrained MALIS
+    # runs against the dense owner — the maximin attractive/repulsive passes that give the SURFACE clean sheet
+    # separation (HercUNet-style). It supervises the surface/decoder trunk ONLY, never the mask ownership readout. See
+    # train/losses.py:surface_affinity_malis_loss. Needs numba (njit maximin/union-find); crop bounds the O(E log E).
+    w_malis: float = 0.0                              # weight of the surface MALIS term (0 = off; try 1.0)
     malis_crop: int = 48                              # random cube side (voxels) MALIS runs on per item (hercunet=48)
     malis_offsets: tuple = ((1, 0, 0), (0, 1, 0), (0, 0, 1), (3, 0, 0), (0, 3, 0), (0, 0, 3),
                             (9, 0, 0), (0, 9, 0), (0, 0, 9))   # 3 axes × {1,3,9} voxels (hercunet default)

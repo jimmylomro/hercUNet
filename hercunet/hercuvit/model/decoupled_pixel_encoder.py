@@ -55,6 +55,7 @@ class DecoupledPixelEncoder(nn.Module):
         mask_dim: int = 32,
         n_conv_per_stage: int = 2,
         deep_supervision: bool = False,
+        n_affinity: int = 9,
     ) -> None:
         super().__init__()
         s0, s1, s2 = (int(c) for c in skip_channels)
@@ -85,6 +86,11 @@ class DecoupledPixelEncoder(nn.Module):
 
         # DECOUPLED surface head (= objectness): 1×1 conv straight off U1 (author's seg_layers[-1])
         self.surf_head = nn.Conv3d(md, int(n_sem_classes), kernel_size=1, bias=True)
+        # SURFACE-side AFFinity head (HercUNet AffinityHeadNet analogue): a 1×1 conv off U1 → one sigmoid affinity per
+        # MALIS offset, supervised by constrained MALIS against owner (surface continuity + sheet separation). This is
+        # a SURFACE property of the shared feature U1 — decoupled from the mask ownership readout (AffMALIS must NOT be
+        # derived from the mask membership). Default 9 channels = the 9 default malis_offsets; the loss asserts match.
+        self.aff_head = nn.Conv3d(md, int(n_affinity), kernel_size=1, bias=True)
         # NO pyramid projection: the memory keeps U1's mask_dim width (the decoder runs natively at mask_dim).
         if self.deep_supervision:
             self.surf_head_2 = nn.Conv3d(s1, int(n_sem_classes), kernel_size=1, bias=True)       # 1/2 (off block1)
@@ -113,4 +119,5 @@ class DecoupledPixelEncoder(nn.Module):
         def _lvl(side: int) -> torch.Tensor:
             return F.interpolate(u1, size=(side, side, side), mode="trilinear", align_corners=False)
         memory = [_lvl(S // 32), _lvl(S // 16), _lvl(S // 8)]           # [1/32, 1/16, 1/8] — attention MEMORY only
-        return {"sem_logits": sem_logits, "mask_features": u1, "memory": memory}
+        affinity = self.aff_head(u1)                                    # (B, n_affinity, 128³) surface affinity LOGITS
+        return {"sem_logits": sem_logits, "mask_features": u1, "memory": memory, "affinity": affinity}

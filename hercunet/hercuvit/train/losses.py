@@ -66,66 +66,43 @@ def semantic_loss(sem_logits, sem_target: torch.Tensor, recipe) -> dict:
             "skel": acc["skel"].detach(), "sep": acc["sep"].detach(), "dice": acc["tversky"].detach()}
 
 
-# --------------------------------------------------------------------------- membership-affinity MALIS (AffMALIS)
-def _membership_affinity(p: torch.Tensor, offsets) -> torch.Tensor:
-    """Soft same-owner affinity from a per-voxel membership ``p`` (Q,D,H,W softmax over queries). For each offset
-    ``δ`` returns ``aff_δ(v) = Σ_q p(q|v)·p(q|v+δ)`` ∈ [0,1] = P(v and v+δ share an owner). Out-of-bounds → 0.
-    Richer than a fixed axis-offset affinity head: the membership defines affinity at ANY offset, consistent with
-    the instance assignment. Returns (C,D,H,W)."""
-    Q, D, H, W = p.shape
-    out = p.new_zeros((len(offsets), D, H, W))
-    for c, (dz, dy, dx) in enumerate(offsets):
-        z0, z1 = max(0, -dz), D - max(0, dz)
-        y0, y1 = max(0, -dy), H - max(0, dy)
-        x0, x1 = max(0, -dx), W - max(0, dx)
-        if z0 >= z1 or y0 >= y1 or x0 >= x1:
-            continue
-        a = p[:, z0:z1, y0:y1, x0:x1]
-        b = p[:, z0 + dz:z1 + dz, y0 + dy:y1 + dy, x0 + dx:x1 + dx]
-        out[c, z0:z1, y0:y1, x0:x1] = (a * b).sum(0)
-    return out
+# --------------------------------------------------------------------------- surface AffMALIS (continuity + separation)
+def surface_affinity_malis_loss(aff_logits: torch.Tensor, owner: torch.Tensor, has_identity, recipe, *, rng=None) -> tuple:
+    """AffMALIS on the SURFACE-side affinity head (``out["affinity"]``), HercUNet-style — REUSES
+    ``hercunet.losses.malis.ConstrainedMalisLoss``. ``aff_logits`` (B, n_off, D, H, W) are the 1x1 affinity-head
+    logits off U1 (one channel per ``recipe.malis_offsets``); ``owner`` (B, D, H, W) is the dense owner GT.
 
-
-def affinity_malis_loss(instance: dict, mask_features: torch.Tensor, owner: torch.Tensor, has_identity, recipe,
-                        *, rng=None) -> tuple:
-    """AffMALIS on the M2F readout's MEMBERSHIP (option B) — REUSES ``hercunet.losses.malis.ConstrainedMalisLoss``.
-
-    Per identity sample: crop a random ``recipe.malis_crop``³ cube, form the per-voxel membership
-    ``p = softmax_Q(mask_embed · mask_features)`` on it, derive the soft same-owner affinity
-    ``aff_δ = Σ_q p(q|v)·p(q|v+δ)`` over ``recipe.malis_offsets``, and run constrained MALIS against ``owner`` —
-    the maximin attractive/repulsive passes that give HercUNet its clean sheet separation. Gradient flows through
-    the affinity into the M2F ownership (mask_embed + mask_features). Gated by ``has_identity``. Returns
-    ``(loss, terms)`` with ``terms = {malis, grow, sep, n_identity}``."""
+    Per identity sample: crop a random ``recipe.malis_crop``^3 cube, ``sigmoid`` the affinity, and run constrained
+    MALIS against ``owner`` -- the maximin attractive/repulsive passes that give the SURFACE its continuity within a
+    sheet and separation between sheets (the anti-merge signal). This supervises the surface/decoder trunk ONLY; it
+    does NOT touch the mask ownership readout (that decoupling is the whole point). Gated by ``has_identity``.
+    Returns ``(loss, terms)`` with ``terms = {malis, grow, sep, n_identity}``."""
     import numpy as np
     from ...losses.malis import ConstrainedMalisLoss
 
     rng = rng or np.random.default_rng()
     offsets = [tuple(o) for o in recipe.malis_offsets]
+    if aff_logits.shape[1] != len(offsets):
+        raise ValueError(f"affinity head has {aff_logits.shape[1]} channels but {len(offsets)} malis_offsets -- "
+                         f"set DecoupledPixelEncoder n_affinity = len(malis_offsets)")
     crop = int(recipe.malis_crop)
-    malis = ConstrainedMalisLoss(offsets=offsets, crop=None)   # we crop the features ourselves (cheaper)
-    lay = instance["layers"][-1]
-    n_match = instance.get("n_match")                          # exclude the train-only DN queries from the membership
-    me = lay["mask_embed"]                                     # (B, Q(+DN), C)
-    me = (me[:, :n_match] if n_match is not None else me).float()   # matching queries only (matches inference)
-    B = mask_features.shape[0]
-    total = mask_features.sum() * 0.0                          # grad-connected zero (no-identity / empty batch)
+    malis = ConstrainedMalisLoss(offsets=offsets, crop=None)   # we crop ourselves (cheaper)
+    B = aff_logits.shape[0]
+    total = aff_logits.sum() * 0.0                             # grad-connected zero (no-identity / empty batch)
     grow = sep = 0.0
     n = 0
     for b in range(B):
         if not bool(has_identity[b]):
-            total = total + me[b].sum() * 0.0
+            total = total + aff_logits[b].sum() * 0.0
             continue
-        mf_b = mask_features[b].float()                        # (C, D, H, W)
+        aff_b = torch.sigmoid(aff_logits[b].float())          # (n_off, D, H, W)
         own_b = owner[b]
-        C, D, H, W = mf_b.shape
+        _, D, H, W = aff_b.shape
         cz, cy, cx = min(crop, D), min(crop, H), min(crop, W)
         z = int(rng.integers(0, D - cz + 1)); y = int(rng.integers(0, H - cy + 1)); x = int(rng.integers(0, W - cx + 1))
-        mf_c = mf_b[:, z:z + cz, y:y + cy, x:x + cx]
+        aff_c = aff_b[:, z:z + cz, y:y + cy, x:x + cx].unsqueeze(0)      # (1, n_off, cz, cy, cx)
         own_c = own_b[z:z + cz, y:y + cy, x:x + cx]
-        own_logits = torch.einsum("qc,cdhw->qdhw", me[b], mf_c)          # (Q, cz, cy, cx)
-        p = torch.softmax(own_logits, dim=0)                            # membership
-        aff = _membership_affinity(p, offsets).unsqueeze(0)            # (1, C, cz, cy, cx)
-        total = total + malis(aff, own_c.unsqueeze(0), rng)
+        total = total + malis(aff_c, own_c.unsqueeze(0), rng)
         grow += float(getattr(malis, "last_grow", 0.0)); sep += float(getattr(malis, "last_sep", 0.0))
         n += 1
     denom = max(n, 1)

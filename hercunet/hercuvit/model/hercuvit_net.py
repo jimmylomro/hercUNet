@@ -99,7 +99,8 @@ class HercuVitNet(nn.Module):
 
         # v2 decoupled: CNN-UNET pixel encoder → surface @1/1 (own head) + mask_features=U1@1/1 + the U1 memory pyramid.
         dec = self.pixel_decoder(tokens_grid, skips)
-        out = {"sem_logits": dec["sem_logits"], "mask_features": dec["mask_features"], "instance": None}
+        out = {"sem_logits": dec["sem_logits"], "mask_features": dec["mask_features"],
+               "affinity": dec["affinity"], "instance": None}
         if self.instance_head is not None and run_instance:
             # learned + DN queries (DN seeded from the THIN GT owner @1/1, train only); no FPS/surface seeding.
             out["instance"] = self.instance_head(dec["memory"], dec["mask_features"], dn_owner=dn_owner)

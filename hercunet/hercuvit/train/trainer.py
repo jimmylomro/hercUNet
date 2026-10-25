@@ -160,12 +160,16 @@ class HercuvitTrainer:
                     w_surf = self.recipe.w_surface if self.recipe.w_surface > 0 else 1.0
                     loss = w_surf * st["sem"]
                 it = mt = None
+                # AffMALIS on the SURFACE affinity head (continuity + sheet separation; HercUNet-style) — a SURFACE-side
+                # loss on the shared U1 trunk, NOT on the mask ownership readout. Gated by the decoder trunk being
+                # trainable (it is frozen during the instance-warmup) and by having dense owner identity.
+                if self.recipe.w_malis > 0 and not bool(self._dec_frozen):
+                    ml, mt = L.surface_affinity_malis_loss(out["affinity"], owner, has_id, self.recipe)
+                    loss = self.recipe.w_malis * ml if loss is None else loss + self.recipe.w_malis * ml
                 if run_instance:
                     inst = out["instance"]
-                    # PLAIN Mask2Former on THIN labels — Hungarian + per-query mask BCE+Dice (+token objectness) against
-                    # each sheet's THIN medial surface (owner & sem==1), ignore-masked. AffMALIS is an optional add-on
-                    # (w_malis > 0). In design B the readout uses the surface-GATED mask features.
-                    # design C: mask_features live at 1/4, so match the thin owner + ignore mask to that resolution
+                    # PLAIN decoupled ownership on THIN labels — Hungarian ownership-CE (+ DN); NO class/null/MALIS on
+                    # the masks (AffMALIS is the surface-side loss above). design C: match owner/ignore to mf resolution.
                     mf = out["mask_features"]
                     if mf.shape[-1] != owner_thin.shape[-1]:
                         r = owner_thin.shape[-1] // mf.shape[-1]
@@ -173,13 +177,9 @@ class HercuvitTrainer:
                         ignore_i = F.max_pool3d((sem == 2).float()[:, None], r, r)[:, 0] > 0.5
                     else:
                         owner_i, ignore_i = owner_thin, (sem == 2)
-                    # v2 decoupled: no-null fg-gated ownership CE (no class/obj/mask-Dice)
                     it = L.instance_loss_decoupled(inst, mf, owner_i, has_id, self.recipe,
                                                    ignore=ignore_i, seed=self.global_step)
                     loss = it["inst"] if loss is None else loss + it["inst"]
-                    if self.recipe.w_malis > 0 and inst is not None:
-                        ml, mt = L.affinity_malis_loss(inst, out["mask_features"], owner, has_id, self.recipe)
-                        loss = loss + self.recipe.w_malis * ml
             loss_f = loss.float()
             if not torch.isfinite(loss_f):                             # NaN/Inf guard: drop the batch, never step on it
                 self.optim.zero_grad(set_to_none=True)
@@ -225,14 +225,14 @@ class HercuvitTrainer:
         dt = time.time() - t0
         run_instance = not bool(self.recipe.surface_only)
         share_str = f" share {share_val:.3f}" if n_share > 0 else ""   # subspace norm share (≈0.19; →1 = collapse)
+        # AffMALIS is a SURFACE-side continuity/separation loss (on the affinity head off U1), so it sits in the surf
+        # group with pdice — not with the instance ownership metrics.
+        malis_str = f" malis {m['malis']:.4f}" if self.recipe.w_malis > 0 else ""
         parts = [f"{_C['tot']}[ep {epoch}] loss {m['loss']:.4f}{_C['r']}",
-                 f"{_C['sem']}surf {m['surf']:.3f} pdice {pdice:.4f}{share_str}{_C['r']}"]
+                 f"{_C['sem']}surf {m['surf']:.3f} pdice {pdice:.4f}{malis_str}{share_str}{_C['r']}"]
         if run_instance:
             # own-acc = ownership quality (↑ = masks carve the surface into their matched sheets); fire = queries used.
-            # AffMALIS is an INSTANCE-side term (same-owner affinity on the mask membership → sheet separation), NOT a
-            # surface loss — so it lives in this instance group, not with surf/pdice.
-            malis_str = f" malis {m['malis']:.4f}" if self.recipe.w_malis > 0 else ""
-            parts.append(f"{_C['inst']}inst [own-ce {m['own']:.3f} dn {m['dn']:.3f}{malis_str}] "
+            parts.append(f"{_C['inst']}inst [own-ce {m['own']:.3f} dn {m['dn']:.3f}] "
                          f"own-acc {own_acc:.3f} fire {m['fire']:.1f}/{int(self.recipe.n_queries)}{_C['r']}")
         tail = (f"{_C['dim']}lr {self.optim.param_groups[0]['lr']:.2e} {'frozen' if self._frozen else 'ft'}"
                 f"{f' skip {nan_skips}' if nan_skips else ''} {dt:.0f}s{_C['r']}")
