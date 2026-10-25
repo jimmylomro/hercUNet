@@ -29,6 +29,15 @@ def _drive(a, *, across_pods: bool) -> None:
     from ...infer.run import run_fanout, parse_region, _maybe_presync, engine_jargs
     from ...infer.engine import run_inference
 
+    # --- output selection (--surf / --mesh ∈ off|local|upload) -----------------------------------------------------
+    if a.surf == "off" and a.mesh == "off":
+        raise SystemExit("hercuvit infer: nothing to produce — set --surf and/or --mesh to 'local' or 'upload'.")
+    if (a.surf == "upload" or a.mesh == "upload") and not a.s3_prefix:
+        raise SystemExit("hercuvit infer: --surf/--mesh 'upload' needs --s3-prefix <s3://…>.")
+    if a.s3_prefix and a.surf != "upload" and a.mesh != "upload":
+        raise SystemExit("hercuvit infer: --s3-prefix given but neither --surf nor --mesh is 'upload' — "
+                         "specify what to upload (e.g. --mesh upload).")
+
     model_dir = _resolve_model(a)
     region = parse_region(a.region)
     source = _maybe_presync(a, region)
@@ -36,7 +45,11 @@ def _drive(a, *, across_pods: bool) -> None:
         engine_jargs(a, region, source),
         model_type="hercuvit-surface",
         model_import="hercunet.hercuvit.infer.model",          # so a worker subprocess registers the model
-        model_opts=dict(attention_backend=a.attention_backend, overlap=a.overlap),
+        surf_store=a.surf, mesh_store=a.mesh,
+        finalise=(a.finalise if a.surf != "off" else "no"),   # surface pyramid only when the surface is stored
+        upload=("last" if a.surf == "upload" else "no"),      # surface S3 upload gated by --surf (meshes by --mesh)
+        model_opts=dict(attention_backend=a.attention_backend, overlap=a.overlap,
+                        with_meshes=(a.mesh != "off"), mesh_fit_iters=a.mesh_fit_iters),
     )
     if a.device == "cpu" or not torch.cuda.is_available():
         if across_pods:

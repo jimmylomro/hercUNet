@@ -272,7 +272,8 @@ def _tta_surface(model, xb_base, variants):
 
 def run_pass(model, vol, prev_arr, cur_arr, region, offset, P, device,
              air=25, batch=4, nb=4, log_every=40, donedir=None, reclaim=False, claim_chunk=6,
-             readahead=2, prefetch_workers=3, tta_variants=None, pass_idx=0, passes=1, level=0):
+             readahead=2, prefetch_workers=3, tta_variants=None, pass_idx=0, passes=1, level=0,
+             mesh_sink=None, voxel_um=None, out_shape=None):
     """One disjoint (raw-write) Jacobi pass — BLOCK-batched + prefetched (fp16). Reads CT in big blocks (``nb``*P
     per axis) through the prefetched :func:`iter_windows` (S3 I/O overlaps GPU), reads the matching ``prev`` block
     from the ``prev_arr`` zarr once per block (None on pass 0 → prev=0), runs the P^3 windows in each block in
@@ -287,7 +288,8 @@ def run_pass(model, vol, prev_arr, cur_arr, region, offset, P, device,
     from ..data import iter_windows
     if not tta_variants:
         tta_variants = [((), None)]                                 # no TTA (single identity forward)
-    blocks, (ngz, ngy, ngx) = pass_blocks(cur_arr.shape, P, offset, region, nb, level=level)
+    blocks, (ngz, ngy, ngx) = pass_blocks(cur_arr.shape if cur_arr is not None else out_shape,
+                                          P, offset, region, nb, level=level)
     total_win = sum(len(b["wins"]) for b in blocks)
     print(f"[pass] {len(blocks)} blocks / {total_win} windows (grid {ngz}x{ngy}x{ngx})"
           f"{' [claim-queue]' if donedir else ''}", flush=True)
@@ -300,11 +302,19 @@ def run_pass(model, vol, prev_arr, cur_arr, region, offset, P, device,
             return
         xb = torch.from_numpy(np.stack(buf)).to(device, non_blocking=True)     # [B,Cbase,P,P,P]
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
-            logits = _tta_surface(model, xb, tta_variants)                    # [B,2,P,P,P] (TTA-averaged if on)
+            if mesh_sink is not None:                                         # one run_instance forward: surface + meshes
+                logits, meshes = model.forward_meshes(xb, voxel_um)
+            else:
+                logits = _tta_surface(model, xb, tta_variants)                # [B,2,P,P,P] (TTA-averaged if on)
+                meshes = None
             prob = torch.softmax(logits, 1)[:, 1]                             # [B,P,P,P]
-        u8 = prob.mul_(255.0).round_().clamp_(0, 255).to(torch.uint8).cpu().numpy()
-        for i, (z, y, x) in enumerate(meta):
-            cur_arr[z:z + P, y:y + P, x:x + P] = u8[i]
+        if cur_arr is not None:                                               # surface write (skipped in mesh-only runs)
+            u8 = prob.mul_(255.0).round_().clamp_(0, 255).to(torch.uint8).cpu().numpy()
+            for i, (z, y, x) in enumerate(meta):
+                cur_arr[z:z + P, y:y + P, x:x + P] = u8[i]
+        if mesh_sink is not None:                                             # per-window meshes -> .asv shard
+            for i, (z, y, x) in enumerate(meta):
+                mesh_sink.add_window((z, y, x), meshes[i])
         buf.clear(); meta.clear()
 
     def process_block(ct_blk, block):
@@ -363,7 +373,8 @@ def run_pass(model, vol, prev_arr, cur_arr, region, offset, P, device,
 
 def run_pass_blend(model, vol, prev_arr, cur_arr, region, offset, P, S, T, device,
                    air=25, batch=4, log_every=20, donedir=None, reclaim=False, claim_chunk=6,
-                   readahead=2, prefetch_workers=3, tta_variants=None, aux_arr=None, pass_idx=0, passes=1, level=0):
+                   readahead=2, prefetch_workers=3, tta_variants=None, aux_arr=None, pass_idx=0, passes=1, level=0,
+                   mesh_sink=None, voxel_um=None, out_shape=None):
     """One OVERLAP-mode pass: like :func:`run_pass` (prefetched blocks, claim-queue, fp16) but each claim item is a
     disjoint OUTPUT TILE that runs every stride-S window covering it (halo) and merges them with the villa Gaussian
     blend in LOGIT space (accumulate ``(l1-l0)·g`` + ``g``, normalise, sigmoid), then writes only its owned region —
@@ -377,7 +388,7 @@ def run_pass_blend(model, vol, prev_arr, cur_arr, region, offset, P, S, T, devic
     if not tta_variants:
         tta_variants = [((), None)]                                          # no TTA
     gauss_t = torch.from_numpy(make_gaussian(P)).to(device)
-    tiles = pass_blend_tiles(cur_arr.shape, P, S, offset, region, T, level=level)
+    tiles = pass_blend_tiles(cur_arr.shape if cur_arr is not None else out_shape, P, S, offset, region, T, level=level)
     total_win = sum(len(t["starts"][0]) * len(t["starts"][1]) * len(t["starts"][2]) for t in tiles)
     print(f"[pass-blend] {len(tiles)} tiles / {total_win} windows (S={S} T={T})"
           f"{' [claim-queue]' if donedir else ''}", flush=True)
@@ -437,8 +448,12 @@ def run_pass_blend(model, vol, prev_arr, cur_arr, region, offset, P, S, T, devic
             if arrs_np is None:                                                     # whole batch was air → nothing to do
                 continue
             xb = torch.from_numpy(arrs_np).to(device, non_blocking=True)           # [B,Cbase,P,P,P]
+            wmeshes = None
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
-                if aux_acc is not None and len(tta_variants) == 1:
+                if mesh_sink is not None:
+                    seg_logits, wmeshes = model.forward_meshes(xb, voxel_um)        # surface + per-window meshes (no TTA)
+                    aux = None
+                elif aux_acc is not None and len(tta_variants) == 1:
                     seg_logits, aux = model.forward(xb)                             # one forward gives both (no TTA)
                 elif aux_acc is not None:
                     seg_logits = _tta_surface(model, xb, tta_variants)             # TTA'd surface …
@@ -460,6 +475,11 @@ def run_pass_blend(model, vol, prev_arr, cur_arr, region, offset, P, S, T, devic
                     aux_acc[:, iz0 - oz0:iz1 - oz0, iy0 - oy0:iy1 - oy0, ix0 - ox0:ix1 - ox0] += \
                         aux_f[bj, :, iz0 - z:iz1 - z, iy0 - y:iy1 - y, ix0 - x:ix1 - x] * gp[None]
                 done[0] += 1
+            if mesh_sink is not None:                                               # per-window meshes (not blended)
+                for bj, (z, y, x) in enumerate(keep):
+                    mesh_sink.add_window((z, y, x), wmeshes[bj])
+        if cur_arr is None:                                                        # mesh-only run (surf=off): no surface write
+            return
         mask = wsum > 0
         wden = wsum.clamp(min=1e-12)                                                # shared denom (surface + aff)
         acc.div_(wden); acc.clamp_(-30.0, 30.0)
@@ -547,7 +567,8 @@ def run_inference(source, out_prefix, *, model_type="nnunet-jacobi", model=None,
                   ckpt="checkpoint_best.pth", device="cuda", model_opts=None, model_import=None,
                   air=25, region=None, level=0, keep_buffers=False, finalise="last", resume=False, batch=4, nb=4,
                   s3_prefix=None, upload="last", multi=False, reclaim=False, claim_chunk=6, leader=False,
-                  readahead=2, prefetch_workers=3, tta="none", tta_passes="all"):
+                  readahead=2, prefetch_workers=3, tta="none", tta_passes="all",
+                  surf_store="local", mesh_store="off"):
     """Model-agnostic inference engine. Build the model (:class:`hercunet.infer.model.InferenceModel`) named by
     ``model_type`` from ``model``/``model_hf`` + ``model_opts``, then run ``model.passes`` double-buffered passes over
     ``source`` and write per-pass surface-prob OME-Zarrs ``{out_prefix}_pass{p}.zarr``. Returns the final pass path.
@@ -618,6 +639,24 @@ def run_inference(source, out_prefix, *, model_type="nnunet-jacobi", model=None,
           f"(L0={tuple(int(v) for v in vol.meta.level_shapes[0])}) "
           f"P={P} chunk={chunk} passes={passes} region={region_full} batch={batch} nb={nb}", flush=True)
 
+    # ---- surface/mesh output selection (surf_store / mesh_store ∈ {off, local, upload}). The surface volume is
+    # created+finalised+uploaded through the existing path when stored (upload gated by the `upload` spec, which the
+    # caller sets from surf_store); meshes are fit per-window and written to a per-worker .asv shard, merged by the
+    # leader into {out}_meshes.asv (uploaded when mesh_store==upload). `want_mesh` needs a mesh-emitting model.
+    want_surf = surf_store != "off"
+    want_mesh = bool(getattr(m, "emits_meshes", False)) and mesh_store != "off"
+    if mesh_store != "off" and not getattr(m, "emits_meshes", False):
+        raise SystemExit(f"infer: --mesh {mesh_store} but model {model_type!r} emits no meshes.")
+    if want_mesh and passes != 1:
+        raise SystemExit("infer: mesh output is only supported for single-pass models (e.g. HercuViT).")
+    if not want_surf and not want_mesh:
+        raise SystemExit("infer: nothing to produce — both surf and mesh are off (or the model emits no meshes).")
+    ds_level = float(vol.meta.level_downsamples[level])                  # working level -> L0 voxel scale
+    l0_voxel = float(vol.meta.voxel_size_um)
+    mesh_frame = {"vc_open_data_coordinate_space": label}
+    print(f"[engine] outputs: surface={surf_store} mesh={mesh_store if want_mesh else 'off'} "
+          f"(L0 voxel {l0_voxel:.3f}µm, level downsample {ds_level:.0f})", flush=True)
+
     # ---- STORAGE WARNING: each pass writes a full-resolution uint8 surface-prob buffer. For a whole scroll that
     # is HUNDREDS of GB (up to ~500 GB); the number below is an UPPER BOUND over the computed box (only material /
     # non-air chunks are actually written, so real usage is the material fraction — less). By default buffers are
@@ -686,13 +725,15 @@ def run_inference(source, out_prefix, *, model_type="nnunet-jacobi", model=None,
         # a name that embeds the raw CT volume's name collides with the CT volume VC3D already has loaded, so the
         # prediction won't show as a separate attachable volume.
         vol_name = f"{tag}-p{p}"
-        if not multi or leader:
-            cur = NI.create_surface_zarr(cur_path, shape, chunk, vx, tag, vol_name, overwrite=not resume)
-            if multi:
-                open(os.path.join(donedir, "_created"), "w").close()   # signal followers the zarr is ready
-        else:
-            CQ.wait_for_path(os.path.join(donedir, "_created"), f"pass {p} zarr creation")
-            cur = zarr.open_group(cur_path, mode="r+")["0"]
+        cur = None
+        if want_surf:                                                  # surf=off (mesh-only) skips the surface volume
+            if not multi or leader:
+                cur = NI.create_surface_zarr(cur_path, shape, chunk, vx, tag, vol_name, overwrite=not resume)
+                if multi:
+                    open(os.path.join(donedir, "_created"), "w").close()   # signal followers the zarr is ready
+            else:
+                CQ.wait_for_path(os.path.join(donedir, "_created"), f"pass {p} zarr creation")
+                cur = zarr.open_group(cur_path, mode="r+")["0"]
 
         # model.aux (e.g. affinity): on the FINAL pass only (most-settled prev → best, deliverable-consistent),
         # create a 4-D (channels,Z,Y,X) uint8 zarr and let run_pass_blend fill it from the identity forward.
@@ -711,17 +752,33 @@ def run_inference(source, out_prefix, *, model_type="nnunet-jacobi", model=None,
             print(f"[engine] pass {p}: ALSO emitting {aux_spec.name} ({aux_spec.channels} ch, uint8) -> {aux_path}", flush=True)
 
         pass_variants = tta_all if p in tta_set else [((), None)]   # TTA only on the selected passes
+        mesh_sink = mesh_writer = shard_path = None                  # per-worker .asv shard (this pid)
+        if want_mesh:
+            from ..meshes.asv import AsvWriter
+            from ..meshes.extract import MeshSink
+            shard_path = f"{out_prefix}_meshes.{os.getpid()}.asv"
+            mesh_writer = AsvWriter(shard_path, frame=mesh_frame, voxel_um=l0_voxel, grid_step_um=30.0, overwrite=True)
+            mesh_sink = MeshSink(mesh_writer, downsample=ds_level)
+            if multi:
+                open(os.path.join(donedir, f"_meshshard_{os.getpid()}.active"), "w").close()
+            print(f"[engine] pass {p}: writing mesh shard -> {shard_path}", flush=True)
         if blend:
             run_pass_blend(m, vol, prev_arr, cur, region_full, offset, P, S, Tt, device, air=air,
                            batch=batch, donedir=(donedir if multi else None), reclaim=reclaim,
                            claim_chunk=claim_chunk,
                            readahead=readahead, prefetch_workers=prefetch_workers, tta_variants=pass_variants,
-                           aux_arr=aux_arr, pass_idx=p, passes=passes, level=level)
+                           aux_arr=aux_arr, pass_idx=p, passes=passes, level=level, mesh_sink=mesh_sink, voxel_um=vx,
+                           out_shape=shape)
         else:
             run_pass(m, vol, prev_arr, cur, region_full, offset, P, device, air=air, batch=batch, nb=nb,
                      donedir=(donedir if multi else None), reclaim=reclaim, claim_chunk=claim_chunk,
                      readahead=readahead, prefetch_workers=prefetch_workers, tta_variants=pass_variants,
-                     pass_idx=p, passes=passes, level=level)
+                     pass_idx=p, passes=passes, level=level, mesh_sink=mesh_sink, voxel_um=vx, out_shape=shape)
+        if want_mesh:
+            info = mesh_writer.close()
+            print(f"[engine] pass {p}: mesh shard done ({info['sheet_count']} sheets, {info['vert_count']} verts)", flush=True)
+            if multi:
+                open(os.path.join(donedir, f"_meshshard_{os.getpid()}.done"), "w").close()
 
         # ---- pass p compute done. Multi: BARRIER (also the propagation guarantee — it polls until every L0 block
         # .done is VISIBLE, so L0 is readable cross-node by then). Write ``_complete`` (resume marker) at once — the
@@ -770,7 +827,7 @@ def run_inference(source, out_prefix, *, model_type="nnunet-jacobi", model=None,
             print(f"[jacobi] pass {p}: barrier — waiting for all {nbk} {'tiles' if blend else 'blocks'} .done", flush=True)
             CQ.wait_all_done(donedir, nbk, what=f"pass {p}")
             if leader:
-                if (p in finalise_set) or (s3_prefix and p in upload_set):   # decouple: BOUND to 1 in-flight, then spawn
+                if want_surf and ((p in finalise_set) or (s3_prefix and p in upload_set)):  # decouple: BOUND to 1 in-flight
                     for q in sorted(k for k in fin_threads if k < p):  # (no unfinalised-buffer overwrite: a still-
                         fin_threads.pop(q).join()                      #  running finalise/upload's pass is never pruned/reused)
                     t = threading.Thread(target=_finalize_upload, name=f"finalise-p{p}"); t.start()
@@ -778,14 +835,46 @@ def run_inference(source, out_prefix, *, model_type="nnunet-jacobi", model=None,
                 open(complete, "w").close()                            # pass L0 done → resume marker (instant)
             print(f"[jacobi] pass {p}: barrier cleared ({'leader' if leader else 'follower'} → pass {p + 1})", flush=True)
         else:
-            _finalize_upload(); open(complete, "w").close()            # single instance: inline
+            if want_surf:
+                _finalize_upload()                                     # single instance: inline
+            open(complete, "w").close()
 
-        if not keep_buffers and p >= 1 and prev_path is not None and (leader or not multi):
+        if want_mesh and (leader or not multi):                       # leader merges per-worker shards -> one .asv
+            import glob
+            import time as _time
+            from ..meshes.asv import merge_asv
+            final = f"{out_prefix}_meshes.asv"
+            if multi:                                                 # wait until every active shard has closed
+                for _ in range(1800):
+                    act = len(glob.glob(os.path.join(donedir, "_meshshard_*.active")))
+                    dn = len(glob.glob(os.path.join(donedir, "_meshshard_*.done")))
+                    if act >= 1 and dn >= act:
+                        break
+                    _time.sleep(1.0)
+            shards = sorted(s for s in glob.glob(f"{out_prefix}_meshes.*.asv") if s != final)
+            if shards:
+                res = merge_asv(shards, final, frame=mesh_frame, voxel_um=l0_voxel, grid_step_um=30.0, overwrite=True)
+                print(f"[engine] merged {len(shards)} mesh shard(s) -> {final} ({res['sheet_count']} sheets)", flush=True)
+                for s in shards:
+                    try:
+                        os.remove(s)
+                    except OSError:
+                        pass
+                if mesh_store == "upload" and s3_prefix:
+                    uri = f"{s3_prefix.rstrip('/')}/meshes.asv"
+                    try:
+                        NI.upload_file_to_s3(final, uri)
+                        print(f"[engine] MESHES ON S3 — {NI.s3_to_https(uri)}", flush=True)
+                    except Exception as e:
+                        print(f"[engine] mesh upload FAILED: {e}", flush=True)
+
+        if want_surf and not keep_buffers and p >= 1 and prev_path is not None and (leader or not multi):
             import shutil                                              # p-1's finalize already joined above (bound=1)
             shutil.rmtree(prev_path, ignore_errors=True)
             shutil.rmtree(prev_path + ".done", ignore_errors=True)
-        prev_arr = zarr.open_group(cur_path, mode="r")["0"]            # next pass reads this pass's L0 (done @ barrier)
-        prev_path = cur_path
+        if want_surf:
+            prev_arr = zarr.open_group(cur_path, mode="r")["0"]        # next pass reads this pass's L0 (done @ barrier)
+            prev_path = cur_path
 
     for pp, t in sorted(fin_threads.items()):                          # leader: finish the last passes' finalize+upload
         print(f"[jacobi] waiting on background finalize/upload for pass {pp}", flush=True)

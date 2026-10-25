@@ -288,6 +288,17 @@ def upload_zarr_to_s3(local_dir, s3_uri, region="eu-west-1", workers=2048, incre
     _s5cmd_stream(["--numworkers", str(workers), op, src, dst], env, total=total, label=op)
 
 
+def upload_file_to_s3(local_file, s3_uri, region="eu-west-1"):
+    """Upload a SINGLE file (e.g. a merged ``.asv`` sheet store) to ``s3_uri`` with ``s5cmd cp`` (creds from env).
+    Raises on failure (never silent). Unlike :func:`upload_zarr_to_s3` this is one object, not a tree."""
+    if _s5cmd_bin() is None:
+        raise RuntimeError("s5cmd not found — install the [infer] extra before using --s3-prefix")
+    env = os.environ.copy()
+    env.setdefault("AWS_REGION", region)
+    print(f"[upload] s5cmd cp {local_file} -> {s3_uri}", flush=True)
+    _s5cmd_stream(["cp", local_file, s3_uri], env, total=1, label="asv")
+
+
 def upload_pyramid_levels_to_s3(local_dir, s3_uri, region="eu-west-1", workers=2048):
     """Upload ONLY the pyramid levels (1..N) + the rewritten multiscales ``.zattrs`` to S3, via targeted
     ``s5cmd cp`` — NOT a whole-tree ``sync``. Use this after ``finalize_pyramid`` when L0 is ALREADY on S3

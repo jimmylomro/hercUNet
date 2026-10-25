@@ -255,9 +255,16 @@ def _add_infer_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--finalise", default="last", metavar="last|all|no|0",
                    help="which passes get an OME-Zarr pyramid built ('last' default, 'no' = skip, or an index list)")
     p.add_argument("--s3-prefix", default=None, dest="s3_prefix", metavar="s3://…",
-                   help="upload finished passes to this S3 prefix with s5cmd (AWS creds in env; write-preflighted)")
-    p.add_argument("--upload", default="last", metavar="last|all|no|0",
-                   help="which passes to upload to --s3-prefix (default last; ignored without --s3-prefix)")
+                   help="upload destination S3 prefix for s5cmd (AWS creds in env; write-preflighted). WHAT uploads "
+                        "is set by --surf/--mesh = 'upload'.")
+    p.add_argument("--surf", default="local", choices=("off", "local", "upload"),
+                   help="surface volume: off (not written) | local ({out}_pass0.zarr) | upload (+ to --s3-prefix). "
+                        "Blended-ness is --overlap (0 = unblended/disjoint). Default local.")
+    p.add_argument("--mesh", default="local", choices=("off", "local", "upload"),
+                   help="per-window sheet meshes as one {out}_meshes.asv: off | local | upload (+ to --s3-prefix). "
+                        "Default local; loads the instance head automatically when not off.")
+    p.add_argument("--mesh-fit-iters", dest="mesh_fit_iters", type=int, default=40, metavar="N",
+                   help="field sheet-fit iterations per window (default 40; the fast KNN-free fit)")
     p.add_argument("--resume", action="store_true",
                    help="continue an interrupted run: skip _complete passes + re-queue tiles orphaned by killed workers")
     p.add_argument("--keep-buffers", action="store_true", dest="keep_buffers",
