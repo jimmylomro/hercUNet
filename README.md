@@ -83,11 +83,11 @@ A self-refining, growing sheet-detection U-Net: a stock, pinned `nnunetv2==2.8.1
 PHerc1447 from the open-data bucket, and writes an OME-Zarr you can open in VC3D (needs an NVIDIA GPU):
 
 ```bash
-pipenv install ".[infer]"                        # or in a venv: pip install ".[infer]"
+pipenv install ".[infer]"                               # or in a venv: pip install ".[infer]"
 pipenv run hercunet infer single-instance PHerc1447 \   # SOURCE: scroll id, or an s3://|https://|file:// .zarr
   --model-hf jimmylomro/hercunet-v0 \
   --region 10889:11401,2848:3360,3915:4427 \
-  --out ./infer-demo --passes 3                  # -> ./infer-demo_pass2.zarr (the deliverable)
+  --out ./infer-demo --passes 3                         # -> ./infer-demo_pass2.zarr (the deliverable)
 ```
 
 → Guide: **[docs/training.md](docs/training.md)** (train) · **[docs/infer.md](docs/infer.md)** (inference) · Methodology: **[submission/writeup/hercunet.md](submission/writeup/hercunet.md)**
@@ -113,7 +113,9 @@ HercuViT's output as geometry: the per-sheet instance masks fit to sheet meshes,
 > **This below is the same window as the HercuLabel above. Yes, HercuViT split the yellow-ish/green + orange sheet into two,
 > but the HercuLabel took 4 minutes to compute and HercuViT did it in 1/3rd of a second.**
 
-**You can get this result with as little as** (the same `11714,3293,3648` window as the HercuLabels demo above; assumes the trained model is on 🤗 at `jimmylomro/hercuvit-v0`):
+![HercuViT fitted sheet meshes for a single 192³ window of PHerc1447 — the per-sheet surfaces from the `.asv`, coloured per sheet and lightly shaded.](submission/images/hercuvit-sheet-meshes.jpg)
+
+**You can get the above result with as little as**:
 
 ```bash
 pipenv install ".[hercuvit]"                              # or in a venv: pip install ".[hercuvit]"
@@ -123,8 +125,6 @@ pipenv run hercuvit infer single-instance PHerc1447 \     # SOURCE: scroll id, o
   --mesh local --surf off --overlap 0 \
   --out ./hercuvit-demo                                   # -> ./hercuvit-demo_meshes.asv (the sheet store)
 ```
-
-![HercuViT fitted sheet meshes for a single 192³ window of PHerc1447 — the per-sheet surfaces from the `.asv`, coloured per sheet and lightly shaded.](submission/images/hercuvit-sheet-meshes.jpg)
 
 Fitted per-window sheet meshes, read straight from the compact `.asv` sheet store and coloured per sheet. Each window segments and labels its sheets independently, so the per-sheet colours do not carry across window boundaries — yet the sheet *surfaces* line up across them for the most part: the per-window geometry already agrees, and only the identities need reconciling (cross-window stitching, future work).
 
