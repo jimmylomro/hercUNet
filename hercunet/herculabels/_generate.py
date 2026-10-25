@@ -46,8 +46,7 @@ def enable_determinism(strict: bool = True) -> None:
 
 def _refit(ml, plab_new, labels, dev):
     pl = np.where(np.isin(plab_new, list(labels)), plab_new, -1)
-    return fit_sheet_meshes(ml["pts"], pl, ml.get("bced"), None, ml["vu"], normals=ml["normals"],
-                            jac=ml["jac"], step_um=30.0, device=dev, verbose=False)
+    return fit_sheet_meshes(ml["pts"], pl, ml["normals"], ml["jac"], ml["vu"], step_um=30.0, device=dev, verbose=False)
 
 
 def meshlet_from_context(C, ulab):
@@ -157,8 +156,7 @@ def generate(args, brick: dict, progress=None):
         if C.get("pos_nbr") is not None:                                # per-point positive/negative sample tables
             progress("samples", {"pos_nbr": C["pos_nbr"], "neg_nbr": C["neg_nbr"]})  # viewer 'samples' overlay (live only)
 
-    base_meshes = fit_sheet_meshes(pts, plab, C["bced"], None, vu, normals=C["normals"], jac=C["jac"],
-                                   step_um=30.0, device=dev, verbose=False)
+    base_meshes = fit_sheet_meshes(pts, plab, C["normals"], C["jac"], vu, step_um=30.0, device=dev, verbose=False)
     if not base_meshes:
         print(f"  no fittable sheet in this window ({time.time()-t0:.0f}s) — skipping", flush=True)
         return None

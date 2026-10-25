@@ -103,8 +103,7 @@ def split_sheet(ctx, cid, progress=None):
     if progress is not None:
         progress("split_status", "updating sheet meshes…")
     pl = np.where(np.isin(new_plab, (cid, new_id)), new_plab, -1)     # refit only the two halves
-    meshes = fit_sheet_meshes(ctx["pts"], pl, None, None, ctx["vu"],
-                              normals=ctx["normals"], jac=ctx["jac"], step_um=30.0,
+    meshes = fit_sheet_meshes(ctx["pts"], pl, ctx["normals"], ctx["jac"], ctx["vu"], step_um=30.0,
                               device=ctx.get("device", "cpu"), verbose=False)
     ctx["plab"] = new_plab
     ctx["ulab"] = aug.per_unit_labels(ctx["sid"], new_plab, n_units=len(ctx["E"]))
@@ -124,8 +123,7 @@ def merge_sheets(ctx, cid_a, cid_b, progress=None):
     if progress is not None:
         progress("split_status", "updating sheet meshes…")
     pl = np.where(new_plab == keep, keep, -1)                         # refit only the merged sheet
-    meshes = fit_sheet_meshes(ctx["pts"], pl, None, None, ctx["vu"],
-                              normals=ctx["normals"], jac=ctx["jac"], step_um=30.0,
+    meshes = fit_sheet_meshes(ctx["pts"], pl, ctx["normals"], ctx["jac"], ctx["vu"], step_um=30.0,
                               device=ctx.get("device", "cpu"), verbose=False)
     ctx["plab"] = new_plab
     ctx["ulab"] = aug.per_unit_labels(ctx["sid"], new_plab, n_units=len(ctx["E"]))
