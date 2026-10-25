@@ -105,7 +105,7 @@ pipenv run hercunet infer single-instance PHerc1447 \   # SOURCE: scroll id, or 
 
 ## 🧠 HercuViT — sheet segmentation on a frozen µCT encoder
 
-🧠 **Model:** [`jimmylomro/hercuvit_v0`](https://huggingface.co/jimmylomro/hercuvit_v0) on 🤗 (`hercuvit infer … --model-hf jimmylomro/hercuvit_v0`).
+🧠 **Model:** [`jimmylomro/hercuvit-v0`](https://huggingface.co/jimmylomro/hercuvit-v0) on 🤗 (`hercuvit infer … --model-hf jimmylomro/hercuvit-v0`).
 
 Sheet **instance**-segmentation read straight out of a **frozen** self-supervised Dinovol µCT encoder: a lightweight
 CNN pixel-decoder learns a voxel-resolution upsample of the frozen tokens, a **decoupled** surface head answers
@@ -127,7 +127,7 @@ HercuViT's output as geometry: the per-sheet instance masks fit to sheet meshes,
 ```bash
 pipenv install ".[hercuvit]"                              # or in a venv: pip install ".[hercuvit]"
 pipenv run hercuvit infer single-instance PHerc1447 \     # SOURCE: scroll id, or an s3://|https://|file:// .zarr
-  --model-hf jimmylomro/hercuvit_v0 \
+  --model-hf jimmylomro/hercuvit-v0 \
   --region 11618:11810,3197:3389,3552:3744 \
   --mesh local --surf off --overlap 0 \
   --out ./hercuvit-demo                                   # -> ./hercuvit-demo_meshes.asv (the sheet store)
