@@ -28,6 +28,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .resblocks import StackedResidualBlocks
+from ..dinovol.patch_encode_decode import LayerNormNd
 
 
 class DecoupledPixelEncoder(nn.Module):
@@ -71,6 +72,17 @@ class DecoupledPixelEncoder(nn.Module):
         self.up2 = nn.ConvTranspose3d(s1, s0, kernel_size=2, stride=2, bias=True)                # 1/2→1/1
         self.block2 = StackedResidualBlocks(nb, s0 + s0, md)                                     # cat s0 → mask_dim (U1)
 
+        # Channel-wise LayerNorm after EACH deconv (the author's PatchDecode discipline: transpconv→LayerNormNd) and
+        # on U1. The resblocks' InstanceNorm3d normalises each channel over space — it does NOT bound a voxel's
+        # feature-VECTOR norm, which is exactly what the ownership/DN dot readout reads. Without these, the bare
+        # deconvs let U1 (and mask_embed) run away under the softmax-CE readout pressure once the encoder unfreezes
+        # (see the v3 divergence analysis: dot → 1e10). LayerNormNd bounds the per-voxel norm for every consumer
+        # (surface head, attention memory, and the readout).
+        self.ln0 = LayerNormNd(s2)
+        self.ln1 = LayerNormNd(s1)
+        self.ln2 = LayerNormNd(s0)
+        self.ln_u1 = LayerNormNd(md)
+
         # DECOUPLED surface head (= objectness): 1×1 conv straight off U1 (author's seg_layers[-1])
         self.surf_head = nn.Conv3d(md, int(n_sem_classes), kernel_size=1, bias=True)
         # NO pyramid projection: the memory keeps U1's mask_dim width (the decoder runs natively at mask_dim).
@@ -87,9 +99,9 @@ class DecoupledPixelEncoder(nn.Module):
         ``mask_features`` in the decoder; the decoder ATTENDS only to ``memory`` (≤1/8), at ``mask_dim`` width.
         """
         s0, s1, s2 = skips
-        x4 = self.block0(torch.cat([self.up0(tokens_grid), s2], dim=1))   # 128 @ 32³  (CONCAT s2)
-        x2 = self.block1(torch.cat([self.up1(x4), s1], dim=1))           # 48  @ 64³  (CONCAT s1)
-        u1 = self.block2(torch.cat([self.up2(x2), s0], dim=1))           # mask_dim @ 128³ = mask_features (CONCAT s0)
+        x4 = self.block0(torch.cat([self.ln0(self.up0(tokens_grid)), s2], dim=1))   # 128 @ 32³  (LN deconv, CONCAT s2)
+        x2 = self.block1(torch.cat([self.ln1(self.up1(x4)), s1], dim=1))           # 48  @ 64³  (LN deconv, CONCAT s1)
+        u1 = self.ln_u1(self.block2(torch.cat([self.ln2(self.up2(x2)), s0], dim=1)))  # mask_dim @ 128³ = U1 (LN deconv + LN U1)
 
         sem_logits = [self.surf_head(u1)]                               # decoupled 2-class surface @1/1 (objectness)
         if self.deep_supervision:

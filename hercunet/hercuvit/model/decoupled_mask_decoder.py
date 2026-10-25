@@ -46,13 +46,17 @@ class DecoupledMaskDecoder(nn.Module):
 
         self.layers = nn.ModuleList([MaskDecoderLayer(dim, n_heads) for _ in range(n_layers)])
         self.mask_embed = _mlp(dim, dim, mask_dim, n=3)                 # dim→dim→dim→mask_dim
+        self.me_norm = nn.LayerNorm(mask_dim)                           # bound the query operand of the readout dot:
+        # the mask_embed MLP output was unbounded (only its input q is LayerNorm'd), so under the softmax-CE readout
+        # pressure its norm ran away (→1e5) alongside U1. With U1 LayerNorm'd in the pixel encoder and mask_embed
+        # LayerNorm'd here, mask_logits = dot(me, U1) land in ~±mask_dim before the softmax/sigmoid that already follow.
         self.decoder_norm = nn.LayerNorm(dim)
 
     # ---- helpers -------------------------------------------------------------------------------------------
     def _predict(self, q, mask_features):
         """Mask embedding (grad) + dense 1/1 mask LOGITS (DETACHED, kept in the autocast dtype — attention-mask use
         only; the loss recomputes the masks from ``mask_embed``). Plain dot: NO L2-norm, NO temperature."""
-        me = self.mask_embed(self.decoder_norm(q))                     # (B,Q,mask_dim)
+        me = self.me_norm(self.mask_embed(self.decoder_norm(q)))       # (B,Q,mask_dim) — LayerNorm'd (bounds readout)
         mlog = mask_logits_from_embed(me.detach(), mask_features.detach())   # (B,Q,D,H,W) plain dot (bf16 under autocast)
         return me, mlog
 
