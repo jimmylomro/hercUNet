@@ -2,8 +2,10 @@
 so it runs on the SAME engine as the nnU-Net/Jacobi model (streaming, tiling, Gaussian blend, claim-queue, leader
 finalise + S3). Single-pass (no Jacobi prev feedback), 1-channel Dinovol-normalised CT, surface-only output.
 
-The blend is on the SURFACE (``sem_logits[:,1]-sem_logits[:,0]`` → Gaussian-blend → sigmoid); per-sheet masks are NOT
-emitted here (the decoupled instance head is built off at load, ``with_instance=False``).
+The blend is on the SURFACE (``sem_logits[:,1]-sem_logits[:,0]`` → Gaussian-blend → sigmoid). Per-sheet masks are not
+blended; when mesh output is requested (``with_meshes``) the instance head is loaded on and each window's sheet
+*meshes* are extracted from the SAME forward (no second encoder pass) via :func:`hercunet.meshes.extract.extract_window_sheets`
+and handed to the engine per window (``emits_meshes`` / :meth:`forward_meshes`) to write into the per-worker .asv.
 """
 from __future__ import annotations
 
@@ -17,18 +19,26 @@ from ...infer.model import InferenceModel, OutputSpec
 class HercuvitSurfaceModel(InferenceModel):
     name = "hercuvit-surface"
 
-    def __init__(self, net, p_size, *, overlap=0.25):
+    def __init__(self, net, p_size, *, overlap=0.25, with_meshes=False, mesh_thresh=0.4, mesh_sigma=3.0,
+                 mesh_fit_iters=40, mesh_fit_lr=1.0, mesh_fit_lam=0.3, mesh_min_pts=400, mesh_step_um=30.0):
         self.net = net
         self._p = int(p_size)
         self._overlap = float(overlap)
+        self.emits_meshes = bool(with_meshes)
+        self._mesh = dict(thresh=float(mesh_thresh), sigma=float(mesh_sigma), iters=int(mesh_fit_iters),
+                          lr=float(mesh_fit_lr), lam=float(mesh_fit_lam), min_pts=int(mesh_min_pts),
+                          step_um=float(mesh_step_um))
 
     @classmethod
     def load(cls, *, model=None, model_hf=None, ckpt="checkpoint_best.pth", device="cuda",
-             attention_backend=None, overlap=0.25, **_):
+             attention_backend=None, overlap=0.25, with_meshes=False, mesh_thresh=0.4, mesh_sigma=3.0,
+             mesh_fit_iters=40, mesh_fit_lr=1.0, mesh_fit_lam=0.3, mesh_min_pts=400, mesh_step_um=30.0, **_):
         from .loader import load_hercuvit
         net, recipe, _cfg = load_hercuvit(model, model_hf=model_hf, ckpt=ckpt, device=device,
-                                          attention_backend=attention_backend, with_instance=False)
-        return cls(net, int(recipe.window), overlap=overlap)
+                                          attention_backend=attention_backend, with_instance=bool(with_meshes))
+        return cls(net, int(recipe.window), overlap=overlap, with_meshes=with_meshes, mesh_thresh=mesh_thresh,
+                   mesh_sigma=mesh_sigma, mesh_fit_iters=mesh_fit_iters, mesh_fit_lr=mesh_fit_lr,
+                   mesh_fit_lam=mesh_fit_lam, mesh_min_pts=mesh_min_pts, mesh_step_um=mesh_step_um)
 
     @property
     def patch_size(self) -> int:
@@ -61,3 +71,26 @@ class HercuvitSurfaceModel(InferenceModel):
         """``[B,1,P,P,P]`` → ``(sem_logits[B,2,P,P,P], None)`` — the decoupled surface head; no aux."""
         out = self.net(xb_base, run_instance=False)
         return out["sem_logits"][0], None
+
+    def forward_meshes(self, xb_base, voxel_um):
+        """ONE ``run_instance`` forward → ``(sem_logits[B,2,P,P,P], meshes)`` where ``meshes`` is a list of length B,
+        each the window's ``{sheet_id: mesh}`` dict (verts in window-local voxel z,y,x). ``voxel_um`` is the engine's
+        working-level voxel size (so the fit's 30 µm grid maps to the right pixel step). No second encoder pass."""
+        import torch
+        from ..model.decoder_common import mask_logits_from_embed
+        from ...meshes.extract import extract_window_sheets
+        out = self.net(xb_base, run_instance=True)
+        sem = out["sem_logits"]                                               # deep-sup LIST: [0] = full-res
+        sem = (sem[0] if isinstance(sem, (list, tuple)) else sem)            # [B,2,P,P,P]
+        mf = out["mask_features"]                                             # tensor [B,C,P,P,P] (or list)
+        mf = (mf[0] if isinstance(mf, (list, tuple)) else mf).float()        # [B,C,P,P,P]
+        me = out["instance"]["layers"][-1]["mask_embed"].float()             # [B,Q,C]
+        meshes = []
+        for b in range(xb_base.shape[0]):
+            owner = mask_logits_from_embed(me[b:b + 1], mf[b:b + 1])[0].argmax(0)          # (P,P,P) ids
+            gate = torch.softmax(sem[b].float(), 0)[1] > self._mesh["thresh"]              # (P,P,P) bool
+            meshes.append(extract_window_sheets(
+                owner, gate, voxel_um=float(voxel_um), sigma=self._mesh["sigma"], min_pts=self._mesh["min_pts"],
+                step_um=self._mesh["step_um"], iters=self._mesh["iters"], lr=self._mesh["lr"], lam=self._mesh["lam"],
+                device=owner.device.type))
+        return sem, meshes
