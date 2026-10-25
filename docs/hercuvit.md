@@ -247,6 +247,53 @@ rest (see Part II → "Model-agnostic inference engine").
   run is **mesh-only** (no surface volume; meshes run a strided window grid at `--overlap`, each window once).
   Meshes are **per-window** — **no cross-window sheet-ID stitching yet** (design §10/§12 → future; see the writeup §8.4).
 
+### 9.1 The `.asv` sheet store — format & how to read it
+
+**Automated Sheet Volumes (`.asv`, `hercunet/meshes/asv.py`)** are HercuViT's mesh output: a single **read-only
+SQLite** file holding the fitted sheet meshes, modelled on VC3D's fibre `.afv` (a metadata table + a spatial rtree +
+native-L0 coordinates) but carrying sheet *meshes*, not fibre polylines. One file per run (`{out}_meshes.asv`),
+written as per-worker shards and merged by the leader.
+
+**Schema (format version 1):**
+- `metadata(key TEXT PRIMARY KEY, value TEXT)` — `uuid`, `format_version`, `complete`, `codec` (`zstd`/`zlib`),
+  `frame` (the coordinate-space JSON, e.g. `{"vc_open_data_coordinate_space": "…"}`), `voxel_um` (the **L0** voxel
+  size), `grid_step_um` (30), `sheet_count`, `vert_count`.
+- `sheets(id, name, window, family, nu, nv, vert_count, min_x..max_z REAL, payload BLOB, annotation)` — one row per
+  sheet instance; `window` is the source-window origin (`z…_y…_x…`), the `min_*/max_*` bbox columns are **global L0**,
+  `payload` is the compressed geometry blob.
+- `sheet_bounds` — an **rtree** over the per-sheet bbox, for fast bounding-box (spatial) queries.
+
+**Per-sheet payload — compact & grid-implicit.** The triangulation is **not stored**: a sheet is a regular `nu×nv`
+grid with a footprint mask, and the triangles are reconstructed *exactly* from the footprint (two per occupied quad,
+via `hercunet.meshes.fit.grid_triangles`). The blob is
+`codec_byte + compress( "ASV1" + nu,nv (u16) + bbox lo/hi (3×f32 each) + packbits(footprint) + verts (u16) )`, where
+the footprint-only vertices are **quantised to uint16 inside the sheet's own bbox** (sub-0.01 µm error, far below the
+30 µm grid). The leading **codec byte makes every blob self-describing** (zstd when available, else zlib), so a file
+written on one box reads on another regardless of what is installed. A mid-size sheet packs to ~12 kB; a whole
+scroll's sheet set is on the order of ~20 GB, random-access by bbox through the rtree.
+
+**Coordinates.** Vertices are **global native-L0 voxel XYZ** (window-local verts + window origin, scaled by the
+working level's L0 downsample), so sheets from every window live in one space and reconstruct exactly in the volume.
+
+**Reading it — the Python API (`hercunet.meshes.asv.AsvReader`):**
+```python
+from hercunet.meshes.asv import AsvReader
+r = AsvReader("run_meshes.asv")
+r.metadata                              # {'uuid':…, 'voxel_um':'8.64', 'sheet_count':…, 'frame':…, 'codec':…}
+len(r)                                  # number of sheets
+r.ids_in_box((x0, y0, z0), (x1, y1, z1))   # sheet ids whose bbox intersects this L0 box (rtree)
+s = r.sheet(sid)                        # {'verts' (nvert,3 f32 global-L0 XYZ), 'tris' (ntri,3 into verts),
+                                        #  'foot' (nu,nv bool), 'nu','nv','name','window','family','annotation'}
+for s in r:                             # iterate every sheet (verts + reconstructed tris)
+    ...
+r.close()
+```
+`pack_sheet` / `unpack_sheet` are the blob codec; `merge_asv(shards, out, …)` combines per-worker shards (the leader
+step). Because it is plain SQLite, you can also open it with the `sqlite3` CLI or any SQLite client —
+`SELECT id, window, nu, nv, vert_count, min_z, max_z FROM sheets;` — and the README's 3-D figures are just
+`AsvReader` → plotly `Mesh3d` (verts + reconstructed tris); the throwaway renderer used for them is in the submission
+scratchpad.
+
 ---
 
 ## 10. CLI (`hercunet/hercuvit/cli.py`) — parallel to `hercunet`
@@ -457,6 +504,15 @@ to `model/decoder_common.py` (above). What remains on the build path:
   stitching = future. The hercuvit CLI (`infer single-instance` / `infer multi-instance`) carries the full fan-out
   flag set (`--gpus`, `--pre-sync-source`, `--s3-prefix`, `--surf`/`--mesh`/`--mesh-fit-iters`, `--overlap`,
   `--resume`, `--keep-buffers`, `--claim-chunk`, `--tta`, `--leader`, …).
+- `meshes/` — the sheet-mesh subsystem (top-level, shared with herculabels' geometry; no product-code deps).
+  `fit.py` = the herculabels **slab/KNN** fit (`fit_sheet_meshes`, `init_sheet_grid`, `grid_triangles`) — label
+  quality, **untouched**. `field_fit.py` = the fast **KNN-free field fit** used at inference (`fit_sheets_field`:
+  per-sheet blurred-mask field + explicit `grid_sample` gradient-ascent along the grid normal + Laplacian; ~half-a-
+  voxel vs the slab fit, O(verts), no autograd — see writeup §8.2). `extract.py` = `extract_window_sheets`
+  (owner+gate → `{sid: mesh}`) + `MeshSink` (window-local z,y,x → global-L0 XYZ → `AsvWriter`). `asv.py` = the
+  `.asv` SQLite store — `AsvWriter` (streams sheets, atomic publish), `AsvReader` (metadata / rtree bbox query /
+  per-sheet geometry), `pack_sheet`/`unpack_sheet` (self-describing codec), `merge_asv` (shard merge). See §9.1.
+  Tests: `tests/meshes/` (asv round-trip + codecs + merge + rtree; field-fit on synthetic planes with the drops).
 
 ### Model-agnostic inference engine (`hercunet/infer/`, migrated from the Jacobi engine)
 
