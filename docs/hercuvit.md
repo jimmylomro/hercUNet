@@ -233,13 +233,19 @@ HercuViT and nnU-Net/Jacobi run on **one** engine (`engine.run_inference`) via t
 S3 machinery. A model supplies only load + `norm_ct` + `base_input` + `forward` + output specs; the engine owns the
 rest (see Part II → "Model-agnostic inference engine").
 
-- HercuViT = `HercuvitSurfaceModel` (`hercunet/hercuvit/infer/model.py`): single-pass, 1-channel, surface blended on
-  the logit margin; **masks not emitted**.
+- HercuViT = `HercuvitSurfaceModel` (`hercunet/hercuvit/infer/model.py`): single-pass, 1-channel. It emits the
+  **surface** (blended on the logit margin) and/or **per-window sheet meshes** — ONE `run_instance` forward yields
+  both the surface and the argmax-query ownership; the ownership is fit to sheet meshes (fast KNN-free field fit,
+  `meshes/field_fit.py`) and written to a `.asv` sheet store (`meshes/asv.py`).
 - `hercuvit infer single-instance` (one box, fans across local GPUs, CPU fallback) and `hercuvit infer multi-instance`
   (across pods, `--leader` on one) drive the SAME fan-out as `hercunet infer` (`run.run_fanout`): per-GPU/pod workers
   on the shared `.done` claim-queue, leader-automatic pyramid finalise + S3 upload, pre-sync, region/full-volume, TTA.
-- v1 output: full-volume **semantic sheet-surface** (`{out}_pass0.zarr`). **No cross-tile sheet-ID stitching** in v1
-  (design §10/§12 → future).
+  Meshes are written per-worker to `.asv` shards and the leader merges them into `{out}_meshes.asv`.
+- **Output selection:** `--surf off|local|upload` and `--mesh off|local|upload` (both default `local`) choose the
+  surface volume `{out}_pass0.zarr` (+pyramid) and/or the sheet store `{out}_meshes.asv`, each optionally uploaded to
+  `--s3-prefix` (error if `--s3-prefix` is set but neither is `upload`, or if both are `off`). With `--surf off` the
+  run is **mesh-only** (no surface volume; meshes run a strided window grid at `--overlap`, each window once).
+  Meshes are **per-window** — **no cross-window sheet-ID stitching yet** (design §10/§12 → future; see the writeup §8.4).
 
 ---
 
@@ -264,7 +270,12 @@ hercuvit train chain  --encoder-hf [REPO]          # bare = raw Dinovol 288 (scr
 hercuvit train fit    … [--continue]               # same flags; --continue resumes {out}/checkpoint_latest.pth
 hercuvit train prep-shard …                        # (internal) one shard of the local window pre-extraction
 hercuvit distill      --teacher … --student small|tiny|nano --out …   # (lead-owned) distil a slim encoder
-hercuvit infer single-instance SOURCE  --model DIR|--model-hf [REPO]  --out PREFIX  [--region … --level L]
+hercuvit infer single-instance SOURCE  --model DIR|--model-hf [REPO]  --out PREFIX
+                      [--surf off|local|upload] [--mesh off|local|upload]   # what to produce/upload (default local/local)
+                      [--mesh-fit-iters N]          # field sheet-fit iters per window (default 40)
+                      [--overlap F]                 # mesh window overlap (0 = disjoint; small = a tiny per-face overlap)
+                      [--region z0:z1,y0:y1,x0:x1 --level L] [--s3-prefix s3://… --pre-sync-source DIR]
+hercuvit infer multi-instance  SOURCE  … --leader                    # same flags; --leader on exactly one pod
 ```
 
 Encoder source: `--encoder-hf [REPO]` (HF repo; bare = raw Dinovol 288) or `--encoder CKPT` (a local Dinovol
@@ -433,15 +444,19 @@ to `model/decoder_common.py` (above). What remains on the build path:
   (no Dinovol ckpt needed, decoder/skip_channels threaded) and loads the trained weights; returns `(net, recipe,
   model_cfg)`. Instance-head keys are allowed to be "unexpected" when loading a full checkpoint into a semantic-only net.
 - `infer/model.py` — `HercuvitSurfaceModel(InferenceModel)`: the HercuViT plug-in for the shared engine. `load`
-  (via `load_hercuvit`, `with_instance=False`), `norm_ct` (`dinovol_normalise`), `base_input` (1-ch `[ct]`, prev
-  ignored), `forward` (`sem_logits[:,:2]`, no aux), `passes=1`. Registered as `"hercuvit-surface"`.
+  (via `load_hercuvit`; `with_instance=True` when meshes are requested), `norm_ct` (`dinovol_normalise`),
+  `base_input` (1-ch `[ct]`, prev ignored), `forward` (`sem_logits[:,:2]`, no aux), and — when `emits_meshes` —
+  `forward_meshes(xb, voxel_um)`: ONE `run_instance` forward returning the surface AND each window's `{sid: mesh}`
+  (owner argmax → `extract_window_sheets` → field fit, `meshes/field_fit.py`). `passes=1`. Registered `"hercuvit-surface"`.
 - `infer/infer.py` — `single_instance` / `multi_instance` drive the shared `run.run_fanout` with
   `model_type="hercuvit-surface"` (+ `model_import` so worker subprocesses register the model): one worker per local
   GPU on the `.done` claim-queue (single GPU / `--device cpu` → in-process), across pods with `--leader`. The engine
-  streams, tiles, Gaussian-blends the surface and writes `{out}_pass0.zarr` + pyramid; `_resolve_model` resolves the
-  checkpoint (local dir/.pth or HF snapshot) once in the parent. Per-tile masks / cross-tile stitching = future.
-  The hercuvit CLI (`infer single-instance` / `infer multi-instance`) carries the full fan-out flag set (`--gpus`,
-  `--pre-sync-source`, `--s3-prefix`/`--upload`, `--resume`, `--keep-buffers`, `--claim-chunk`, `--tta`, `--leader`, …).
+  streams, tiles, and writes the surface `{out}_pass0.zarr` (+pyramid) and/or the per-window sheet meshes
+  `{out}_meshes.asv` (per-worker shards → leader merge), per `--surf`/`--mesh`; `_resolve_model` resolves the
+  checkpoint (local dir/.pth or HF snapshot) once in the parent. Meshes are per-window; cross-window sheet-ID
+  stitching = future. The hercuvit CLI (`infer single-instance` / `infer multi-instance`) carries the full fan-out
+  flag set (`--gpus`, `--pre-sync-source`, `--s3-prefix`, `--surf`/`--mesh`/`--mesh-fit-iters`, `--overlap`,
+  `--resume`, `--keep-buffers`, `--claim-chunk`, `--tta`, `--leader`, …).
 
 ### Model-agnostic inference engine (`hercunet/infer/`, migrated from the Jacobi engine)
 

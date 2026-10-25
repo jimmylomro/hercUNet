@@ -521,6 +521,86 @@ bounded — the two properties the step-schedule + raw-dot-attention combination
 
 ---
 
+## 8. From per-window ownership to sheet meshes
+
+The decoder's output per window is dense: a per-voxel sheet-owner id — the argmax over queries of
+`dot(U1, mask_embed)` (§5) — gated by the surface head. For virtual unwrapping, though, the useful primitive is not
+a voxel mask but a **parametric surface** per sheet: a quad mesh whose grid coordinates give an intrinsic *(u,v)*
+parameterisation of the wrap. This section describes how HercuViT turns each window's ownership into fitted sheet
+meshes, and how they are stored. The fit runs **per window**, per sheet, on the GPU next to inference.
+
+### 8.1 A field-driven, autograd-free sheet fit
+
+For each sheet present in a window (an owner id with at least a few hundred gated voxels) we fit one quad-mesh grid
+to its medial surface, in three steps.
+
+**Grid initialisation.** A sheet's gated voxels form a thin, curved point cloud. Its PCA gives the in-plane *(u,v)*
+tangent (the two leading directions) and the across-sheet normal (the third); a regular grid at a fixed 30 µm
+spacing is laid over the *(u,v)* extent, each node's height seeded by the mean across-normal coordinate of the
+voxels binned to it, and a **footprint** — the occupied grid cells, morphologically closed and hole-filled —
+records which nodes are real, so the mesh covers only where the sheet is (holes included). This is a coarse,
+connectivity-only seed; the fit then moves the nodes freely in 3-D.
+
+**The data term is a per-sheet field, not a point cloud.** We do not fit the grid to the mask *points*; we fit it
+to a scalar **field** that peaks on the sheet's medial surface — the sheet's binary mask, Gaussian-blurred. The
+field is built **per sheet** (the blur of that sheet's mask alone), so the ridge a grid is pulled toward can never
+be contaminated by a neighbouring wrap a few voxels away — the same separation the oriented slab potential buys
+with per-point normals, obtained here for free by masking *before* blurring.
+
+**The fit is explicit gradient ascent — no autograd, no optimiser.** The field's spatial gradient is precomputed
+once (three finite-difference volumes). Then, for a handful of iterations, at every grid vertex: trilinearly
+`grid_sample` the field gradient at its current position; **project that gradient onto the vertex's local grid
+normal**, so the vertex moves *across* the sheet toward the ridge and never *along* it (no in-plane drift of the
+parameterisation); step the vertex by that amount; and apply a Laplacian smoothing over the grid. Every operation
+is a dense GPU tensor op — there is no *k*-nearest-neighbour search, no KD-tree, no CPU round-trip, and no backward
+pass. The triangulation is never handled explicitly: it is implicit in the grid + footprint (two triangles per
+occupied quad) and reconstructed on demand.
+
+### 8.2 Why not the label-quality fit
+
+HercUNet's *label* pipeline fits sheet meshes with a differentiable **slab-potential** objective minimised by Adam,
+whose data term at each vertex is a Gaussian over its *k* nearest mask points, oriented by their normals. That is
+the right tool for generating training labels — faithful and curvature-aware — but far too expensive at inference
+scale: its per-step cost is a `[vertices × k × 3]` tensor (k = 64) rebuilt every Adam iteration, a
+memory-bandwidth load of the **same order as the entire frozen-encoder forward** — absurd for a few-thousand-vertex
+grid. Profiling pinned the cost not on the KD-tree build, the point count, or the CPU↔GPU trips, but on the
+per-vertex KNN tensor itself: dropping *k* from 64 to 16 alone cut the fit ~4×.
+
+The field fit removes the KNN entirely — a `grid_sample` of a precomputed field is O(vertices) with a tiny
+constant, and the explicit solver carries no autograd graph or optimiser state. Against the slab fit over five
+held-out windows (identical sheet sets) the field-fit meshes agree to a **mean vertex displacement of about half a
+voxel** (≈ 4 µm at the 8.64 µm L0 voxel / 30 µm grid) — geometrically negligible, and well within the slab fit's
+own uncertainty. At inference the per-window fit is a small fraction of the ~0.4 s encoder forward, which now
+dominates, so adding meshes to a full-scroll surface run is a modest overhead rather than a second pass. The two
+fits are kept as separate code paths: the slab fit for label quality, the field fit for inference speed.
+
+### 8.3 Storage
+
+Sheets are written to a single compact store — **Automated Sheet Volumes (`.asv`)**, a read-only SQLite file
+modelled on VC3D's fibre `.afv` (a metadata table, an rtree spatial index, global native-L0 XYZ coordinates) but
+holding sheet *meshes* rather than fibre polylines. Two choices keep it small: the triangulation is **not stored**
+(reconstructed exactly from the grid footprint), and the footprint-only vertices are **quantised to uint16 within
+each sheet's bounding box** — a sub-0.01 µm error, far below the grid step. A mid-size sheet packs to ~12 kB
+(against ~70 kB as raw float vertices + int triangles), and a whole scroll's sheet set is on the order of ~20 GB,
+random-access by bounding box through the rtree. Inference writes one shard per worker; the run's leader merges them
+into a single `.asv`.
+
+### 8.4 Toward cross-window stitching (future work)
+
+Because the store is per-window, a sheet spanning several windows is, for now, several separate meshes; deciding
+which per-window sheets are the *same* physical wrap — cross-window stitching — is future work. §6 showed the decoder
+sharpens sheet identity into a near-perfect, essentially 2-dimensional **directional** code on the mask features —
+but that code is at present only guaranteed consistent *within* a window (the queries and their embedding space are
+learned per window, not aligned across windows). The natural next step is to train the model to **maintain embedding
+consistency across windows** — e.g. a contrastive/consistency objective tying the embeddings of the same sheet seen
+in overlapping windows. **When the model is trained to maintain that cross-window embedding consistency, we will be
+able to store the average per-sheet embedding in the `.asv`** alongside each sheet's geometry, and stitching then
+reduces to matching sheets by embedding similarity, gated by geometric proximity (a bounding-box query the rtree
+already serves). This is future work — the intended bridge from a per-window mesh store to assembled, scroll-spanning
+sheets.
+
+---
+
 ## References
 
 [1] Oquab, M., Darcet, T., Moutakanni, T., et al. (2024). *DINOv2: Learning Robust Visual Features without
