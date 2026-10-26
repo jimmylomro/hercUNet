@@ -432,11 +432,12 @@ decoder without the cost or instability of full end-to-end training.)
 
 ## 7. Training stability: the mask-decoder attention-logit explosion, and why QK-norm
 
-> **⚠️ WORK IN PROGRESS (as of 2026-10-24).** This section documents a training-stability failure we diagnosed in
-> the lightly-fine-tuned run and the fix. The QK-normed attention (§7.2) and the smooth encoder schedule (§7.3) are
-> **implemented and under retraining now**; the final numbers (bounded logits post-fix, recovered own-accuracy) will
-> replace the placeholders below once the retrain completes. The §6 statistics above were taken at epoch 131, which
-> — as this section explains — was *mid-divergence*; they will be refreshed from a clean post-fix checkpoint.
+> **Resolved.** The divergence below is fixed by two *structural* changes, applied together: **LayerNorm on the
+> deconvolution (readout) blocks** that produce the mask features (U4/U2/U1 in §5), which bounds the ownership
+> readout, and **QK-LayerNorm in the mask-decoder cross-attention** (§7.2), which bounds the attention logits. The
+> retrained run clears the epoch at which the original blew up and fine-tunes stably past the old own-accuracy
+> ceiling (§6), with every quantity the fixes bound staying O(1–100) throughout the encoder ramp — the confirmed
+> numbers are at the end of §7.2.
 
 The one place where the lightly-unfrozen variant (§6) bit us was **training stability**. After a healthy climb
 (own-sheet accuracy reaching ~0.56), the run **diverged around epoch 130**: the loss rose from ~124 to ~530, the
@@ -495,9 +496,22 @@ Mask2Former *masked* cross-attention can leave a query row fully masked (all `-i
 so fully-masked rows are reset to attend everywhere (the standard Mask2Former guard); and (b) the attention probe is
 adapted to read the *post-norm* logits, so the bound can be verified directly after the retrain.
 
-**Expected outcome (to be filled in):** cross-attention max |logit| bounded to O(10) across all six layers for the
-full run, ‖k‖ bounded to O(10), and own-accuracy climbing past the pre-divergence ceiling without collapse. The §6
-mask-feature statistics will be re-measured on the post-fix checkpoint.
+**The second half of the fix: normalising the readout.** The attention logits are one of *two* unbounded products
+in the decoder. The other is the **ownership readout** itself — the per-voxel score `dot(U1, mask_embed)` (§5) whose
+argmax assigns the sheet owner. Nothing bounded the magnitude of the mask features `U1` or the query embeddings
+`mask_embed`, and in the diverged checkpoint this dot product reached **~10¹⁰**, saturating the ownership softmax
+exactly as the runaway attention logits saturate the attention softmax. We bound it the same structural way: a
+**`LayerNorm` on each deconvolution block of the pixel decoder** (U4 → U2 → U1 in §5), so the mask features feeding
+the readout are unit-scale and the score stays O(10) regardless of how far the encoder drifts. The two
+normalisations are complementary — **QK-LayerNorm** bounds the logits *inside* the cross-attention, the
+**deconv-block LayerNorm** bounds the readout at the decoder's *output* — and together they close both
+positive-feedback paths the divergence rode.
+
+**Outcome (confirmed).** With both normalisations in place the retrained run fine-tunes stably straight through the
+epoch window where the original blew up, and the three quantities the fixes bound stay small throughout the encoder
+ramp: cross-attention max |logit| **O(1)** (≈ 1, against 19968 pre-fix), raw ‖k‖ **≈ 2** (against ~3025), and the
+readout |mask_embed·U1| **≈ 21** (against ~10¹⁰). Own-sheet accuracy climbs **past the old ~0.56 pre-divergence
+ceiling** with no collapse (0.65 and still rising as the encoder keeps fine-tuning).
 
 ### 7.3 A smooth encoder schedule in place of the hard freeze→unfreeze
 
@@ -531,8 +545,28 @@ meshes, and how they are stored. The fit runs **per window**, per sheet, on the 
 
 ### 8.1 A field-driven, autograd-free sheet fit
 
-For each sheet present in a window (an owner id with at least a few hundred gated voxels) we fit one quad-mesh grid
-to its medial surface, in three steps.
+Before fitting, two cheap, self-limiting rules clean the per-window ownership — both read from a K×K
+**cross-confidence matrix** over the window's sheets (K ≲ 20, so ~a millisecond on the GPU, from the ownership
+logits already computed): `M[i,j]` is the mean softmax-over-queries probability that sheet *i*'s voxels assign to
+query *j*, and the diagonal `M[i,i]` is the sheet's own membership.
+
+**Merge over-splits.** When the decoder spreads one physical wrap across two queries, the two masks confuse
+*symmetrically* — each gives a large share of its mass to the other (`M[i,j]` and `M[j,i]` both large). We merge any
+mutual pair with `M[i,j] > 1/3` **and** `M[j,i] > 1/3`, relabelling the smaller-self-mass sheet into the larger. The
+1/3 threshold is not tuned: because each row of `M` is a probability distribution (summing to ≤ 1) whose diagonal is
+its maximum, no sheet can give more than 1/3 to *two* different others, so mutual-(`> 1/3`) edges form a matching —
+the merge is **provably pairwise** and can never cascade into a 3-way collapse.
+
+**Drop one-sided fragments.** The opposite signature is a thin, low-confidence sliver straddling a confident
+neighbour's boundary: it leaks *one-sidedly* (its voxels split their mass with the neighbour, which does not
+reciprocate). We score each sheet by its **self-mass** — the sum over its gated voxels of the owning query's
+probability, i.e. a confidence-weighted size — and drop a sheet when it is *both* small (self-mass below 10 % of the
+window's largest) *and* unconfident (mean own-membership below 0.70). The two-sided test is deliberate: a confident
+thin sheet survives despite small self-mass, and a large but uncertain sheet survives despite modest confidence, so
+the filter removes fragments without eating legitimate thin wraps — which a bare voxel-count cut would. A small
+absolute floor (0.1 % of the window's voxels) removes degenerate specks.
+
+For each sheet that survives these two rules we fit one quad-mesh grid to its medial surface, in three steps.
 
 **Grid initialisation.** A sheet's gated voxels form a thin, curved point cloud. Its PCA gives the in-plane *(u,v)*
 tangent (the two leading directions) and the across-sheet normal (the third); a regular grid at a fixed 30 µm

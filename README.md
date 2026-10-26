@@ -117,8 +117,9 @@ present in the pretrained features, and a small decoder sharpens it to the voxel
 ![HercuViT on a scroll window — left→right: CT · frozen-encoder PCA · pixel-encoder PCA · predicted surface · predicted sheet masks · GT labels · Dinovol-encoder PCA · Dinovol surface.](submission/images/embeddings.jpg)
 
 HercuViT's output as geometry: the per-sheet instance masks fit to sheet meshes, read back from the compact `.asv` store.
-> **This below is the same window as the HercuLabel above. Yes, HercuViT split the yellow-ish/green + orange sheet into two,
-> but the HercuLabel took 4 minutes to compute and HercuViT did it in 1/3rd of a second.**
+> **This below is the same window as the HercuLabel above. HercuViT detections are slightly different,
+> that's because it was trained for smaller 128vx^3 window sizes (this window is 192vx^3),
+> plus the HercuLabel took 4 minutes to compute and HercuViT did it in about 2 seconds.**
 
 ![HercuViT fitted sheet meshes for a single 192³ window of PHerc1447 — the per-sheet surfaces from the `.asv`, coloured per sheet and lightly shaded.](submission/images/hercuvit-sheet-meshes.jpg)
 

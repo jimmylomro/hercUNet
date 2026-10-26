@@ -20,25 +20,31 @@ class HercuvitSurfaceModel(InferenceModel):
     name = "hercuvit-surface"
 
     def __init__(self, net, p_size, *, overlap=0.25, with_meshes=False, mesh_thresh=0.4, mesh_sigma=3.0,
-                 mesh_fit_iters=40, mesh_fit_lr=1.0, mesh_fit_lam=0.3, mesh_min_pts=400, mesh_step_um=30.0):
+                 mesh_fit_iters=40, mesh_fit_lr=1.0, mesh_fit_lam=0.3, mesh_min_pts=400, mesh_step_um=30.0,
+                 mesh_mass_frac=0.10, mesh_conf_thr=0.70, mesh_vox_frac=0.001, mesh_merge_thr=1.0 / 3):
         self.net = net
         self._p = int(p_size)
         self._overlap = float(overlap)
         self.emits_meshes = bool(with_meshes)
         self._mesh = dict(thresh=float(mesh_thresh), sigma=float(mesh_sigma), iters=int(mesh_fit_iters),
                           lr=float(mesh_fit_lr), lam=float(mesh_fit_lam), min_pts=int(mesh_min_pts),
-                          step_um=float(mesh_step_um))
+                          step_um=float(mesh_step_um), mass_frac=float(mesh_mass_frac),
+                          conf_thr=float(mesh_conf_thr), vox_frac=float(mesh_vox_frac),
+                          merge_thr=float(mesh_merge_thr))
 
     @classmethod
     def load(cls, *, model=None, model_hf=None, ckpt="checkpoint_best.pth", device="cuda",
              attention_backend=None, overlap=0.25, with_meshes=False, mesh_thresh=0.4, mesh_sigma=3.0,
-             mesh_fit_iters=40, mesh_fit_lr=1.0, mesh_fit_lam=0.3, mesh_min_pts=400, mesh_step_um=30.0, **_):
+             mesh_fit_iters=40, mesh_fit_lr=1.0, mesh_fit_lam=0.3, mesh_min_pts=400, mesh_step_um=30.0,
+             mesh_mass_frac=0.10, mesh_conf_thr=0.70, mesh_vox_frac=0.001, mesh_merge_thr=1.0 / 3, **_):
         from .loader import load_hercuvit
         net, recipe, _cfg = load_hercuvit(model, model_hf=model_hf, ckpt=ckpt, device=device,
                                           attention_backend=attention_backend, with_instance=bool(with_meshes))
         return cls(net, int(recipe.window), overlap=overlap, with_meshes=with_meshes, mesh_thresh=mesh_thresh,
                    mesh_sigma=mesh_sigma, mesh_fit_iters=mesh_fit_iters, mesh_fit_lr=mesh_fit_lr,
-                   mesh_fit_lam=mesh_fit_lam, mesh_min_pts=mesh_min_pts, mesh_step_um=mesh_step_um)
+                   mesh_fit_lam=mesh_fit_lam, mesh_min_pts=mesh_min_pts, mesh_step_um=mesh_step_um,
+                   mesh_mass_frac=mesh_mass_frac, mesh_conf_thr=mesh_conf_thr, mesh_vox_frac=mesh_vox_frac,
+                   mesh_merge_thr=mesh_merge_thr)
 
     @property
     def patch_size(self) -> int:
@@ -78,7 +84,7 @@ class HercuvitSurfaceModel(InferenceModel):
         working-level voxel size (so the fit's 30 µm grid maps to the right pixel step). No second encoder pass."""
         import torch
         from ..model.decoder_common import mask_logits_from_embed
-        from ...meshes.extract import extract_window_sheets
+        from ...meshes.extract import extract_window_sheets, prune_sheet_masks, merge_confused_sheets
         out = self.net(xb_base, run_instance=True)
         sem = out["sem_logits"]                                               # deep-sup LIST: [0] = full-res
         sem = (sem[0] if isinstance(sem, (list, tuple)) else sem)            # [B,2,P,P,P]
@@ -87,10 +93,17 @@ class HercuvitSurfaceModel(InferenceModel):
         me = out["instance"]["layers"][-1]["mask_embed"].float()             # [B,Q,C]
         meshes = []
         for b in range(xb_base.shape[0]):
-            owner = mask_logits_from_embed(me[b:b + 1], mf[b:b + 1])[0].argmax(0)          # (P,P,P) ids
+            ml = mask_logits_from_embed(me[b:b + 1], mf[b:b + 1])[0]                        # (Q,P,P,P)
+            owner = ml.argmax(0)                                                            # (P,P,P) ids
+            memb = torch.exp(ml.amax(0) - torch.logsumexp(ml, 0))                           # (P,P,P) own-membership
             gate = torch.softmax(sem[b].float(), 0)[1] > self._mesh["thresh"]              # (P,P,P) bool
+            # merge over-split pairs (symmetric cross-confidence > 1/3), then prune one-sided fragments
+            owner = merge_confused_sheets(owner, gate, ml, thresh=self._mesh["merge_thr"])
+            gate = prune_sheet_masks(owner, gate, memb, mass_frac=self._mesh["mass_frac"],
+                                     conf_thr=self._mesh["conf_thr"])
+            min_pts = max(self._mesh["min_pts"], int(self._mesh["vox_frac"] * owner.numel()))
             meshes.append(extract_window_sheets(
-                owner, gate, voxel_um=float(voxel_um), sigma=self._mesh["sigma"], min_pts=self._mesh["min_pts"],
+                owner, gate, voxel_um=float(voxel_um), sigma=self._mesh["sigma"], min_pts=min_pts,
                 step_um=self._mesh["step_um"], iters=self._mesh["iters"], lr=self._mesh["lr"], lam=self._mesh["lam"],
                 device=owner.device.type))
         return sem, meshes
