@@ -101,9 +101,18 @@ def fit_sheets_field(owner, gate, *, voxel_um: float, sigma: float = 3.0, iters:
 
         Vnp = V.cpu().numpy()
 
+    from scipy.spatial import cKDTree
     out, voff = {}, 0
-    for (V0, foot, nu, nv, sid) in grids:
+    for n, (V0, foot, nu, nv, sid) in enumerate(grids):
         Vf = Vnp[voff:voff + nu * nv].reshape(nu, nv, 3); fm = foot.reshape(-1)
-        out[sid] = dict(V=Vf, foot=foot, nu=nu, nv=nv, verts=Vf.reshape(-1, 3)[fm], tris=grid_triangles(foot))
+        verts = Vf.reshape(-1, 3)[fm]                                           # (nvert,3) window-local z,y,x voxels
+        # Fit quality vs the mask: nearest-vertex distance from each gated mask voxel to the mesh. fit_rms_um is the
+        # RMS displacement (um); coverage is the fraction of mask voxels within one grid step of the mesh.
+        pts = np.argwhere(masks[n]).astype(np.float32)
+        d, _ = cKDTree(verts).query(pts, k=1)
+        fit_rms_um = float(np.sqrt(np.mean(d * d))) * float(voxel_um)
+        coverage = float(np.mean(d <= step_px))
+        out[sid] = dict(V=Vf, foot=foot, nu=nu, nv=nv, verts=verts, tris=grid_triangles(foot),
+                        fit_rms_um=fit_rms_um, coverage=coverage)
         voff += nu * nv
     return out

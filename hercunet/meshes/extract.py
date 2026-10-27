@@ -107,6 +107,32 @@ def merge_confused_sheets(owner, gate, mask_logits, *, thresh: float = 1.0 / 3):
     return owner2
 
 
+def sheet_stats(owner, gate, memb):
+    """Per-sheet quality stats over the gated voxels, keyed by sheet id:
+    ``{sid: dict(n_voxels, self_mass, confidence, mass_frac)}``. ``self_mass`` = Σ per-voxel own-membership
+    (confidence-weighted size); ``confidence`` = self_mass / n_voxels (mean own-membership); ``mass_frac`` =
+    self_mass / the window's max self_mass. These are the per-sheet quantities the prune rule thresholds on."""
+    import torch
+    ow = torch.as_tensor(owner).reshape(-1)
+    g = torch.as_tensor(gate, dtype=torch.bool, device=ow.device).reshape(-1)
+    if int(g.sum()) == 0:
+        return {}
+    mm = torch.as_tensor(memb, dtype=torch.float32, device=ow.device).reshape(-1)[g]
+    og = ow[g]
+    ids = torch.unique(og)
+    remap = torch.full((int(ow.max().item()) + 1,), -1, dtype=torch.long, device=ow.device)
+    remap[ids] = torch.arange(ids.numel(), device=ow.device)
+    inv = remap[og]
+    sm = torch.zeros(ids.numel(), device=mm.device).index_add_(0, inv, mm)
+    cnt = torch.zeros(ids.numel(), device=mm.device).index_add_(0, inv, torch.ones_like(mm))
+    conf = sm / cnt.clamp_min(1.0)
+    mfrac = sm / sm.max().clamp_min(1e-6)
+    idn = ids.cpu().numpy()
+    smn, cntn, confn, mfn = (t.float().cpu().numpy() for t in (sm, cnt, conf, mfrac))
+    return {int(idn[k]): dict(n_voxels=int(cntn[k]), self_mass=float(smn[k]),
+                              confidence=float(confn[k]), mass_frac=float(mfn[k])) for k in range(len(idn))}
+
+
 def extract_window_sheets(owner, gate, *, voxel_um: float, sigma: float = 3.0, iters: int = 40, lr: float = 1.0,
                           lam: float = 0.3, step_um: float = 30.0, min_pts: int = 400, device: str = "cuda"):
     """Fit sheet meshes for one window from ``owner`` (D,H,W int sheet ids) and ``gate`` (D,H,W bool surface keep).
@@ -138,5 +164,8 @@ class MeshSink:
         self.n_windows += 1
         for sid, m in meshes.items():
             g_zyx = (m["verts"] + off) * self.ds                                     # window-local -> global L0 (z,y,x)
-            self.w.add_sheet(m["foot"], g_zyx[:, ::-1], name=f"{self.pre}{wname}_s{int(sid)}", window=wname)
+            self.w.add_sheet(m["foot"], g_zyx[:, ::-1], name=f"{self.pre}{wname}_s{int(sid)}", window=wname,
+                             n_voxels=m.get("n_voxels"), self_mass=m.get("self_mass"),
+                             confidence=m.get("confidence"), mass_frac=m.get("mass_frac"),
+                             fit_rms_um=m.get("fit_rms_um"), coverage=m.get("coverage"))
             self.n_sheets += 1

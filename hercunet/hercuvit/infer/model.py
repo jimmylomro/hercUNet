@@ -84,7 +84,8 @@ class HercuvitSurfaceModel(InferenceModel):
         working-level voxel size (so the fit's 30 µm grid maps to the right pixel step). No second encoder pass."""
         import torch
         from ..model.decoder_common import mask_logits_from_embed
-        from ...meshes.extract import extract_window_sheets, prune_sheet_masks, merge_confused_sheets
+        from ...meshes.extract import (extract_window_sheets, prune_sheet_masks, merge_confused_sheets,
+                                        sheet_stats)
         out = self.net(xb_base, run_instance=True)
         sem = out["sem_logits"]                                               # deep-sup LIST: [0] = full-res
         sem = (sem[0] if isinstance(sem, (list, tuple)) else sem)            # [B,2,P,P,P]
@@ -102,8 +103,12 @@ class HercuvitSurfaceModel(InferenceModel):
             gate = prune_sheet_masks(owner, gate, memb, mass_frac=self._mesh["mass_frac"],
                                      conf_thr=self._mesh["conf_thr"])
             min_pts = max(self._mesh["min_pts"], int(self._mesh["vox_frac"] * owner.numel()))
-            meshes.append(extract_window_sheets(
+            stats = sheet_stats(owner, gate, memb)                                      # per-sheet quality stats
+            mb = extract_window_sheets(
                 owner, gate, voxel_um=float(voxel_um), sigma=self._mesh["sigma"], min_pts=min_pts,
                 step_um=self._mesh["step_um"], iters=self._mesh["iters"], lr=self._mesh["lr"], lam=self._mesh["lam"],
-                device=owner.device.type))
+                device=owner.device.type)
+            for _sid, _m in mb.items():
+                _m.update(stats.get(int(_sid), {}))                                    # attach mass/conf stats
+            meshes.append(mb)
         return sem, meshes

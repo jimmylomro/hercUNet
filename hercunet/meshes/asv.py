@@ -61,6 +61,13 @@ CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE sheets(
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, window TEXT NOT NULL DEFAULT '', family TEXT NOT NULL DEFAULT '',
   nu INTEGER NOT NULL, nv INTEGER NOT NULL, vert_count INTEGER NOT NULL CHECK(vert_count >= 3),
+  -- quality columns (nullable): area_mm2 = true surface area; n_voxels = gated voxel support; self_mass =
+  -- sum own-membership (confidence-weighted size); confidence = self_mass/n_voxels (mean own-membership);
+  -- mass_frac = self_mass / window max (the prune's size term, normalised); fit_rms_um = RMS distance from the
+  -- gated mask voxels to the fitted mesh (mesh-vs-mask displacement); coverage = fraction of mask voxels within
+  -- one grid step of the mesh (how much of the mask the mesh covers, 0-1).
+  area_mm2 REAL, n_voxels INTEGER, self_mass REAL, confidence REAL, mass_frac REAL,
+  fit_rms_um REAL, coverage REAL,
   min_x REAL NOT NULL, max_x REAL NOT NULL, min_y REAL NOT NULL, max_y REAL NOT NULL,
   min_z REAL NOT NULL, max_z REAL NOT NULL, payload BLOB NOT NULL, annotation TEXT NOT NULL DEFAULT '{}');
 CREATE VIRTUAL TABLE sheet_bounds USING rtree(id, min_x, max_x, min_y, max_y, min_z, max_z);
@@ -115,6 +122,21 @@ def unpack_sheet(blob: bytes) -> dict[str, Any]:
     return dict(nu=nu, nv=nv, verts=verts.astype(np.float32), tris=tris, foot=foot)
 
 
+def sheet_area_mm2(foot: np.ndarray, verts: np.ndarray, voxel_um: float) -> float:
+    """True surface area of a sheet mesh in mm^2. ``verts`` are footprint-only L0 voxel XYZ; triangles come from the
+    footprint, so the cross-product areas are in voxel^2, scaled by (voxel_um/1000)^2."""
+    foot = np.ascontiguousarray(foot, dtype=bool)
+    nvert = int(foot.sum())
+    remap = np.full(foot.size, -1, np.int64)
+    remap[foot.ravel()] = np.arange(nvert)
+    tri = remap[grid_triangles(foot)]                                 # footprint-complete tris -> vertex indices
+    if tri.size == 0:
+        return 0.0
+    v = np.asarray(verts, dtype=np.float64)[tri]                      # (ntri,3,3)
+    area_vox2 = 0.5 * np.linalg.norm(np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0]), axis=1).sum()
+    return float(area_vox2) * (float(voxel_um) / 1000.0) ** 2
+
+
 # --------------------------------------------------------------------------------------------------------------------
 # writer: stream sheets into a file, publish atomically on close (mirrors afv's temp-then-link)
 # --------------------------------------------------------------------------------------------------------------------
@@ -150,18 +172,27 @@ class AsvWriter:
         self._closed = False
 
     def add_sheet(self, foot: np.ndarray, verts: np.ndarray, *, name: str = "", window: str = "",
-                  family: str = "", annotation: Mapping[str, Any] | None = None) -> int:
-        """Add one sheet (``foot`` footprint, ``verts`` footprint-only global-L0 XYZ). Returns its row id."""
+                  family: str = "", n_voxels: int | None = None, self_mass: float | None = None,
+                  confidence: float | None = None, mass_frac: float | None = None,
+                  fit_rms_um: float | None = None, coverage: float | None = None,
+                  annotation: Mapping[str, Any] | None = None) -> int:
+        """Add one sheet (``foot`` footprint, ``verts`` footprint-only global-L0 XYZ). ``area_mm2`` is computed from
+        the mesh; the remaining quality stats are stored in their columns when given. Returns its row id."""
         blob, lo, hi = pack_sheet(foot, verts)
         self._n += 1
         sid = self._n
         nvert = int(foot.sum())
         self._vert_total += nvert
+        area_mm2 = sheet_area_mm2(foot, verts, self._voxel_um)
         ann = json.dumps(dict(annotation or {}), separators=(",", ":"), allow_nan=False)
+        f = lambda x: None if x is None else float(x)
         self._db.execute(
-            "INSERT INTO sheets(id,name,window,family,nu,nv,vert_count,min_x,max_x,min_y,max_y,min_z,max_z,"
-            "payload,annotation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO sheets(id,name,window,family,nu,nv,vert_count,area_mm2,n_voxels,self_mass,confidence,"
+            "mass_frac,fit_rms_um,coverage,min_x,max_x,min_y,max_y,min_z,max_z,payload,annotation) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (sid, name or f"sheet_{sid}", window, family, int(foot.shape[0]), int(foot.shape[1]), nvert,
+             float(area_mm2), None if n_voxels is None else int(n_voxels), f(self_mass), f(confidence),
+             f(mass_frac), f(fit_rms_um), f(coverage),
              float(lo[0]), float(hi[0]), float(lo[1]), float(hi[1]), float(lo[2]), float(hi[2]), blob, ann))
         self._db.execute("INSERT INTO sheet_bounds VALUES(?,?,?,?,?,?,?)",
                          (sid, float(lo[0]), float(hi[0]), float(lo[1]), float(hi[1]), float(lo[2]), float(hi[2])))
@@ -262,13 +293,18 @@ def merge_asv(shards: Iterable[str | os.PathLike], out: str | os.PathLike, *, fr
                   metadata=metadata, overwrite=overwrite)
     for shard in shards:
         src = sqlite3.connect(f"file:{Path(shard)}?mode=ro", uri=True)
-        for row in src.execute("SELECT name,window,family,nu,nv,vert_count,min_x,max_x,min_y,max_y,min_z,max_z,"
-                               "payload,annotation FROM sheets ORDER BY id").fetchall():
-            (name, window, family, nu, nv, vc, x0, x1, y0, y1, z0, z1, blob, ann) = row
+        for row in src.execute(
+                "SELECT name,window,family,nu,nv,vert_count,area_mm2,n_voxels,self_mass,confidence,mass_frac,"
+                "fit_rms_um,coverage,min_x,max_x,min_y,max_y,min_z,max_z,payload,annotation "
+                "FROM sheets ORDER BY id").fetchall():
+            (name, window, family, nu, nv, vc, area, nvox, sm, conf, mf, rms, cov,
+             x0, x1, y0, y1, z0, z1, blob, ann) = row
             w._n += 1; sid = w._n; w._vert_total += int(vc)                     # reuse writer counters
-            w._db.execute("INSERT INTO sheets(id,name,window,family,nu,nv,vert_count,min_x,max_x,min_y,max_y,"
-                          "min_z,max_z,payload,annotation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                          (sid, name, window, family, nu, nv, vc, x0, x1, y0, y1, z0, z1, blob, ann))
+            w._db.execute("INSERT INTO sheets(id,name,window,family,nu,nv,vert_count,area_mm2,n_voxels,self_mass,"
+                          "confidence,mass_frac,fit_rms_um,coverage,min_x,max_x,min_y,max_y,min_z,max_z,payload,"
+                          "annotation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                          (sid, name, window, family, nu, nv, vc, area, nvox, sm, conf, mf, rms, cov,
+                           x0, x1, y0, y1, z0, z1, blob, ann))
             w._db.execute("INSERT INTO sheet_bounds VALUES(?,?,?,?,?,?,?)", (sid, x0, x1, y0, y1, z0, z1))
         src.close()
     return w.close()
