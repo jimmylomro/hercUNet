@@ -163,4 +163,5 @@ the data layer has its own guide under [`docs/`](docs/):
 ## Status
 
 The **data layer**, **HercuLabels** (with its interactive viewer), and **HercUNet** (train + iterative inference)
-are complete and documented above. **HercuViT** is implemented and training; its write-up is in progress.
+are complete and documented above. **HercuViT** is implemented and trained — the released checkpoint (`train_v5`
+@ epoch 462) is on 🤗 [`jimmylomro/hercuvit-v0`](https://huggingface.co/jimmylomro/hercuvit-v0); its write-up is in progress.
