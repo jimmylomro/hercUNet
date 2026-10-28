@@ -100,6 +100,7 @@ hercuvit = [
     "zarr>=2.16,<3",               # OME-Zarr output (shared with the data layer)
     "blosc2>=2.5",                 # zarr compression backend used by the output store
     "numba>=0.59",                 # JITs the constrained-MALIS union-find for AffMALIS + distill (numpy<=2.4; auto-fallback)
+    "s5cmd>=0.2",                  # S3 upload for --s3-prefix: bundles the s5cmd Go binary on PATH (platform wheels
 ]
 # everything: HercuLabels (+ its UI) + fast reader + training + inference + HercuViT. Self-referential so it never drifts.
 full = ["hercunet[herculabels,accel,train,infer,hercuvit]"]
