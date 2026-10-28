@@ -40,22 +40,35 @@ def fit_sheets_field(owner, gate, *, voxel_um: float, sigma: float = 3.0, iters:
     step_px = float(step_um) / float(voxel_um)
 
     # --- per-sheet grid init + drops -------------------------------------------------------------------------------
-    grids, masks = [], []
-    for sid in [int(u) for u in np.unique(owner_np[gate_np])]:
-        M = (owner_np == sid) & gate_np
-        if int(M.sum()) < min_pts:
+    # Gated voxel coords + their owner id, computed ONCE (one argwhere over the whole window instead of one per
+    # sheet). A stable sort groups them per sheet while keeping the original row-major order, so each group is
+    # bit-identical to the old per-sheet ``argwhere((owner==sid) & gate)``.
+    gate_coords = np.argwhere(gate_np).astype(np.float32)                   # (Nfg,3) z,y,x, row-major
+    gate_owner = owner_np[gate_np]                                          # (Nfg,) owner id, same order
+    order = np.argsort(gate_owner, kind="stable")
+    coords_s = gate_coords[order]; owner_s = gate_owner[order]
+    uids, starts = np.unique(owner_s, return_index=True)
+    bounds = np.append(starts, len(owner_s))
+
+    grids, sheet_pts = [], []
+    for k, sid in enumerate(int(u) for u in uids):
+        coords = coords_s[bounds[k]:bounds[k + 1]]                          # == argwhere((owner==sid) & gate)
+        if len(coords) < min_pts:
             continue
-        V0, foot, (nu, nv) = init_sheet_grid(np.argwhere(M).astype(np.float32), step_px)
+        V0, foot, (nu, nv) = init_sheet_grid(coords, step_px)
         if nu < min_grid or nv < min_grid or int(foot.sum()) < 3:          # degenerate grid -> failure drop
             continue
-        grids.append((V0, foot, nu, nv, sid)); masks.append(M)
+        grids.append((V0, foot, nu, nv, sid))
+        sheet_pts.append(coords)                                           # reused for the cKDTree fit metric
     if not grids:
         return {}
     N = len(grids)
 
     # --- per-sheet field (blurred mask) + its gradient, batched ----------------------------------------------------
     with torch.no_grad():
-        Mst = torch.stack([torch.as_tensor(m, device=dev, dtype=torch.float32) for m in masks])[:, None]   # [N,1,D,H,W]
+        # Per-sheet gated masks as one GPU one-hot (owner==sid & gate) instead of N host masks + as_tensor copies.
+        kept_ids = torch.as_tensor([g[4] for g in grids], device=dev, dtype=owner_t.dtype)
+        Mst = ((owner_t.unsqueeze(0) == kept_ids.view(N, 1, 1, 1)) & gate_t.unsqueeze(0)).to(torch.float32)[:, None]  # [N,1,D,H,W]
         kg, r = _gaussian1d(sigma, dev)
         fld = _separable_blur(Mst, kg, r)
         fld = fld / fld.amax(dim=(2, 3, 4), keepdim=True).clamp(min=1e-6)
@@ -74,13 +87,13 @@ def fit_sheets_field(owner, gate, *, voxel_um: float, sigma: float = 3.0, iters:
                                   gi[1:-1, 2:].ravel(), gi[1:-1, :-2].ravel()], 1))
             cnt = nu * nv
             pidx[n, :cnt] = np.arange(voff, voff + cnt); padm[n, :cnt] = 1.0; voff += cnt
-        V = torch.tensor(np.concatenate(V0_all), device=dev)
-        lc = torch.tensor(np.concatenate(lc_l), device=dev)
-        ln = torch.tensor(np.concatenate(ln_l), device=dev)
-        pidxt = torch.tensor(pidx, device=dev)
+        V = torch.from_numpy(np.ascontiguousarray(np.concatenate(V0_all))).to(dev)
+        lc = torch.from_numpy(np.ascontiguousarray(np.concatenate(lc_l))).to(dev)
+        ln = torch.from_numpy(np.ascontiguousarray(np.concatenate(ln_l))).to(dev)
+        pidxt = torch.from_numpy(pidx).to(dev)
         pos = np.arange(N)[:, None] * Vmax + np.arange(Vmax)[None, :]
         inv = np.zeros(voff, np.int64); inv[pidx[padm > 0]] = pos[padm > 0]
-        invt = torch.tensor(inv, device=dev)
+        invt = torch.from_numpy(inv).to(dev)
         scale = torch.tensor([W - 1, H - 1, D - 1], device=dev, dtype=torch.float32)   # for (x,y,z) normalisation
 
         # --- explicit gradient-ascent loop (no autograd) ----------------------------------------------------------
@@ -108,7 +121,7 @@ def fit_sheets_field(owner, gate, *, voxel_um: float, sigma: float = 3.0, iters:
         verts = Vf.reshape(-1, 3)[fm]                                           # (nvert,3) window-local z,y,x voxels
         # Fit quality vs the mask: nearest-vertex distance from each gated mask voxel to the mesh. fit_rms_um is the
         # RMS displacement (um); coverage is the fraction of mask voxels within one grid step of the mesh.
-        pts = np.argwhere(masks[n]).astype(np.float32)
+        pts = sheet_pts[n]                                                     # == argwhere(masks[n]), precomputed
         d, _ = cKDTree(verts).query(pts, k=1)
         fit_rms_um = float(np.sqrt(np.mean(d * d))) * float(voxel_um)
         coverage = float(np.mean(d <= step_px))
