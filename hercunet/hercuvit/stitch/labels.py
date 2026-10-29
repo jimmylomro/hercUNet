@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import torch
@@ -82,15 +83,23 @@ def _ct128(reader, scroll, centre, fov, vu, target_um):
 
 # ----------------------------------------------------------------------------- one corner -> one sample
 def extract_corner(net, reader, scroll, coord, target_um, device, *, D=3, overlap=0.1,
-                   min_vote=25, min_pts=20):
+                   min_vote=25, min_pts=20, stream_workers=8):
     vu = float(reader._vol(scroll).meta.voxel_size_um)
     fov = int(round(CROP * target_um / vu)); nsp = fov / CROP
     core = int(round(CROP * (1 - overlap) * target_um / vu)); h = core // 2   # octant centres at coord ± h
 
-    centre = _infer(net, _ct128(reader, scroll, coord, fov, vu, target_um), device)
-    W = {k: _infer(net, _ct128(reader, scroll, (coord[0] + k[0] * h, coord[1] + k[1] * h, coord[2] + k[2] * h),
-                               fov, vu, target_um), device)
-         for k in OCT}
+    # CT prefetch: stream the 9 windows (centred + 8 octants) CONCURRENTLY — the reads are latency-bound (many small
+    # chunk GETs), so overlapping them collapses ~9× sequential latency into ~one read's worth. The volume is already
+    # open+cached above, so there is no open race; the GPU forwards still run one at a time (unchanged VRAM).
+    centres = [coord] + [(coord[0] + k[0] * h, coord[1] + k[1] * h, coord[2] + k[2] * h) for k in OCT]
+    read = lambda c: _ct128(reader, scroll, c, fov, vu, target_um)
+    if stream_workers > 1:
+        with ThreadPoolExecutor(max_workers=min(stream_workers, len(centres))) as ex:
+            cts = list(ex.map(read, centres))
+    else:
+        cts = [read(c) for c in centres]
+    centre = _infer(net, cts[0], device)
+    W = {k: _infer(net, cts[1 + i], device) for i, k in enumerate(OCT)}
     emb = {k: _reduce(W[k]["enc"], W[k]["surf"][POOL // 2::POOL, POOL // 2::POOL, POOL // 2::POOL], D) for k in OCT}
 
     # --- queries (fragments) + vote each onto the centred pass (global id = centred owner) -------------------------
@@ -222,8 +231,8 @@ def create_run(a):
         if os.path.exists(fp) and not a.overwrite:
             skipped += 1; continue
         try:
-            s = extract_corner(net, reader, scroll, coord, target_um, device,
-                               D=a.pca_dim, overlap=a.overlap, min_vote=a.min_vote, min_pts=a.min_pts)
+            s = extract_corner(net, reader, scroll, coord, target_um, device, D=a.pca_dim, overlap=a.overlap,
+                               min_vote=a.min_vote, min_pts=a.min_pts, stream_workers=a.stream_workers)
             if s is None:
                 skipped += 1
             else:

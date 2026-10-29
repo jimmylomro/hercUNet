@@ -328,6 +328,8 @@ def _add_labels_create(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--overlap", type=float, default=0.1, help="window overlap fraction (default 0.1)")
     p.add_argument("--min-vote", dest="min_vote", type=int, default=25, help="min overlap voxels to label a fragment (default 25)")
     p.add_argument("--min-pts", dest="min_pts", type=int, default=20, help="min 1/8 surface cells for a fragment query (default 20)")
+    p.add_argument("--stream-workers", dest="stream_workers", type=int, default=8,
+                   help="concurrent CT reads per corner (prefetch; 1 = sequential). Latency-bound streaming → 8 hides most of it")
     # sharding (one process per GPU for a multi-GPU box)
     p.add_argument("--nshards", type=int, default=1, help="split the corner list across processes (one per GPU)")
     p.add_argument("--shard", type=int, default=0, help="this process's shard index (0..nshards-1)")
