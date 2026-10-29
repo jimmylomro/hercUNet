@@ -26,6 +26,7 @@ import torch
 from ..infer.loader import load_hercuvit
 from ..data.dataset import ScrollCtReader, resample_to_crop
 from ..data.normalize import dinovol_normalise
+from .embed import reduce_normalised_pca, median_after_pca
 
 CROP = 128
 POOL = 8
@@ -35,44 +36,41 @@ OCT = [(sz, sy, sx) for sz in (-1, 1) for sy in (-1, 1) for sx in (-1, 1)]   # t
 
 # ----------------------------------------------------------------------------- HercuViT forward
 @torch.no_grad()
+def _infer_batch(net, cts, device, *, batch=1):
+    """Run HercuViT on a LIST of 128³ normalised CT windows and return one result dict per window (encoder tokens +
+    CONFIDENT per-voxel sheet masks, via the shared :func:`confident_sheet_masks`). The model forward is **batched**
+    (``batch`` windows per forward) — the compute-heavy encoder/decoder fill a big GPU's SMs, which is the key speedup
+    on a 5090 (a small GPU is already SM-saturated at batch 1, so there it is neutral). The memory-heavy per-window
+    mask-logits post-proc stays a loop, so peak VRAM is bounded by ``batch`` not the whole list."""
+    from ..model.decoder_common import mask_logits_from_embed
+    from ...meshes.extract import confident_sheet_masks
+    results = []
+    for b0 in range(0, len(cts), max(1, int(batch))):
+        chunk = cts[b0:b0 + max(1, int(batch))]
+        ctb = torch.from_numpy(np.ascontiguousarray(np.stack(chunk))).float()[:, None].to(device)   # (n,1,P,P,P)
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+            tok = net.backbone.forward_features(ctb, view_kind="global")["x_norm_patchtokens"]       # (n,G³,C)
+            out = net(ctb, run_instance=True)
+        mf = out["mask_features"].float()                                 # (n,C,P,P,P)
+        me = out["instance"]["layers"][-1]["mask_embed"].float()          # (n,Q,C)
+        sem = out["sem_logits"][0].float()                                # (n,2,P,P,P) full-res
+        for i in range(len(chunk)):
+            ml = mask_logits_from_embed(me[i:i + 1], mf[i:i + 1])[0]       # (Q,P,P,P)
+            owner, gate, _ = confident_sheet_masks(ml, sem[i])            # merged owner + pruned confident gate
+            results.append(dict(enc=tok[i].reshape(G, G, G, -1).float().cpu().numpy(),
+                                own=owner.to(torch.int16).cpu().numpy(),
+                                surf=torch.softmax(sem[i], 0)[1].cpu().numpy().astype(np.float32),
+                                gate=gate.cpu().numpy()))
+            del ml, owner, gate
+        del ctb, mf, me, sem, out, tok
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+    return results
+
+
 def _infer(net, ct128, device):
-    """One 128³ normalised CT -> 1/8 encoder tokens, per-voxel owner (argmax query), surface prob."""
-    ctb = torch.from_numpy(np.ascontiguousarray(ct128)).float()[None, None].to(device)
-    with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-        tok = net.backbone.forward_features(ctb, view_kind="global")["x_norm_patchtokens"][0].float()
-        out = net(ctb, run_instance=True)
-    mf = out["mask_features"][0].float()
-    me = out["instance"]["layers"][-1]["mask_embed"][0].float()
-    mff = mf.reshape(mf.shape[0], -1)
-    best = torch.full((mff.shape[1],), -1e30, device=device)
-    owner = torch.zeros((mff.shape[1],), dtype=torch.long, device=device)
-    for q0 in range(0, me.shape[0], 8):                            # argmax query per voxel, in Q-chunks (8 GB-safe)
-        mx, ix = (me[q0:q0 + 8] @ mff).max(0)
-        u = mx > best
-        owner[u] = (q0 + ix)[u]
-        best[u] = mx[u]
-    r = dict(enc=tok.reshape(G, G, G, -1).cpu().numpy(),
-             own=owner.reshape(CROP, CROP, CROP).to(torch.int16).cpu().numpy(),
-             surf=torch.softmax(out["sem_logits"][0][0].float(), 0)[1].cpu().numpy().astype(np.float32))
-    del ctb, mf, me, mff, owner, best
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-    return r
-
-
-def _reduce(enc, surf8, D):
-    """Per-window normalised PCA -> (G,G,G,D). z-score + PCA fit on this window's SURFACE cells, project EVERY cell.
-    The query median (below) is then taken over these projected vectors — median AFTER the PCA (docs §3.4)."""
-    X = enc.reshape(-1, enc.shape[-1])
-    s = surf8.reshape(-1) > 0.5
-    fit = X[s] if int(s.sum()) > D + 8 else X
-    mu = fit.mean(0); sd = fit.std(0) + 1e-6
-    Z = (fit - mu) / sd
-    zc = Z.mean(0)
-    _, _, vt = np.linalg.svd(Z - zc, full_matrices=False)
-    V = vt[:D]
-    emb = (((X - mu) / sd) - zc) @ V.T
-    return emb.reshape(G, G, G, D).astype(np.float32)
+    """One 128³ window → one result dict (thin wrapper over :func:`_infer_batch`)."""
+    return _infer_batch(net, [ct128], device, batch=1)[0]
 
 
 def _ct128(reader, scroll, centre, fov, vu, target_um):
@@ -83,7 +81,11 @@ def _ct128(reader, scroll, centre, fov, vu, target_um):
 
 # ----------------------------------------------------------------------------- one corner -> one sample
 def extract_corner(net, reader, scroll, coord, target_um, device, *, D=3, overlap=0.1,
-                   min_vote=25, min_pts=20, stream_workers=8):
+                   min_vote=25, min_pts=20, stream_workers=8, infer_batch=1, return_debug=False):
+    """One corner → one stitching sample (see module docstring). ``return_debug=True`` also returns a dict of the
+    per-window infer volumes (``W`` octants + ``centre`` pass: each ``own``/``surf``/``gate``/``enc``) and the geometry
+    (``vu``/``fov``/``nsp``/``h``/``core``), so callers can map fragments back to surface voxels for visualisation
+    without a second forward. The sample itself is unchanged."""
     vu = float(reader._vol(scroll).meta.voxel_size_um)
     fov = int(round(CROP * target_um / vu)); nsp = fov / CROP
     core = int(round(CROP * (1 - overlap) * target_um / vu)); h = core // 2   # octant centres at coord ± h
@@ -98,16 +100,18 @@ def extract_corner(net, reader, scroll, coord, target_um, device, *, D=3, overla
             cts = list(ex.map(read, centres))
     else:
         cts = [read(c) for c in centres]
-    centre = _infer(net, cts[0], device)
-    W = {k: _infer(net, cts[1 + i], device) for i, k in enumerate(OCT)}
-    emb = {k: _reduce(W[k]["enc"], W[k]["surf"][POOL // 2::POOL, POOL // 2::POOL, POOL // 2::POOL], D) for k in OCT}
+    res = _infer_batch(net, cts, device, batch=infer_batch)       # all 9 windows (centred + 8 octants) in batched forwards
+    centre = res[0]
+    W = {k: res[1 + i] for i, k in enumerate(OCT)}
+    emb = {k: reduce_normalised_pca(W[k]["enc"], W[k]["gate"][POOL // 2::POOL, POOL // 2::POOL, POOL // 2::POOL], D)
+           for k in OCT}
 
     # --- queries (fragments) + vote each onto the centred pass (global id = centred owner) -------------------------
     rng = np.random.default_rng(0)
     qslot, qown, qemb, qconf, qgid = [], [], [], [], []
     for k in OCT:
         o8 = W[k]["own"][POOL // 2::POOL, POOL // 2::POOL, POOL // 2::POOL]
-        s8 = W[k]["surf"][POOL // 2::POOL, POOL // 2::POOL, POOL // 2::POOL] > 0.5
+        g8 = W[k]["gate"][POOL // 2::POOL, POOL // 2::POOL, POOL // 2::POOL]   # CONFIDENT surviving-sheet mask
         slot = (k[0] > 0) * 4 + (k[1] > 0) * 2 + (k[2] > 0)
         off = np.array([k[0] * h, k[1] * h, k[2] * h])
         lo = np.maximum(-fov / 2, off - fov / 2); hi = np.minimum(fov / 2, off + fov / 2)
@@ -115,14 +119,15 @@ def extract_corner(net, reader, scroll, coord, target_um, device, *, D=3, overla
         vc = pts / nsp + CROP / 2; vk = (pts - off) / nsp + CROP / 2
         m = ((vc >= 0) & (vc <= CROP - 1)).all(1) & ((vk >= 0) & (vk <= CROP - 1)).all(1)
         ic = np.clip(np.round(vc[m]).astype(int), 0, CROP - 1); ik = np.clip(np.round(vk[m]).astype(int), 0, CROP - 1)
-        vs = (centre["surf"][ic[:, 0], ic[:, 1], ic[:, 2]] > 0.5) & (W[k]["surf"][ik[:, 0], ik[:, 1], ik[:, 2]] > 0.5)
+        # vote only where BOTH windows have a confident sheet (gate), so the global id comes from surviving masks
+        vs = centre["gate"][ic[:, 0], ic[:, 1], ic[:, 2]] & W[k]["gate"][ik[:, 0], ik[:, 1], ik[:, 2]]
         oc_ov = centre["own"][ic[vs, 0], ic[vs, 1], ic[vs, 2]]; ok_ov = W[k]["own"][ik[vs, 0], ik[vs, 1], ik[vs, 2]]
         confw = W[k]["surf"][POOL // 2::POOL, POOL // 2::POOL, POOL // 2::POOL]
-        for o in np.unique(o8[s8]):
-            cells = (o8 == o) & s8
+        for o in np.unique(o8[g8]):                                    # one query per SURVIVING sheet in this window
+            cells = (o8 == o) & g8
             if int(cells.sum()) < min_pts:
                 continue
-            med = np.median(emb[k][cells], 0)                     # median AFTER the PCA projection (docs §3.4)
+            med = median_after_pca(emb[k], cells)                 # median AFTER the PCA projection (docs §3.4)
             cand = ok_ov == o
             if int(cand.sum()) >= min_vote:
                 vals, cnts = np.unique(oc_ov[cand], return_counts=True)
@@ -134,7 +139,7 @@ def extract_corner(net, reader, scroll, coord, target_um, device, *, D=3, overla
 
     M = len(qslot)
     if M < 2:
-        return None
+        return (None, None) if return_debug else None
     qgid = np.asarray(qgid)
     Y = np.full((M, M), -1, np.int8)                              # -1 ignore
     known = qgid >= 0
@@ -154,11 +159,16 @@ def extract_corner(net, reader, scroll, coord, target_um, device, *, D=3, overla
         Xs.append(emb[k][inside]); Ps.append((d[inside] / (fov / 2)).astype(np.float16))
         Ss.append(np.full(int(inside.sum()), slot, np.uint8))
 
-    return dict(scroll=str(scroll), coord=np.asarray(coord, np.int64), D=np.int64(D), overlap=np.float32(overlap),
-                Xq=np.asarray(qemb, np.float16), slot_q=np.asarray(qslot, np.uint8),
-                conf_q=np.asarray(qconf, np.float16), own_q=np.asarray(qown, np.int16), Y=Y,
-                Xs=np.concatenate(Xs).astype(np.float16), Ps=np.concatenate(Ps),
-                slot_s=np.concatenate(Ss))
+    sample = dict(scroll=str(scroll), coord=np.asarray(coord, np.int64), D=np.int64(D), overlap=np.float32(overlap),
+                  Xq=np.asarray(qemb, np.float16), slot_q=np.asarray(qslot, np.uint8),
+                  conf_q=np.asarray(qconf, np.float16), own_q=np.asarray(qown, np.int16), Y=Y,
+                  Xs=np.concatenate(Xs).astype(np.float16), Ps=np.concatenate(Ps),
+                  slot_s=np.concatenate(Ss))
+    if return_debug:
+        dbg = dict(W=W, centre=centre, cts=cts, vu=vu, fov=fov, nsp=nsp, h=h, core=core,
+                   OCT=OCT, CROP=CROP, POOL=POOL, G=G)        # cts = [centred, oct0..7] (normalised 128³ CT per window)
+        return sample, dbg
+    return sample
 
 
 # ------------------------------------------------------- corner sources — REUSE herculabels' window machinery --

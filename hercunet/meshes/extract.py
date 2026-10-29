@@ -133,6 +133,26 @@ def sheet_stats(owner, gate, memb):
                               confidence=float(confn[k]), mass_frac=float(mfn[k])) for k in range(len(idn))}
 
 
+def confident_sheet_masks(mask_logits, sem_logits, *, thresh: float = 0.4, merge_thr: float = 1.0 / 3,
+                          mass_frac: float = 0.10, conf_thr: float = 0.70):
+    """One window's instance output → the CONFIDENT per-voxel sheet **masks** that survive detection, as used both
+    before mesh fitting and by the stitcher's query extraction. From the per-query mask logits ``mask_logits``
+    ``[Q, D, H, W]`` (whose argmax is the raw owner) and the surface semantic logits ``sem_logits`` ``[2, D, H, W]``:
+    argmax ownership + per-voxel own-membership + surface gate, then :func:`merge_confused_sheets` (over-split) and
+    :func:`prune_sheet_masks` (small-and-unconfident). Returns ``(owner[D,H,W] long, gate[D,H,W] bool, memb[D,H,W])``.
+
+    The single source of the 'surviving sheets' definition — shared by ``forward_meshes`` (→ mesh geometry) and the
+    stitcher label extractor (→ one query per surviving sheet) so the two never diverge."""
+    import torch
+    ml = torch.as_tensor(mask_logits)
+    owner = ml.argmax(0)                                                            # (D,H,W) raw ids
+    memb = torch.exp(ml.amax(0) - torch.logsumexp(ml, 0))                           # (D,H,W) own-membership
+    gate = torch.softmax(torch.as_tensor(sem_logits).float(), 0)[1] > thresh        # (D,H,W) surface gate
+    owner = merge_confused_sheets(owner, gate, ml, thresh=merge_thr)                # merge over-split sheets
+    gate = prune_sheet_masks(owner, gate, memb, mass_frac=mass_frac, conf_thr=conf_thr)  # drop small+unconfident
+    return owner, gate, memb
+
+
 def extract_window_sheets(owner, gate, *, voxel_um: float, sigma: float = 3.0, iters: int = 40, lr: float = 1.0,
                           lam: float = 0.3, step_um: float = 30.0, min_pts: int = 400, device: str = "cuda"):
     """Fit sheet meshes for one window from ``owner`` (D,H,W int sheet ids) and ``gate`` (D,H,W bool surface keep).

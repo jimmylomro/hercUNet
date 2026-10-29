@@ -339,6 +339,62 @@ def _add_labels_create(sub: argparse._SubParsersAction) -> None:
                                              fromlist=["create_run"]).create_run(a))
 
 
+# ------------------------------------------------------------------------------ stitcher (train / infer) --
+def _add_stitcher_train(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("train", help="train the cross-window sheet-stitching decoder on `labels create` samples",
+                       description="Fit the DETR-style stitching decoder (docs/hercuvit-stitching.md §6/§7) on the "
+                                   "per-corner samples written by `hercuvit labels create`: per-window normalised-PCA "
+                                   "spatial tokens + fragment median-embedding queries → a pairwise same-object "
+                                   "affinity, deep-supervised BCE from the overlap-voting pseudo-labels. No GT.")
+    p.add_argument("out", metavar="OUT_DIR", help="output dir for checkpoints (checkpoint_{latest,best,final}.pth)")
+    # sample source (local dir or HF dataset) — the `labels create` output
+    p.add_argument("--samples", default=None, metavar="DIR", help="local dir of stitch_*.npz (`labels create` output)")
+    p.add_argument("--samples-hf", dest="samples_hf", default=None, metavar="REPO",
+                   help="download the samples from an HF dataset repo (cached + idempotent)")
+    # architecture (defaults = docs §2; --pca-dim MUST match the samples' `labels create --pca-dim`)
+    p.add_argument("--pca-dim", dest="pca_dim", type=int, default=None, help="stored embedding dim D (default 3)")
+    p.add_argument("--d-model", dest="d_model", type=int, default=None, help="decoder width d (default 128)")
+    p.add_argument("--heads", type=int, default=None, help="attention heads h (default 4)")
+    p.add_argument("--layers", type=int, default=None, help="decoder layers L (default 4)")
+    p.add_argument("--fourier-bands", dest="fourier_bands", type=int, default=None, help="position Fourier bands F (default 8)")
+    # optimiser / schedule (docs §7.8)
+    p.add_argument("--epochs", type=int, default=None, help="total epochs (default 100)")
+    p.add_argument("--batch-size", dest="batch_size", type=int, default=None, help="corners per batch (default 16)")
+    p.add_argument("--base-lr", dest="base_lr", type=float, default=None, help="base LR (default 1e-4)")
+    p.add_argument("--weight-decay", dest="weight_decay", type=float, default=None, help="AdamW weight decay (default 0.05)")
+    p.add_argument("--grad-clip", dest="grad_clip", type=float, default=None, help="grad-norm clip (default 1.0)")
+    p.add_argument("--warmup-steps", dest="warmup_steps", type=int, default=None, help="LR warmup steps (default 200)")
+    p.add_argument("--lr-schedule", dest="lr_schedule", default=None, choices=("cosine", "constant"),
+                   help="LR schedule after warmup (default cosine)")
+    p.add_argument("--pos-weight", dest="pos_weight", type=float, default=None,
+                   help="BCE pos_weight for the rare positives (default 0 = auto neg/pos ratio per batch)")
+    # data / validation
+    p.add_argument("--val-fold", dest="val_fold", type=int, default=None,
+                   help="KFold(5, seed 12345) held-out fold for edge-AP validation (default 0)")
+    p.add_argument("--val-interval", dest="val_interval", type=int, default=None,
+                   help="validate edge AP every N epochs (default 5; 0 = no validation, train on all samples)")
+    p.add_argument("--num-workers", dest="num_workers", type=int, default=4, help="DataLoader workers (default 4)")
+    p.add_argument("--continue", dest="continue_", action="store_true",
+                   help="resume from {out}/checkpoint_latest.pth instead of starting fresh")
+    p.add_argument("--device", default="cuda", help="cuda | cuda:N | cpu (default cuda)")
+    p.set_defaults(func=lambda a: __import__("hercunet.hercuvit.stitch.train", fromlist=["train_run"]).train_run(a))
+
+
+def _add_stitcher_infer(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("infer", help="(not yet wired) apply a trained stitcher to a volume's stored HercuViT artifacts",
+                       description="Consume the pooled-window-embedding zarr + the per-sheet median column in the "
+                                   ".asv that a `hercuvit infer` run emits, run the stitching decoder per corner, and "
+                                   "agglomerate the pairwise affinities into a fragment→object lookup "
+                                   "(docs/hercuvit-stitching.md §8/§9). Reuses the production infer path — not wired yet.")
+    p.add_argument("--embeddings-zarr", dest="embeddings_zarr", default=None, metavar="ZARR",
+                   help="pooled per-window normalised-PCA embeddings (emitted by `hercuvit infer`)")
+    p.add_argument("--asv", default=None, metavar="ASV", help="per-window sheet meshes with the median-embedding column")
+    p.add_argument("--stitcher", default=None, metavar="file://PATH|REPO", help="trained stitcher (local .pth/dir or HF repo)")
+    p.add_argument("--out", default=None, metavar="PATH", help="output fragment→object lookup")
+    p.add_argument("--device", default="cuda", help="cuda | cuda:N | cpu (default cuda)")
+    p.set_defaults(func=lambda a: __import__("hercunet.hercuvit.stitch.infer", fromlist=["infer_run"]).infer_run(a))
+
+
 # --------------------------------------------------------------------------------- dispatch --
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -373,6 +429,11 @@ def build_parser() -> argparse.ArgumentParser:
     labels = groups.add_parser("labels", help="stitcher pseudo-label extraction (no GT)")
     labels_cmds = labels.add_subparsers(dest="command", metavar="<step>", required=True)
     _add_labels_create(labels_cmds)
+
+    stitcher = groups.add_parser("stitcher", help="cross-window sheet stitcher (train / infer)")
+    stitcher_cmds = stitcher.add_subparsers(dest="command", metavar="<step>", required=True)
+    _add_stitcher_train(stitcher_cmds)
+    _add_stitcher_infer(stitcher_cmds)
 
     return parser
 

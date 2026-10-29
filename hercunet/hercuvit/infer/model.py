@@ -84,8 +84,7 @@ class HercuvitSurfaceModel(InferenceModel):
         working-level voxel size (so the fit's 30 µm grid maps to the right pixel step). No second encoder pass."""
         import torch
         from ..model.decoder_common import mask_logits_from_embed
-        from ...meshes.extract import (extract_window_sheets, prune_sheet_masks, merge_confused_sheets,
-                                        sheet_stats)
+        from ...meshes.extract import extract_window_sheets, confident_sheet_masks, sheet_stats
         out = self.net(xb_base, run_instance=True)
         sem = out["sem_logits"]                                               # deep-sup LIST: [0] = full-res
         sem = (sem[0] if isinstance(sem, (list, tuple)) else sem)            # [B,2,P,P,P]
@@ -95,13 +94,9 @@ class HercuvitSurfaceModel(InferenceModel):
         meshes = []
         for b in range(xb_base.shape[0]):
             ml = mask_logits_from_embed(me[b:b + 1], mf[b:b + 1])[0]                        # (Q,P,P,P)
-            owner = ml.argmax(0)                                                            # (P,P,P) ids
-            memb = torch.exp(ml.amax(0) - torch.logsumexp(ml, 0))                           # (P,P,P) own-membership
-            gate = torch.softmax(sem[b].float(), 0)[1] > self._mesh["thresh"]              # (P,P,P) bool
-            # merge over-split pairs (symmetric cross-confidence > 1/3), then prune one-sided fragments
-            owner = merge_confused_sheets(owner, gate, ml, thresh=self._mesh["merge_thr"])
-            gate = prune_sheet_masks(owner, gate, memb, mass_frac=self._mesh["mass_frac"],
-                                     conf_thr=self._mesh["conf_thr"])
+            owner, gate, memb = confident_sheet_masks(                                      # shared surviving-sheet masks
+                ml, sem[b], thresh=self._mesh["thresh"], merge_thr=self._mesh["merge_thr"],
+                mass_frac=self._mesh["mass_frac"], conf_thr=self._mesh["conf_thr"])
             min_pts = max(self._mesh["min_pts"], int(self._mesh["vox_frac"] * owner.numel()))
             stats = sheet_stats(owner, gate, memb)                                      # per-sheet quality stats
             mb = extract_window_sheets(
