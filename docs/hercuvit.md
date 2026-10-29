@@ -323,7 +323,20 @@ hercuvit infer single-instance SOURCE  --model DIR|--model-hf [REPO]  --out PREF
                       [--overlap F]                 # mesh window overlap (0 = disjoint; small = a tiny per-face overlap)
                       [--region z0:z1,y0:y1,x0:x1 --level L] [--s3-prefix s3://… --pre-sync-source DIR]
 hercuvit infer multi-instance  SOURCE  … --leader                    # same flags; --leader on exactly one pod
+hercuvit labels create OUT_DIR  --model DIR|--model-hf [REPO]         # cross-window STITCHER pseudo-labels (no GT); see
+                                                                     #   docs/hercuvit-stitching.md
+                      (--count N | --coords Z,Y,X | --coords-file FILE) [--scroll ID] [--himat FRAC --seed N]
+                                                                     # corner source, CONSISTENT with `herculabels create`;
+                                                                     #   submission/corpus/corpus_windows.txt = all 4031 corners
+                      [--pca-dim 3 --overlap 0.1 --min-vote 25 --min-pts 20]   # extraction knobs (D, window overlap, vote gates)
+                      [--nshards N --shard i --device cuda:N]        # one process per GPU; writes stitch_<scroll>_z_y_x.npz
 ```
+
+`labels create` runs HercuViT at each **corner** (8 octant windows + a centred pass) and writes one stitching training
+sample per corner — per-window normalised-PCA spatial tokens + fragment median-embedding queries + a same-object label
+matrix from overlap-voting against the centred pass (no ground truth; the herculabel coords only supply corner
+locations). The corner sources mirror `herculabels create` and reuse its exact window machinery (`parse_coords_file`,
+`sample_windows`, `window_material_frac`). `hercunet/hercuvit/stitch/labels.py`. Full design: `docs/hercuvit-stitching.md`.
 
 Encoder source: `--encoder-hf [REPO]` (HF repo; bare = raw Dinovol 288) or `--encoder CKPT` (a local Dinovol
 teacher, or a `hercuvit distill` output — the windowed variant is then read from the file), with `--encoder-file`

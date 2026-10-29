@@ -6,7 +6,7 @@ training data from scratch. The methodology behind them is in [`../writeup/corpu
 
 | File | Corpus | Consumed by |
 |---|---|---|
-| [`corpus_windows.txt`](corpus_windows.txt) | **Stage-1 ∇φ pseudo-labels** — 4031 windows across 22 scrolls (`run20260808`), one `SCROLL,Z,Y,X` per line. | `hercunet labels create --coords-file` |
+| [`corpus_windows.txt`](corpus_windows.txt) | **Stage-1 ∇φ pseudo-labels** — 4031 windows across 22 scrolls (`run20260808`), one `SCROLL,Z,Y,X` per line. | `hercunet labels create --coords-file` **and** `hercuvit labels create --coords-file` (the same list as corners for the stitcher pseudo-labels) |
 | [`m7_windows.txt`](m7_windows.txt) | **m7 rehearsal** — 100 coherent m7 windows scouted from compressed regions across 20 scrolls, one `SCROLL,Z,Y,X,SIZE`. | (human index) |
 | [`m7_scout_himat_manifest.json`](m7_scout_himat_manifest.json) | **m7 rehearsal** — the full per-region record (m7/CT zarr paths, tau, coherence) for a byte-exact rebuild. | `hercunet labels m7-mine --manifest` |
 
@@ -20,6 +20,16 @@ not identical corpus.
 ```bash
 hercunet labels create scroll_corpus.herculabels --old-negatives --coords-file corpus_windows.txt
 hercunet labels export  scroll_corpus.herculabels ./train_out
+```
+
+The **same** `corpus_windows.txt` doubles as the **corner list for the HercuViT cross-window stitcher**
+(see [`../../docs/hercuvit-stitching.md`](../../docs/hercuvit-stitching.md)). Each line is treated as a corner where
+8 inference windows meet; HercuViT runs the 8 octant windows + a centred pass and writes one stitching training
+sample per corner — per-window normalised-PCA tokens + fragment median-embedding queries + an overlap-voting
+same-object label matrix. **No ground truth is used**; only the window centre (now a corner) is reused.
+
+```bash
+hercuvit labels create ./stitch_labels --coords-file corpus_windows.txt --model-hf jimmylomro/hercuvit-v0
 ```
 
 ## m7 rehearsal corpus (mined from the public m7 detector)

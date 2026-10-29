@@ -1,8 +1,12 @@
 # HercuLabels stage-1 corpus — window coordinate list (run20260808)
 # One window per line as  SCROLL,Z,Y,X  (voxel coords, pyramid level 0).
-# Regenerate the exact corpus with (--old-negatives is REQUIRED — the current default is slab-field):
+# Regenerate the exact stage-1 corpus with (--old-negatives is REQUIRED — the current default is slab-field):
 #   hercunet labels create scroll_corpus.herculabels --old-negatives --coords-file corpus_windows.txt
 #   hercunet labels export scroll_corpus.herculabels ./train_out
+# ALSO the CORNER list for the HercuViT cross-window STITCHER pseudo-labels (docs/hercuvit-stitching.md): here each
+# line is a corner where 8 inference windows meet; HercuViT runs the 8 octant windows + a centred pass and emits one
+# stitching training sample per corner (NO ground truth is read — only the location):
+#   hercuvit labels create ./stitch_labels --coords-file corpus_windows.txt --model-hf jimmylomro/hercuvit-v0
 # 4031 windows across 22 scrolls. '#'/blank lines are ignored.
 5,363,1638,5632
 5,391,1576,3172

@@ -295,6 +295,48 @@ def _add_infer_multi(sub: argparse._SubParsersAction) -> None:
     p.set_defaults(func=_infer_multi)
 
 
+def _add_labels_create(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("create", help="extract self-supervised stitcher pseudo-labels at corners (no GT)",
+                       description="Run HercuViT at each corner (8 octant windows + a centred pass) and write one "
+                                   "stitching training sample per corner into OUT_DIR: per-window normalised-PCA "
+                                   "spatial tokens + fragment median-embedding queries + a same-object label matrix "
+                                   "from overlap-voting against the centred pass. No ground truth — herculabel coords "
+                                   "only supply corner locations. Corner sources mirror `herculabels create`. See "
+                                   "docs/hercuvit-stitching.md.")
+    p.add_argument("out", metavar="OUT_DIR", help="output dir for per-corner stitching sample .npz (created if absent)")
+    # corner sources — CONSISTENT with `herculabels create`
+    p.add_argument("--count", type=int, default=None,
+                   help="number of RANDOM corners to extract headless (required unless --coords-file/--coords)")
+    p.add_argument("--scroll", default=None,
+                   help="scroll id(s) to sample from, e.g. PHerc1447 or '5,PHerc1447' (for --count/--coords, and for "
+                        "'Z,Y,X' --coords-file lines)")
+    p.add_argument("--coords", default=None, metavar="Z,Y,X",
+                   help="one exact corner at these voxel coords (requires --scroll and --count 1)")
+    p.add_argument("--coords-file", dest="coords_file", default=None, metavar="FILE",
+                   help="extract exactly the corners listed (one per line as 'Z,Y,X' with --scroll, or 'SCROLL,Z,Y,X'; "
+                        "'#'/blank lines ignored). This is submission/corpus/corpus_windows.txt for the full herculabel set")
+    p.add_argument("--himat", type=float, default=None, metavar="FRAC",
+                   help="--count only: keep a corner whose material fill is at least FRAC (0-1); default = light air-skip")
+    p.add_argument("--seed", type=int, default=None, help="--count only: base seed for the random draw (omit = fresh)")
+    # model
+    p.add_argument("--model", default=None, metavar="DIR|PTH", help="trained HercuViT checkpoint dir or .pth")
+    p.add_argument("--model-hf", dest="model_hf", nargs="?", const=_MODEL_HF, default=None, metavar="REPO",
+                   help=f"download the trained model from an HF repo (bare flag = {_MODEL_HF})")
+    p.add_argument("--ckpt", default="checkpoint_best.pth", help="checkpoint filename within --model dir")
+    # extraction knobs
+    p.add_argument("--pca-dim", dest="pca_dim", type=int, default=3, help="per-window normalised-PCA dimension D (default 3)")
+    p.add_argument("--overlap", type=float, default=0.1, help="window overlap fraction (default 0.1)")
+    p.add_argument("--min-vote", dest="min_vote", type=int, default=25, help="min overlap voxels to label a fragment (default 25)")
+    p.add_argument("--min-pts", dest="min_pts", type=int, default=20, help="min 1/8 surface cells for a fragment query (default 20)")
+    # sharding (one process per GPU for a multi-GPU box)
+    p.add_argument("--nshards", type=int, default=1, help="split the corner list across processes (one per GPU)")
+    p.add_argument("--shard", type=int, default=0, help="this process's shard index (0..nshards-1)")
+    p.add_argument("--overwrite", action="store_true", help="re-extract corners whose .npz already exists")
+    p.add_argument("--device", default="cuda", help="cuda | cuda:N | cpu")
+    p.set_defaults(func=lambda a: __import__("hercunet.hercuvit.stitch.labels",
+                                             fromlist=["create_run"]).create_run(a))
+
+
 # --------------------------------------------------------------------------------- dispatch --
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -325,6 +367,10 @@ def build_parser() -> argparse.ArgumentParser:
     infer_cmds = infer.add_subparsers(dest="command", metavar="<mode>", required=True)
     _add_infer_single(infer_cmds)
     _add_infer_multi(infer_cmds)
+
+    labels = groups.add_parser("labels", help="stitcher pseudo-label extraction (no GT)")
+    labels_cmds = labels.add_subparsers(dest="command", metavar="<step>", required=True)
+    _add_labels_create(labels_cmds)
 
     return parser
 
