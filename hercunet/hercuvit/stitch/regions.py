@@ -109,3 +109,106 @@ def sample_region_corners(arr, origin, voxel_um, target_um, *, n, himat=0.15, ov
             acc = np.vstack([acc, p])
             out.append(((int(p[0] + oz), int(p[1] + oy), int(p[2] + ox)), frac))
     return out
+
+
+# --------------------------------------------------------------------- region placement + the driver --
+def place_regions(be, scroll, side, n, rng):
+    """Place up to ``n`` region bboxes (z0,z1,y0,y1,x0,x1) of edge ``side`` spread across the scroll's material bbox,
+    min-spaced ~``side`` so they sample DIFFERENT parts of the volume (sparse, not one blob). Reuses herculabels'
+    ``scroll_geom`` for the (voxel, shape, XY material bbox)."""
+    from ...herculabels._brick import scroll_geom
+    vu, (Z, Y, X), (by0, by1, bx0, bx1) = scroll_geom(be, scroll, 0, {})
+    hs = side // 2
+    lo = np.array([hs, max(by0 + hs, hs), max(bx0 + hs, hs)])
+    hi = np.array([Z - hs, min(by1 - hs, Y - hs), min(bx1 - hs, X - hs)])
+    if np.any(hi <= lo):
+        return [], float(vu)
+    acc, out, tries = [], [], 0
+    while len(out) < n and tries < n * 40:
+        tries += 1
+        c = rng.integers(lo, hi)
+        if acc and float(((np.array(acc) - c) ** 2).sum(1).min()) ** 0.5 < side * 0.8:   # keep regions apart
+            continue
+        acc.append(tuple(int(v) for v in c))
+        out.append((c[0] - hs, c[0] + hs, c[1] - hs, c[1] + hs, c[2] - hs, c[2] + hs))
+    return out, float(vu)
+
+
+def create_run(a):
+    """``hercuvit labels create --regions`` driver: per volume, place + download a few regions, extract non-overlapping
+    himat corners from RAM (batched), write one npz per label + a provenance manifest (JSONL). Freed region-by-region.
+    Sharded across scrolls by ``--shard/--nshards`` for a multi-GPU box."""
+    import json
+    import shutil
+    import time
+
+    import torch
+
+    from ...config import Config
+    from ...data import get_backend
+    from ...herculabels._brick import find_scroll, in_band_scrolls
+    from ...herculabels.create import _resolve_scrolls
+    from ..infer.loader import load_hercuvit
+    from .labels import extract_corner
+
+    dev = torch.device(a.device)
+    net, recipe, _ = load_hercuvit(model=a.model, model_hf=a.model_hf, ckpt=a.ckpt, device=a.device, with_instance=True)
+    target_um = float(recipe.target_voxel_um)
+    os.makedirs(a.out, exist_ok=True)
+    cache = a.region_cache or os.path.join(a.out, "_regions")
+    os.makedirs(cache, exist_ok=True)
+
+    be = get_backend(Config.from_env())
+    scrolls = _resolve_scrolls(be, a.scroll, 7.5, 9.5, find_scroll, in_band_scrolls)
+    sids = sorted(scrolls)[a.shard::a.nshards]                          # shard by scroll across GPUs
+    per_vol = max(1, a.count // max(1, len(sorted(scrolls))))
+    rng = np.random.default_rng((a.seed or 0) + a.shard)
+    man = open(os.path.join(a.out, f"manifest_{a.shard}.jsonl"), "a")
+    print(f"[regions] shard {a.shard}/{a.nshards}: {len(sids)} scrolls, target {per_vol}/scroll "
+          f"({a.count} total), region {a.region_side}³, infer_batch {a.infer_batch} -> {a.out}", flush=True)
+
+    total, t0 = 0, time.time()
+    for sid in sids:
+        got = 0
+        bboxes, vu = place_regions(be, sid, a.region_side, a.regions_per_volume, rng)
+        for bbox in bboxes:
+            if got >= per_vol:
+                break
+            try:
+                arr, origin, vu = download_region(sid, bbox, save_dir=cache)
+            except Exception as e:
+                print(f"[regions] {sid} region download FAILED: {repr(e)[:140]}", flush=True)
+                continue
+            reader = RegionReader(sid, arr, origin, vu)
+            want = min(a.per_region, per_vol - got)
+            himat = a.himat if a.himat is not None else 0.15          # herculabels default
+            for coord, frac in sample_region_corners(arr, origin, vu, target_um, n=want, himat=himat,
+                                                     overlap=a.overlap, min_dist=a.min_dist,
+                                                     seed=int(rng.integers(1 << 31))):
+                try:
+                    s = extract_corner(net, reader, sid, coord, target_um, dev, D=a.pca_dim, overlap=a.overlap,
+                                       min_vote=a.min_vote, min_pts=a.min_pts, infer_batch=a.infer_batch)
+                except Exception as e:
+                    print(f"[regions] corner {coord} FAILED: {repr(e)[:120]}", flush=True)
+                    continue
+                if s is None:
+                    continue
+                tag = f"s{sid}_z{coord[0]}_y{coord[1]}_x{coord[2]}"
+                np.savez_compressed(os.path.join(a.out, f"stitch_{tag}.npz"), **s)
+                Y = s["Y"]; iu = np.triu_indices(Y.shape[0], 1); yy = Y[iu]
+                man.write(json.dumps(dict(npz=f"stitch_{tag}.npz", scroll=str(sid), region=[int(b) for b in bbox],
+                                          coord=[int(c) for c in coord], himat=round(float(frac), 3),
+                                          M=int(len(s["slot_q"])), npos=int((yy == 1).sum()),
+                                          nneg=int((yy == 0).sum()), D=int(a.pca_dim))) + "\n")
+                man.flush()
+                got += 1; total += 1
+            del arr, reader
+            if not a.keep_regions:                                     # free the region (disk tight; corpus is the keeper)
+                shutil.rmtree(os.path.join(cache, f"{sid}_z{bbox[0]}_y{bbox[2]}_x{bbox[4]}.zarr"), ignore_errors=True)
+            print(f"[regions] {sid}: {got}/{per_vol}  ({total} total, {(time.time()-t0)/max(total,1):.1f}s/label)", flush=True)
+            if a.count and total >= a.count:
+                break
+        if a.count and total >= a.count:
+            break
+    man.close()
+    print(f"[regions] DONE shard {a.shard}: {total} labels written in {time.time()-t0:.0f}s", flush=True)

@@ -331,12 +331,33 @@ def _add_labels_create(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--stream-workers", dest="stream_workers", type=int, default=8,
                    help="concurrent CT reads per corner (prefetch; 1 = sequential). Latency-bound streaming → 8 hides most of it")
     # sharding (one process per GPU for a multi-GPU box)
-    p.add_argument("--nshards", type=int, default=1, help="split the corner list across processes (one per GPU)")
+    p.add_argument("--nshards", type=int, default=1, help="split work across processes (one per GPU)")
     p.add_argument("--shard", type=int, default=0, help="this process's shard index (0..nshards-1)")
     p.add_argument("--overwrite", action="store_true", help="re-extract corners whose .npz already exists")
+    p.add_argument("--infer-batch", dest="infer_batch", type=int, default=1,
+                   help="HercuViT windows per forward (1 = safe on small GPUs; raise to ~9 on a 5090/large GPU for the "
+                        "batched speedup — a small GPU is already SM-saturated at 1)")
     p.add_argument("--device", default="cuda", help="cuda | cuda:N | cpu")
-    p.set_defaults(func=lambda a: __import__("hercunet.hercuvit.stitch.labels",
-                                             fromlist=["create_run"]).create_run(a))
+    # --- REGION mode: download a few big regions per volume to local, extract non-overlapping corners from RAM ---
+    p.add_argument("--regions", action="store_true",
+                   help="REGION mode: per volume, download a few material regions to a local compressed zarr and "
+                        "extract non-overlapping himat corners from RAM (no per-corner streaming). Uses --count as the "
+                        "TOTAL label target across all herculabel volumes; writes a provenance manifest_<shard>.jsonl.")
+    p.add_argument("--region-side", dest="region_side", type=int, default=768, metavar="VOX",
+                   help="region cube edge in native voxels (default 768; margin ≈1 fov per side is download overhead)")
+    p.add_argument("--regions-per-volume", dest="regions_per_volume", type=int, default=20,
+                   help="max regions placed across each volume's material bbox (default 20)")
+    p.add_argument("--per-region", dest="per_region", type=int, default=80,
+                   help="max corners sampled per region (default 80)")
+    p.add_argument("--min-dist", dest="min_dist", type=int, default=None, metavar="VOX",
+                   help="min spacing between corners so their windows don't overlap (default = fov = no overlap)")
+    p.add_argument("--region-cache", dest="region_cache", default=None, metavar="DIR",
+                   help="where regions download to (default {OUT_DIR}/_regions); freed per-region unless --keep-regions")
+    p.add_argument("--keep-regions", dest="keep_regions", action="store_true",
+                   help="keep the downloaded region zarrs instead of freeing them after extraction (needs disk)")
+    p.set_defaults(func=lambda a: (__import__("hercunet.hercuvit.stitch.regions", fromlist=["create_run"]).create_run(a)
+                                   if getattr(a, "regions", False) else
+                                   __import__("hercunet.hercuvit.stitch.labels", fromlist=["create_run"]).create_run(a)))
 
 
 # ------------------------------------------------------------------------------ stitcher (train / infer) --
