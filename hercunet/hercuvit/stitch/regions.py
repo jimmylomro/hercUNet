@@ -79,11 +79,14 @@ def download_region(scroll, bbox, *, save_dir: str | None = None) -> tuple[np.nd
     return arr, (z0, y0, x0), vu
 
 
-def sample_region_corners(arr, origin, voxel_um, target_um, *, n, himat=0.15, overlap=0.1, min_dist=None, seed=0):
+def sample_region_corners(arr, origin, voxel_um, target_um, *, n, himat=0.15, overlap=0.1, min_dist=None,
+                          exclude=None, seed=0):
     """Sample up to ``n`` corner coords (global z,y,x) inside the region whose 9 windows all fit, material-gated
     (herculabels-style: fraction of the centred window above the region's 55th-percentile threshold ≥ ``himat``)
     and **spaced ≥ ``min_dist``** apart so their windows don't overlap — default ``min_dist = fov`` (adjacent
-    corners' central windows just touch, no overlap). Returns a list of ``(global_coord, material_frac)``."""
+    corners' central windows just touch, no overlap). ``exclude`` = global (z,y,x) coords of ALREADY-extracted
+    corners (any scroll's full set); a candidate within ``min_dist`` of one is rejected, so a new run never repeats
+    or overlaps a prior one. Returns a list of ``(global_coord, material_frac)``."""
     fov = int(round(CROP * target_um / voxel_um))
     core = int(round(CROP * (1 - overlap) * target_um / voxel_um))
     reach = core // 2 + fov // 2 + 2                                    # a window reaches coord ± (h + fov/2)
@@ -97,6 +100,11 @@ def sample_region_corners(arr, origin, voxel_um, target_um, *, n, himat=0.15, ov
     thr = float(np.percentile(arr[::4, ::4, ::4], 55))                 # material threshold (subsampled, fast)
     rng = np.random.default_rng(seed)
     acc = np.empty((0, 3), np.int64)                                   # accepted LOCAL coords (for the spacing check)
+    if exclude is not None and len(exclude):                          # seed the spacing check with prior corners (local)
+        loc = np.asarray(exclude, np.int64) - np.array([oz, oy, ox])
+        inb = ((loc >= -md) & (loc <= np.array([Z, Y, X]) + md)).all(1)   # only those near this region can block
+        if inb.any():
+            acc = loc[inb]                                            # never emitted, only blocks candidates
     out, tries, cap = [], 0, n * 60
     while len(out) < n and tries < cap:
         tries += 1
@@ -112,6 +120,28 @@ def sample_region_corners(arr, origin, voxel_um, target_um, *, n, himat=0.15, ov
 
 
 # --------------------------------------------------------------------- region placement + the driver --
+_STITCH_RX = None
+
+
+def _load_exclusions(dirs):
+    """Parse ``stitch_s<scroll>_z<z>_y<y>_x<x>.npz`` filenames under each dir into ``{scroll: (N,3) int64 coords}`` —
+    the corners already extracted, which a new run must avoid. ``dirs`` may be None, a str, or a list of dirs."""
+    import glob
+    import re
+    if not dirs:
+        return {}
+    if isinstance(dirs, str):
+        dirs = [dirs]
+    rx = re.compile(r"stitch_s(.+?)_z(\d+)_y(\d+)_x(\d+)\.npz$")
+    acc: dict[str, list] = {}
+    for d in dirs:
+        for fp in glob.glob(os.path.join(d, "stitch_s*.npz")):
+            m = rx.search(os.path.basename(fp))
+            if m:
+                acc.setdefault(m.group(1), []).append((int(m.group(2)), int(m.group(3)), int(m.group(4))))
+    return {s: np.asarray(v, np.int64) for s, v in acc.items()}
+
+
 def place_regions(be, scroll, side, n, rng):
     """Place up to ``n`` region bboxes (z0,z1,y0,y1,x0,x1) of edge ``side`` spread across the scroll's material bbox,
     min-spaced ~``side`` so they sample DIFFERENT parts of the volume (sparse, not one blob). Reuses herculabels'
@@ -164,8 +194,10 @@ def create_run(a):
     per_vol = max(1, a.count // max(1, len(sorted(scrolls))))
     rng = np.random.default_rng((a.seed or 0) + a.shard)
     man = open(os.path.join(a.out, f"manifest_{a.shard}.jsonl"), "a")
+    exclmap = _load_exclusions(getattr(a, "exclude_dir", None))       # {scroll: (N,3) coords} of already-extracted corners
     print(f"[regions] shard {a.shard}/{a.nshards}: {len(sids)} scrolls, target {per_vol}/scroll "
-          f"({a.count} total), region {a.region_side}³, infer_batch {a.infer_batch} -> {a.out}", flush=True)
+          f"({a.count} total), region {a.region_side}³, infer_batch {a.infer_batch}"
+          f"{f', excluding {sum(len(v) for v in exclmap.values())} prior corners' if exclmap else ''} -> {a.out}", flush=True)
 
     total, t0 = 0, time.time()
     for sid in sids:
@@ -184,6 +216,7 @@ def create_run(a):
             himat = a.himat if a.himat is not None else 0.15          # herculabels default
             for coord, frac in sample_region_corners(arr, origin, vu, target_um, n=want, himat=himat,
                                                      overlap=a.overlap, min_dist=a.min_dist,
+                                                     exclude=exclmap.get(str(sid)),
                                                      seed=int(rng.integers(1 << 31))):
                 try:
                     s = extract_corner(net, reader, sid, coord, target_um, dev, D=a.pca_dim, overlap=a.overlap,

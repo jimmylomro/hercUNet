@@ -163,29 +163,110 @@ def extract_window_sheets(owner, gate, *, voxel_um: float, sigma: float = 3.0, i
                             step_um=step_um, min_pts=min_pts, device=device)
 
 
+class EmbSink:
+    """Append per-window pooled PCA embeddings to a zarr GROUP (one shard per worker; the leader concatenates shards).
+    Written by ``--store-embeddings``: ``emb`` = (n_win, G, G, G, D) float16 per-window 1/8-grid normalised-PCA tokens
+    (the stitcher's spatial memory), ``origin`` = (n_win, 3) int32 window (z,y,x) start on the working-level grid.
+    Arrays are created lazily on the first window (G/D taken from its grid)."""
+
+    def __init__(self, path: str, *, meta: dict | None = None):
+        import zarr
+        self.path = str(path)
+        self.z = zarr.open_group(self.path, mode="w")
+        self.z.attrs.update(dict(meta or {}))
+        self.emb = self.origin = None
+        self.n = 0
+
+    def add_window(self, origin_zyx, emb_grid) -> None:
+        import numcodecs
+        e = np.asarray(emb_grid, np.float16)
+        if self.emb is None:
+            G0, G1, G2, D = e.shape
+            comp = numcodecs.Blosc("zstd", clevel=3, shuffle=1)
+            self.emb = self.z.create_dataset("emb", shape=(0, G0, G1, G2, D), chunks=(16, G0, G1, G2, D),
+                                             dtype="float16", compressor=comp)
+            self.origin = self.z.create_dataset("origin", shape=(0, 3), chunks=(8192, 3), dtype="int32")
+        self.emb.append(e[None], axis=0)
+        self.origin.append(np.asarray([[int(v) for v in origin_zyx]], np.int32), axis=0)
+        self.n += 1
+
+    def close(self) -> None:
+        self.z.attrs["n_windows"] = int(self.n)
+
+
+def merge_emb_shards(shards, final: str) -> int:
+    """Leader step: concatenate per-worker ``{out}_emb.{pid}.zarr`` shards into one ``{out}_emb.zarr``. One shard is
+    just renamed; several are appended window-by-window. Returns the total window count."""
+    import os
+    import shutil
+    import zarr
+    shards = [s for s in shards if os.path.isdir(s) and s != final]
+    if not shards:
+        return 0
+    if os.path.exists(final):
+        shutil.rmtree(final)
+    if len(shards) == 1:
+        os.rename(shards[0], final)
+        g = zarr.open_group(final, mode="r")
+        return int(g.attrs.get("n_windows", g["emb"].shape[0] if "emb" in g else 0))
+    out = zarr.open_group(final, mode="w"); emb_out = org_out = None; n = 0
+    for i, s in enumerate(shards):
+        g = zarr.open_group(s, mode="r")
+        if "emb" not in g:
+            continue
+        if i == 0:
+            out.attrs.update(dict(g.attrs))
+        e, o = g["emb"][:], g["origin"][:]
+        if emb_out is None:
+            import numcodecs
+            comp = numcodecs.Blosc("zstd", clevel=3, shuffle=1)
+            emb_out = out.create_dataset("emb", shape=(0,) + e.shape[1:], chunks=(16,) + e.shape[1:],
+                                         dtype="float16", compressor=comp)
+            org_out = out.create_dataset("origin", shape=(0, 3), chunks=(8192, 3), dtype="int32")
+        emb_out.append(e, axis=0); org_out.append(o, axis=0); n += int(e.shape[0])
+    out.attrs["n_windows"] = int(n)
+    for s in shards:
+        shutil.rmtree(s, ignore_errors=True)
+    return n
+
+
 class MeshSink:
     """Write per-window sheet meshes into an open :class:`~hercunet.meshes.asv.AsvWriter`, converting window-local
     voxel coords (z,y,x, at the working level) to global native-L0 XYZ. ``downsample`` is the working level's L0
-    downsample factor (1.0 at level 0). One sink per worker shard; the engine calls :meth:`add_window` per window."""
+    downsample factor (1.0 at level 0). One sink per worker shard; the engine calls :meth:`add_window` per window.
+    With ``emb_path`` it ALSO opens an :class:`EmbSink`: per window, the sentinel ``meshes['_emb_grid']`` grid is
+    written to the zarr and each sheet's median embedding (``mesh['emb']``) is stored in the sheet's .asv annotation."""
 
-    def __init__(self, writer, downsample: float = 1.0, name_prefix: str = ""):
+    def __init__(self, writer, downsample: float = 1.0, name_prefix: str = "", emb_path: str | None = None,
+                 emb_meta: dict | None = None):
         self.w = writer
         self.ds = float(downsample)
         self.pre = name_prefix
         self.n_windows = 0
         self.n_sheets = 0
+        self.emb = EmbSink(emb_path, meta=emb_meta) if emb_path else None
 
     def add_window(self, origin_zyx, meshes) -> None:
         """``origin_zyx`` = the window's (z,y,x) start on the working-level grid; ``meshes`` = ``{sid: mesh}`` from
-        :func:`extract_window_sheets` (verts window-local z,y,x). Each sheet is stored in global L0 XYZ."""
+        :func:`extract_window_sheets` (verts window-local z,y,x), optionally carrying a ``'_emb_grid'`` sentinel and
+        per-sheet ``'emb'`` medians. Each sheet is stored in global L0 XYZ."""
         oz, oy, ox = (float(v) for v in origin_zyx)
         off = np.array([oz, oy, ox], np.float32)
         wname = f"z{int(oz)}_y{int(oy)}_x{int(ox)}"
         self.n_windows += 1
+        meshes = dict(meshes)
+        emb_grid = meshes.pop("_emb_grid", None)                                      # sentinel: the window's pooled grid
+        if self.emb is not None and emb_grid is not None:
+            self.emb.add_window(origin_zyx, emb_grid)
         for sid, m in meshes.items():
             g_zyx = (m["verts"] + off) * self.ds                                     # window-local -> global L0 (z,y,x)
+            ann = {"emb": list(m["emb"])} if m.get("emb") is not None else None
             self.w.add_sheet(m["foot"], g_zyx[:, ::-1], name=f"{self.pre}{wname}_s{int(sid)}", window=wname,
                              n_voxels=m.get("n_voxels"), self_mass=m.get("self_mass"),
                              confidence=m.get("confidence"), mass_frac=m.get("mass_frac"),
-                             fit_rms_um=m.get("fit_rms_um"), coverage=m.get("coverage"))
+                             fit_rms_um=m.get("fit_rms_um"), coverage=m.get("coverage"), annotation=ann)
             self.n_sheets += 1
+
+    def close(self) -> None:
+        if self.emb is not None:
+            self.emb.close()

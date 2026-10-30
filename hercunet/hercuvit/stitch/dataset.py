@@ -36,13 +36,39 @@ def find_samples(samples_dir: str):
     return files
 
 
+def _relabel(Y, slot_q, mode):
+    """Load-time label-quality fix (same labels, no re-extraction). ``mode``:
+      * ``raw`` — Y unchanged (baseline).
+      * ``v1`` — same-slot pairs → negative, then DROP off-seam queries (``gid=-1``: no labelable pair in the
+        ORIGINAL Y). Returns a keep-mask so the caller also filters ``Xq/slot_q/conf_q``. Matrix becomes 100%
+        labelled over the seam-meeting queries. (Falls back to v2 labelling if <2 queries would remain.)
+      * ``v2`` — same-slot pairs → negative, then ALL remaining ignore(-1) pairs → negative (off-seam sheets are
+        genuine negatives *at this corner*). Keeps every query; matrix becomes 100% labelled.
+    The spatial memory (``Xs/Ps/slot_s``) is untouched in every mode — off-seam material stays as context."""
+    if mode == "raw":
+        return Y, None
+    M = Y.shape[0]
+    off = ~np.eye(M, dtype=bool)
+    same = slot_q[:, None] == slot_q[None, :]
+    keep = (Y >= 0).any(axis=1)                             # gid>=0 on the ORIGINAL Y = seam-meeting fragment
+    Y = Y.copy()
+    Y[same & off] = 0                                       # same window, different owner = certain negative
+    if mode == "v1" and int(keep.sum()) >= 2:
+        idx = np.where(keep)[0]
+        return Y[np.ix_(idx, idx)], keep                   # caller filters Xq/slot_q/conf_q by `keep`
+    Y[off & (Y == -1)] = 0                                  # v2 (and the v1 <2 fallback): off-seam pairs -> negative
+    return Y, None
+
+
 class StitchSampleDataset(Dataset):
     """One ``stitch_*.npz`` corner per item → a dict of tensors (variable ``S``, ``M``). ``pca_dim`` is asserted
-    against each file so a config/sample mismatch fails loudly rather than silently mis-shaping the decoder."""
+    against each file so a config/sample mismatch fails loudly rather than silently mis-shaping the decoder.
+    ``label_mode`` ∈ {raw, v1, v2} applies the load-time label-quality fix (see :func:`_relabel`)."""
 
-    def __init__(self, files, *, pca_dim: int) -> None:
+    def __init__(self, files, *, pca_dim: int, label_mode: str = "raw") -> None:
         self.files = list(files)
         self.pca_dim = int(pca_dim)
+        self.label_mode = str(label_mode)
 
     def __len__(self) -> int:
         return len(self.files)
@@ -61,6 +87,9 @@ class StitchSampleDataset(Dataset):
             raise ValueError(f"{os.path.basename(path)}: embedding dim {Xs.shape[1]} != config pca_dim "
                              f"{self.pca_dim} — re-extract with `labels create --pca-dim {self.pca_dim}` "
                              f"or train with --pca-dim {Xs.shape[1]}")
+        Y, keep = _relabel(Y, slot_q, self.label_mode)        # load-time label-quality fix (train only)
+        if keep is not None:                                  # v1: drop the off-seam queries kept out of Y
+            Xq, slot_q, conf_q = Xq[keep], slot_q[keep], conf_q[keep]
         return {"Xs": torch.from_numpy(Xs), "Ps": torch.from_numpy(Ps), "slot_s": torch.from_numpy(slot_s),
                 "Xq": torch.from_numpy(Xq), "slot_q": torch.from_numpy(slot_q), "conf_q": torch.from_numpy(conf_q),
                 "Y": torch.from_numpy(Y), "path": path}

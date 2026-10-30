@@ -21,11 +21,14 @@ class HercuvitSurfaceModel(InferenceModel):
 
     def __init__(self, net, p_size, *, overlap=0.25, with_meshes=False, mesh_thresh=0.4, mesh_sigma=3.0,
                  mesh_fit_iters=40, mesh_fit_lr=1.0, mesh_fit_lam=0.3, mesh_min_pts=400, mesh_step_um=30.0,
-                 mesh_mass_frac=0.10, mesh_conf_thr=0.70, mesh_vox_frac=0.001, mesh_merge_thr=1.0 / 3):
+                 mesh_mass_frac=0.10, mesh_conf_thr=0.70, mesh_vox_frac=0.001, mesh_merge_thr=1.0 / 3,
+                 store_embeddings=False, emb_dim=3):
         self.net = net
         self._p = int(p_size)
         self._overlap = float(overlap)
         self.emits_meshes = bool(with_meshes)
+        self._store_emb = bool(store_embeddings)                 # --store-embeddings: per-window PCA + per-sheet median
+        self._D = int(emb_dim)
         self._mesh = dict(thresh=float(mesh_thresh), sigma=float(mesh_sigma), iters=int(mesh_fit_iters),
                           lr=float(mesh_fit_lr), lam=float(mesh_fit_lam), min_pts=int(mesh_min_pts),
                           step_um=float(mesh_step_um), mass_frac=float(mesh_mass_frac),
@@ -36,7 +39,8 @@ class HercuvitSurfaceModel(InferenceModel):
     def load(cls, *, model=None, model_hf=None, ckpt="checkpoint_best.pth", device="cuda",
              attention_backend=None, overlap=0.25, with_meshes=False, mesh_thresh=0.4, mesh_sigma=3.0,
              mesh_fit_iters=40, mesh_fit_lr=1.0, mesh_fit_lam=0.3, mesh_min_pts=400, mesh_step_um=30.0,
-             mesh_mass_frac=0.10, mesh_conf_thr=0.70, mesh_vox_frac=0.001, mesh_merge_thr=1.0 / 3, **_):
+             mesh_mass_frac=0.10, mesh_conf_thr=0.70, mesh_vox_frac=0.001, mesh_merge_thr=1.0 / 3,
+             store_embeddings=False, emb_dim=3, **_):
         from .loader import load_hercuvit
         net, recipe, _cfg = load_hercuvit(model, model_hf=model_hf, ckpt=ckpt, device=device,
                                           attention_backend=attention_backend, with_instance=bool(with_meshes))
@@ -44,7 +48,7 @@ class HercuvitSurfaceModel(InferenceModel):
                    mesh_sigma=mesh_sigma, mesh_fit_iters=mesh_fit_iters, mesh_fit_lr=mesh_fit_lr,
                    mesh_fit_lam=mesh_fit_lam, mesh_min_pts=mesh_min_pts, mesh_step_um=mesh_step_um,
                    mesh_mass_frac=mesh_mass_frac, mesh_conf_thr=mesh_conf_thr, mesh_vox_frac=mesh_vox_frac,
-                   mesh_merge_thr=mesh_merge_thr)
+                   mesh_merge_thr=mesh_merge_thr, store_embeddings=store_embeddings, emb_dim=emb_dim)
 
     @property
     def patch_size(self) -> int:
@@ -91,6 +95,12 @@ class HercuvitSurfaceModel(InferenceModel):
         mf = out["mask_features"]                                             # tensor [B,C,P,P,P] (or list)
         mf = (mf[0] if isinstance(mf, (list, tuple)) else mf).float()        # [B,C,P,P,P]
         me = out["instance"]["layers"][-1]["mask_embed"].float()             # [B,Q,C]
+        tok = Gtok = POOL = None
+        if self._store_emb:                                                  # --store-embeddings: encoder tokens for PCA
+            t = self.net.backbone.forward_features(xb_base, view_kind="global")["x_norm_patchtokens"]  # (B,G³,C)
+            Gtok = round(round(t.shape[1]) ** (1.0 / 3))
+            tok = t.float().reshape(t.shape[0], Gtok, Gtok, Gtok, -1).cpu().numpy()
+            POOL = self._p // Gtok
         meshes = []
         for b in range(xb_base.shape[0]):
             ml = mask_logits_from_embed(me[b:b + 1], mf[b:b + 1])[0]                        # (Q,P,P,P)
@@ -105,5 +115,16 @@ class HercuvitSurfaceModel(InferenceModel):
                 device=owner.device.type)
             for _sid, _m in mb.items():
                 _m.update(stats.get(int(_sid), {}))                                    # attach mass/conf stats
+            if self._store_emb:                                                        # per-window PCA + per-sheet median
+                from ..stitch.embed import reduce_normalised_pca, median_after_pca
+                sl = slice(POOL // 2, None, POOL)
+                o8 = owner[sl, sl, sl].to(torch.int32).cpu().numpy()                    # (G,G,G) owner at 1/8
+                g8 = gate[sl, sl, sl].cpu().numpy().astype(bool)                        # (G,G,G) confident gate at 1/8
+                emb = reduce_normalised_pca(tok[b], g8, self._D)                        # (G,G,G,D) per-window PCA
+                for _sid, _m in mb.items():
+                    cells = (o8 == int(_sid)) & g8
+                    med = median_after_pca(emb, cells) if bool(cells.any()) else np.zeros(self._D, np.float32)
+                    _m["emb"] = [float(v) for v in np.asarray(med).ravel()]
+                mb["_emb_grid"] = emb.astype(np.float16)                                # sentinel for MeshSink -> zarr
             meshes.append(mb)
         return sem, meshes

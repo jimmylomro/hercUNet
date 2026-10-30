@@ -26,7 +26,7 @@ import torch
 from ..infer.loader import load_hercuvit
 from ..data.dataset import ScrollCtReader, resample_to_crop
 from ..data.normalize import dinovol_normalise
-from .embed import reduce_normalised_pca, median_after_pca
+from .embed import reduce_normalised_pca, median_after_pca, corner_spatial_tokens
 
 CROP = 128
 POOL = 8
@@ -147,23 +147,14 @@ def extract_corner(net, reader, scroll, coord, target_um, device, *, D=3, overla
     both = known[:, None] & known[None, :]
     Y[both] = 0; Y[same] = 1; np.fill_diagonal(Y, -1)
 
-    # --- spatial tokens: each octant window's 1/8 tokens inside the ±fov/2 cube (overlap kept, slot-tagged) --------
-    ii, jj, kk = np.meshgrid(np.arange(G), np.arange(G), np.arange(G), indexing="ij")
-    Xs, Ps, Ss = [], [], []
-    for k in OCT:
-        off = np.array([k[0] * h, k[1] * h, k[2] * h]); slot = (k[0] > 0) * 4 + (k[1] > 0) * 2 + (k[2] > 0)
-        d = np.stack([(ii * POOL + POOL / 2 - CROP / 2) * nsp + off[0],
-                      (jj * POOL + POOL / 2 - CROP / 2) * nsp + off[1],
-                      (kk * POOL + POOL / 2 - CROP / 2) * nsp + off[2]], -1)     # native offset from the corner
-        inside = (np.abs(d) <= fov / 2).all(-1)
-        Xs.append(emb[k][inside]); Ps.append((d[inside] / (fov / 2)).astype(np.float16))
-        Ss.append(np.full(int(inside.sum()), slot, np.uint8))
+    # --- spatial tokens (shared placement with `stitcher infer`, docs §5.1): each octant window's 1/8 tokens inside
+    #     the ±fov/2 cube around the corner, overlap kept, slot-tagged ------------------------------------------------
+    Xs_a, Ps_a, Ss_a = corner_spatial_tokens({k: emb[k] for k in OCT}, h=h, fov=fov, nsp=nsp, CROP=CROP, POOL=POOL)
 
     sample = dict(scroll=str(scroll), coord=np.asarray(coord, np.int64), D=np.int64(D), overlap=np.float32(overlap),
                   Xq=np.asarray(qemb, np.float16), slot_q=np.asarray(qslot, np.uint8),
                   conf_q=np.asarray(qconf, np.float16), own_q=np.asarray(qown, np.int16), Y=Y,
-                  Xs=np.concatenate(Xs).astype(np.float16), Ps=np.concatenate(Ps),
-                  slot_s=np.concatenate(Ss))
+                  Xs=Xs_a.astype(np.float16), Ps=Ps_a, slot_s=Ss_a)
     if return_debug:
         dbg = dict(W=W, centre=centre, cts=cts, vu=vu, fov=fov, nsp=nsp, h=h, core=core,
                    OCT=OCT, CROP=CROP, POOL=POOL, G=G)        # cts = [centred, oct0..7] (normalised 128³ CT per window)

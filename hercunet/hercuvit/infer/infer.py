@@ -37,6 +37,9 @@ def _drive(a, *, across_pods: bool) -> None:
     if a.s3_prefix and a.surf != "upload" and a.mesh != "upload":
         raise SystemExit("hercuvit infer: --s3-prefix given but neither --surf nor --mesh is 'upload' — "
                          "specify what to upload (e.g. --mesh upload).")
+    store_emb = bool(getattr(a, "store_embeddings", False))
+    if store_emb and a.mesh == "off":
+        raise SystemExit("hercuvit infer: --store-embeddings needs the sheets — set --mesh local (or upload).")
 
     model_dir = _resolve_model(a)
     region = parse_region(a.region)
@@ -46,10 +49,12 @@ def _drive(a, *, across_pods: bool) -> None:
         model_type="hercuvit-surface",
         model_import="hercunet.hercuvit.infer.model",          # so a worker subprocess registers the model
         surf_store=a.surf, mesh_store=a.mesh,
+        store_embeddings=store_emb, emb_dim=int(getattr(a, "emb_dim", 3)),
         finalise=(a.finalise if a.surf != "off" else "no"),   # surface pyramid only when the surface is stored
         upload=("last" if a.surf == "upload" else "no"),      # surface S3 upload gated by --surf (meshes by --mesh)
         model_opts=dict(attention_backend=a.attention_backend, overlap=a.overlap,
-                        with_meshes=(a.mesh != "off"), mesh_fit_iters=a.mesh_fit_iters),
+                        with_meshes=(a.mesh != "off"), mesh_fit_iters=a.mesh_fit_iters,
+                        store_embeddings=store_emb, emb_dim=int(getattr(a, "emb_dim", 3))),
     )
     if a.device == "cpu" or not torch.cuda.is_available():
         if across_pods:

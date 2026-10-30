@@ -571,7 +571,7 @@ def run_inference(source, out_prefix, *, model_type="nnunet-jacobi", model=None,
                   air=25, region=None, level=0, keep_buffers=False, finalise="last", resume=False, batch=4, nb=4,
                   s3_prefix=None, upload="last", multi=False, reclaim=False, claim_chunk=6, leader=False,
                   readahead=2, prefetch_workers=3, tta="none", tta_passes="all",
-                  surf_store="local", mesh_store="off"):
+                  surf_store="local", mesh_store="off", store_embeddings=False, emb_dim=3):
     """Model-agnostic inference engine. Build the model (:class:`hercunet.infer.model.InferenceModel`) named by
     ``model_type`` from ``model``/``model_hf`` + ``model_opts``, then run ``model.passes`` double-buffered passes over
     ``source`` and write per-pass surface-prob OME-Zarrs ``{out_prefix}_pass{p}.zarr``. Returns the final pass path.
@@ -769,7 +769,11 @@ def run_inference(source, out_prefix, *, model_type="nnunet-jacobi", model=None,
             from ..meshes.extract import MeshSink
             shard_path = f"{out_prefix}_meshes.{os.getpid()}.asv"
             mesh_writer = AsvWriter(shard_path, frame=mesh_frame, voxel_um=l0_voxel, grid_step_um=30.0, overwrite=True)
-            mesh_sink = MeshSink(mesh_writer, downsample=ds_level)
+            emb_shard = f"{out_prefix}_emb.{os.getpid()}.zarr" if store_embeddings else None
+            mesh_sink = MeshSink(mesh_writer, downsample=ds_level, emb_path=emb_shard,
+                                 emb_meta=dict(voxel_um=float(l0_voxel), level=int(level), overlap=float(overlap),
+                                               downsample=float(ds_level), emb_dim=int(emb_dim),
+                                               source=str(source), region=(list(region) if region else None)))
             if multi:
                 open(os.path.join(donedir, f"_meshshard_{os.getpid()}.active"), "w").close()
             print(f"[engine] pass {p}: writing mesh shard -> {shard_path}", flush=True)
@@ -788,6 +792,7 @@ def run_inference(source, out_prefix, *, model_type="nnunet-jacobi", model=None,
                      win_stride=win_stride)
         if want_mesh:
             info = mesh_writer.close()
+            mesh_sink.close()                                         # finalise the per-worker emb zarr shard (if any)
             print(f"[engine] pass {p}: mesh shard done ({info['sheet_count']} sheets, {info['vert_count']} verts)", flush=True)
             if multi:
                 open(os.path.join(donedir, f"_meshshard_{os.getpid()}.done"), "w").close()
@@ -879,6 +884,11 @@ def run_inference(source, out_prefix, *, model_type="nnunet-jacobi", model=None,
                         print(f"[engine] MESHES ON S3 — {NI.s3_to_https(uri)}", flush=True)
                     except Exception as e:
                         print(f"[engine] mesh upload FAILED: {e}", flush=True)
+            if store_embeddings:                                      # concatenate per-worker emb zarr shards -> one zarr
+                from ..meshes.extract import merge_emb_shards
+                efinal = f"{out_prefix}_emb.zarr"
+                nw = merge_emb_shards(sorted(glob.glob(f"{out_prefix}_emb.*.zarr")), efinal)
+                print(f"[engine] merged emb shards -> {efinal} ({nw} windows)", flush=True)
 
         if want_surf and not keep_buffers and p >= 1 and prev_path is not None and (leader or not multi):
             import shutil                                              # p-1's finalize already joined above (bound=1)

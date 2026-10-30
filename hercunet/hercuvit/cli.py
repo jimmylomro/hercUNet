@@ -265,6 +265,11 @@ def _add_infer_common(p: argparse.ArgumentParser) -> None:
                         "Default local; loads the instance head automatically when not off.")
     p.add_argument("--mesh-fit-iters", dest="mesh_fit_iters", type=int, default=40, metavar="N",
                    help="field sheet-fit iterations per window (default 40; the fast KNN-free fit)")
+    p.add_argument("--store-embeddings", dest="store_embeddings", action="store_true",
+                   help="also write per-window pooled normalised-PCA embeddings to {out}_emb.zarr and each sheet's "
+                        "median embedding into its .asv annotation (stitcher/tracer inputs). Requires --mesh != off.")
+    p.add_argument("--emb-dim", dest="emb_dim", type=int, default=3, metavar="D",
+                   help="--store-embeddings PCA dim D (default 3; match the stitcher's --pca-dim)")
     p.add_argument("--resume", action="store_true",
                    help="continue an interrupted run: skip _complete passes + re-queue tiles orphaned by killed workers")
     p.add_argument("--keep-buffers", action="store_true", dest="keep_buffers",
@@ -355,6 +360,10 @@ def _add_labels_create(sub: argparse._SubParsersAction) -> None:
                    help="where regions download to (default {OUT_DIR}/_regions); freed per-region unless --keep-regions")
     p.add_argument("--keep-regions", dest="keep_regions", action="store_true",
                    help="keep the downloaded region zarrs instead of freeing them after extraction (needs disk)")
+    p.add_argument("--exclude-dir", dest="exclude_dir", default=None, metavar="DIR", action="append",
+                   help="dir(s) of already-extracted stitch_s<scroll>_z_y_x.npz whose corners to AVOID: a new corner "
+                        "is rejected if within --min-dist of a same-scroll prior one (repeatable; e.g. the corpus). "
+                        "Guarantees a fresh, non-overlapping extraction when adding to an existing corpus.")
     p.set_defaults(func=lambda a: (__import__("hercunet.hercuvit.stitch.regions", fromlist=["create_run"]).create_run(a)
                                    if getattr(a, "regions", False) else
                                    __import__("hercunet.hercuvit.stitch.labels", fromlist=["create_run"]).create_run(a)))
@@ -395,6 +404,10 @@ def _add_stitcher_train(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--val-interval", dest="val_interval", type=int, default=None,
                    help="validate edge AP every N epochs (default 5; 0 = no validation, train on all samples)")
     p.add_argument("--num-workers", dest="num_workers", type=int, default=4, help="DataLoader workers (default 4)")
+    p.add_argument("--label-mode", dest="label_mode", default="raw", choices=("raw", "v1", "v2"),
+                   help="load-time label-quality fix on TRAIN (val stays raw for comparable AP): raw=baseline; "
+                        "v1=same-slot->neg + drop off-seam queries (100%% labelled, seam-scoped); "
+                        "v2=same-slot->neg + off-seam pairs->neg (100%% labelled, off-seam as hard negatives)")
     p.add_argument("--continue", dest="continue_", action="store_true",
                    help="resume from {out}/checkpoint_latest.pth instead of starting fresh")
     p.add_argument("--device", default="cuda", help="cuda | cuda:N | cpu (default cuda)")
@@ -402,16 +415,24 @@ def _add_stitcher_train(sub: argparse._SubParsersAction) -> None:
 
 
 def _add_stitcher_infer(sub: argparse._SubParsersAction) -> None:
-    p = sub.add_parser("infer", help="(not yet wired) apply a trained stitcher to a volume's stored HercuViT artifacts",
-                       description="Consume the pooled-window-embedding zarr + the per-sheet median column in the "
-                                   ".asv that a `hercuvit infer` run emits, run the stitching decoder per corner, and "
-                                   "agglomerate the pairwise affinities into a fragment→object lookup "
-                                   "(docs/hercuvit-stitching.md §8/§9). Reuses the production infer path — not wired yet.")
+    p = sub.add_parser("infer", help="apply a trained stitcher to a volume's stored HercuViT artifacts → .asv affinities",
+                       description="Consume the pooled-window-embedding zarr + the per-sheet median embedding in the "
+                                   ".asv that a `hercuvit infer --store-embeddings` run emits, run the stitching decoder "
+                                   "at every core-grid corner, and write the pairwise affinities straight into the .asv "
+                                   "as an `affinities` edge table — one file with both the sheets AND their cross-window "
+                                   "affinities (docs/hercuvit-stitching.md §8). Both directions (A,B)&(B,A) are stored, "
+                                   "so every neighbour of a sheet is a single indexed lookup.")
     p.add_argument("--embeddings-zarr", dest="embeddings_zarr", default=None, metavar="ZARR",
-                   help="pooled per-window normalised-PCA embeddings (emitted by `hercuvit infer`)")
-    p.add_argument("--asv", default=None, metavar="ASV", help="per-window sheet meshes with the median-embedding column")
+                   help="pooled per-window normalised-PCA embeddings (emitted by `hercuvit infer --store-embeddings`)")
+    p.add_argument("--asv", default=None, metavar="ASV", help="per-window sheet meshes with the median-embedding "
+                   "annotation (the affinities table is written into this file unless --out is given)")
     p.add_argument("--stitcher", default=None, metavar="file://PATH|REPO", help="trained stitcher (local .pth/dir or HF repo)")
-    p.add_argument("--out", default=None, metavar="PATH", help="output fragment→object lookup")
+    p.add_argument("--out", default=None, metavar="ASV", help="write the augmented .asv here instead of editing --asv "
+                   "in place (the sheets are copied, then the affinities table added)")
+    p.add_argument("--top-k", dest="top_k", type=int, default=0, metavar="K",
+                   help="per sheet, keep only its K highest-affinity neighbours at each corner (0 = all in-range "
+                        "pairs, the default; docs §8.1 recommends 10 for a large graph)")
+    p.add_argument("--batch", type=int, default=16, help="corners per decoder forward (default 16)")
     p.add_argument("--device", default="cuda", help="cuda | cuda:N | cpu (default cuda)")
     p.set_defaults(func=lambda a: __import__("hercunet.hercuvit.stitch.infer", fromlist=["infer_run"]).infer_run(a))
 

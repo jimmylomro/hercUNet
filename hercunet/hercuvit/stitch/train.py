@@ -194,16 +194,18 @@ def train_run(a) -> None:
     files = find_samples(samples_dir)
     tr_files, va_files = split_samples(files, fold=cfg.val_fold) if cfg.val_interval > 0 else (files, [])
 
-    tr_ds = StitchSampleDataset(tr_files, pca_dim=cfg.pca_dim)
+    label_mode = getattr(a, "label_mode", "raw") or "raw"
+    tr_ds = StitchSampleDataset(tr_files, pca_dim=cfg.pca_dim, label_mode=label_mode)
     loader = DataLoader(tr_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=a.num_workers,
                         collate_fn=stitch_collate, drop_last=True, pin_memory=(a.device != "cpu"))
     val_loader = None
     if va_files:
-        val_ds = StitchSampleDataset(va_files, pca_dim=cfg.pca_dim)
+        val_ds = StitchSampleDataset(va_files, pca_dim=cfg.pca_dim)   # val stays RAW so edge AP is comparable across modes
         val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False,
                                 num_workers=max(1, a.num_workers // 2), collate_fn=stitch_collate)
     print(f"[stitcher] {samples_dir}: {len(tr_ds)} train + {len(va_files)} val (fold {cfg.val_fold}); "
-          f"batch {cfg.batch_size}; workers {a.num_workers}; device {a.device}", flush=True)
+          f"batch {cfg.batch_size}; workers {a.num_workers}; device {a.device}; label_mode {label_mode} "
+          f"(val=raw)", flush=True)
 
     model = StitchDecoder(cfg)
     trainer = StitchTrainer(model, cfg, a.out, device=a.device)

@@ -259,6 +259,17 @@ class AsvReader:
             (x0, x1, y0, y1, z0, z1)).fetchall()
         return [r[0] for r in rows]
 
+    def affinities(self, sid: int) -> list[dict[str, Any]]:
+        """Stitcher affinities FROM sheet ``sid`` to its in-range neighbours (one indexed lookup on ``src``), highest
+        logit first. Empty if no ``affinities`` table was written (see :func:`write_affinities`). Both directions are
+        stored, so this returns every neighbour regardless of which side produced the pair."""
+        try:
+            rows = self._db.execute(
+                "SELECT dst,logit,prob,corner FROM affinities WHERE src=? ORDER BY logit DESC", (int(sid),)).fetchall()
+        except sqlite3.OperationalError:                                   # no affinities table in this .asv
+            return []
+        return [dict(dst=r[0], logit=r[1], prob=r[2], corner=r[3]) for r in rows]
+
     def sheet(self, sid: int) -> dict[str, Any]:
         """Full geometry for one sheet id — ``name, window, family, verts, tris, foot, nu, nv, annotation``."""
         row = self._db.execute(
@@ -308,3 +319,39 @@ def merge_asv(shards: Iterable[str | os.PathLike], out: str | os.PathLike, *, fr
             w._db.execute("INSERT INTO sheet_bounds VALUES(?,?,?,?,?,?,?)", (sid, x0, x1, y0, y1, z0, z1))
         src.close()
     return w.close()
+
+
+# --------------------------------------------------------------------------------------------------------------------
+# stitcher affinities: an edge table added to an existing .asv (docs/hercuvit-stitching.md §8), so one file carries
+# both the sheets AND their cross-window affinities
+# --------------------------------------------------------------------------------------------------------------------
+def write_affinities(path: str | os.PathLike, rows: Iterable[tuple], *,
+                     corners: Iterable[tuple] | None = None, replace: bool = True) -> int:
+    """Add (or replace) an ``affinities`` edge table in the existing ``.asv`` at ``path``, in place.
+
+    ``rows``: iterable of ``(src, dst, logit, prob, corner)`` where ``src``/``dst`` are ``sheets.id`` — BOTH
+    directions ``(A, B)`` and ``(B, A)`` are stored (the affinity head is symmetric, but keeping both makes "every
+    neighbour of sheet X" a single indexed lookup ``WHERE src = X``). ``corner`` is the index of the window corner
+    that produced the pair (a pair can recur at several corners; aggregation is a later, separate step — §9).
+    ``corners`` (optional): ``(corner, z, y, x, n_queries)`` provenance rows. Returns the affinity row count.
+    """
+    db = sqlite3.connect(str(path))
+    try:
+        if replace:
+            db.execute("DROP TABLE IF EXISTS affinities")
+            db.execute("DROP TABLE IF EXISTS affinity_corners")
+        db.execute("CREATE TABLE IF NOT EXISTS affinities("
+                   "src INTEGER NOT NULL, dst INTEGER NOT NULL, logit REAL NOT NULL, prob REAL NOT NULL, "
+                   "corner INTEGER NOT NULL)")
+        db.executemany("INSERT INTO affinities(src,dst,logit,prob,corner) VALUES(?,?,?,?,?)", rows)
+        db.execute("CREATE INDEX IF NOT EXISTS affinities_src ON affinities(src)")
+        db.execute("CREATE INDEX IF NOT EXISTS affinities_src_dst ON affinities(src,dst)")
+        if corners is not None:
+            db.execute("CREATE TABLE IF NOT EXISTS affinity_corners("
+                       "corner INTEGER PRIMARY KEY, z INTEGER, y INTEGER, x INTEGER, n_queries INTEGER)")
+            db.executemany("INSERT INTO affinity_corners(corner,z,y,x,n_queries) VALUES(?,?,?,?,?)", corners)
+        n = int(db.execute("SELECT COUNT(*) FROM affinities").fetchone()[0])
+        db.commit()
+    finally:
+        db.close()
+    return n
