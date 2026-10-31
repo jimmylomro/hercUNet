@@ -1,6 +1,7 @@
 """``hercuvit stitcher infer`` — apply a trained stitcher to a volume's stored HercuViT artifacts (docs §8).
 
-Consumes the two artifacts a ``hercuvit infer --store-embeddings`` run emits (no HercuViT re-run here):
+Consumes the two artifacts a ``hercuvit infer --store-embeddings`` (or ``--stitcher``) run emits (no HercuViT re-run
+here):
 
   1. a **pooled-window-embedding zarr** (``emb (N,G,G,G,D)`` + ``origin (N,3)``) — each window's per-window
      normalised-PCA tokens (``stitch.embed.reduce_normalised_pca``), the stitcher's spatial memory ``Z`` source; and
@@ -15,6 +16,9 @@ affinities straight into the ``.asv`` as an ``affinities`` edge table (:func:`he
 so one file carries both the sheets and their cross-window affinities. Both directions ``(A,B)`` and ``(B,A)`` are
 stored, so every neighbour of a sheet is a single indexed lookup. Agglomeration into a fragment→object lookup (§9)
 is a later, separate step over this table.
+
+The stitching core is :func:`stitch_asv`, shared by this CLI AND by ``hercuvit infer --stitcher`` (which runs it in
+the leader process straight after it has merged the per-window sheets + embeddings).
 """
 from __future__ import annotations
 
@@ -22,12 +26,36 @@ import re
 
 import numpy as np
 
+#: Default published stitcher — resolved like every other inference model, as ``hf://<repo>``.
+_STITCHER_HF = "jimmylomro/hercuvit-stitcher"
 
-def load_stitcher(path_or_repo: str, *, device="cuda"):
-    """Rebuild a trained :class:`StitchDecoder` from a checkpoint (local ``.pth``/dir or an HF repo) → ``(model, cfg)``.
-    Mirrors :func:`hercunet.hercuvit.infer.loader.load_hercuvit`: the config is stored in the checkpoint, so the
-    decoder is rebuilt exactly and the weights loaded over it. Ready for the infer wiring + ``hercuvit infer
-    --stitcher``."""
+
+def resolve_stitcher_uri(uri: str) -> str:
+    """Resolve a stitcher location to a LOCAL path (a dir or a ``.pth``), accepting the same ``<hf|file>://`` scheme
+    the other inference tools take: ``hf://<repo>`` → ``snapshot_download`` (public, cached); ``file://<path>`` → the
+    local path; an existing local path → itself; and a bare non-path → treated as an HF repo id (back-compat)."""
+    import os
+
+    u = str(uri)
+    if u.startswith("hf://"):
+        from huggingface_hub import snapshot_download
+        repo = u[len("hf://"):]
+        print(f"[stitcher] downloading stitcher from HF {repo} …", flush=True)
+        return snapshot_download(repo)
+    if u.startswith("file://"):
+        return u[len("file://"):]
+    if os.path.exists(u):
+        return u
+    from huggingface_hub import snapshot_download                       # a bare, non-existent value = an HF repo id
+    print(f"[stitcher] downloading stitcher from HF {u} …", flush=True)
+    return snapshot_download(u)
+
+
+def load_stitcher(path_or_uri: str, *, device="cuda"):
+    """Rebuild a trained :class:`StitchDecoder` from a checkpoint → ``(model, cfg)``. ``path_or_uri`` takes the
+    ``<hf|file>://`` scheme (or a bare local path / HF repo id); a directory resolves ``checkpoint_best`` → ``final``
+    → ``latest``. The config is stored in the checkpoint, so the decoder is rebuilt exactly and the weights loaded
+    over it (mirrors :func:`hercunet.hercuvit.infer.loader.load_hercuvit`)."""
     import os
 
     import torch
@@ -35,11 +63,7 @@ def load_stitcher(path_or_repo: str, *, device="cuda"):
     from .config import config_from_dict
     from .model import StitchDecoder
 
-    root = path_or_repo
-    if not os.path.exists(root):                                   # treat a non-path as an HF repo id
-        from huggingface_hub import snapshot_download
-        print(f"[stitcher] downloading stitcher from HF {root} …", flush=True)
-        root = snapshot_download(root)
+    root = resolve_stitcher_uri(path_or_uri)
     if os.path.isdir(root):
         for name in ("checkpoint_best.pth", "checkpoint_final.pth", "checkpoint_latest.pth"):
             if os.path.isfile(os.path.join(root, name)):
@@ -95,7 +119,15 @@ def _load_sheets(asv_path: str, D: int):
     return by_win, len(rows), skipped
 
 
-def infer_run(a) -> None:
+def stitch_asv(embeddings_zarr: str, asv: str, stitcher: str, *, out: str | None = None,
+               top_k: int = 0, batch: int = 16, device: str = "cuda") -> tuple[str, int]:
+    """Stitch one volume's stored artifacts: read the pooled-window embeddings (``embeddings_zarr``) and the per-sheet
+    medians in ``asv``, run the trained ``stitcher`` (a ``<hf|file>://`` location, local path, or HF repo id) at every
+    interior core-grid corner, and write the pairwise affinities into the ``.asv`` (in place, or into ``out`` if
+    given). ``top_k`` = neighbours kept per sheet per corner (0 = all in-range). Returns ``(out_asv, n_rows)``.
+
+    This is the ONE stitching implementation — the ``hercuvit stitcher infer`` CLI and ``hercuvit infer --stitcher``
+    (leader process) both call it, so the two paths never diverge."""
     import time
 
     import torch
@@ -105,17 +137,14 @@ def infer_run(a) -> None:
     from .dataset import stitch_collate
     from .embed import corner_spatial_tokens
 
-    if not (a.embeddings_zarr and a.asv and a.stitcher):
-        raise SystemExit("hercuvit stitcher infer: need --embeddings-zarr, --asv and --stitcher.")
-
-    device = torch.device(a.device if (a.device == "cpu" or torch.cuda.is_available()) else "cpu")
-    model, cfg = load_stitcher(a.stitcher, device=device.type)
+    dev = torch.device(device if (device == "cpu" or torch.cuda.is_available()) else "cpu")
+    model, cfg = load_stitcher(stitcher, device=dev.type)
     D = int(cfg.pca_dim)
-    top_k = int(getattr(a, "top_k", 0) or 0)
-    batch = max(1, int(getattr(a, "batch", 16)))
+    top_k = int(top_k or 0)
+    batch = max(1, int(batch))
 
     # --- stored artifacts: the per-window embedding grids (spatial memory) + their global-L0 origins -----------------
-    g = zarr.open(a.embeddings_zarr, mode="r")
+    g = zarr.open(embeddings_zarr, mode="r")
     if g["emb"].shape[-1] != D:
         raise SystemExit(f"stitcher infer: zarr emb dim {g['emb'].shape[-1]} != stitcher pca_dim {D} — "
                          f"the stitcher and the `hercuvit infer --emb-dim` must match.")
@@ -135,10 +164,10 @@ def infer_run(a) -> None:
     h = stride / 2.0                                          # octant-window centre offset from the corner (±h)
     half = fov / 2.0
 
-    by_win, n_sheets, n_skipped = _load_sheets(a.asv, D)
+    by_win, n_sheets, n_skipped = _load_sheets(asv, D)
     print(f"[stitcher] {N} windows (grid {uz.size}x{uy.size}x{ux.size}, stride {stride:.0f}, fov {fov:.0f}), "
           f"{n_sheets} sheets ({n_skipped} without a {D}-d median skipped) -> affinities in "
-          f"{a.out or a.asv}", flush=True)
+          f"{out or asv}", flush=True)
 
     OCT = [(sz, sy, sx) for sz in (-1, 1) for sy in (-1, 1) for sx in (-1, 1)]   # 8 octant windows of a corner
 
@@ -201,10 +230,10 @@ def infer_run(a) -> None:
         for b0 in range(0, len(items), batch):
             chunk = items[b0:b0 + batch]
             bt = stitch_collate(chunk)
-            out = model(bt["Xs"].to(device), bt["Ps"].to(device), bt["slot_s"].to(device),
-                        bt["valid_s"].to(device), bt["Xq"].to(device), bt["slot_q"].to(device),
-                        bt["valid_q"].to(device))
-            logit = out[-1]["logit"].float().cpu().numpy()               # (B,Mmax,Mmax) — last layer (§8)
+            out_l = model(bt["Xs"].to(dev), bt["Ps"].to(dev), bt["slot_s"].to(dev),
+                          bt["valid_s"].to(dev), bt["Xq"].to(dev), bt["slot_q"].to(dev),
+                          bt["valid_q"].to(dev))
+            logit = out_l[-1]["logit"].float().cpu().numpy()             # (B,Mmax,Mmax) — last layer (§8)
             for bi, (cid, qid) in enumerate(metas[b0:b0 + batch]):
                 M = len(qid)
                 L = logit[bi, :M, :M]
@@ -221,11 +250,20 @@ def infer_run(a) -> None:
                 print(f"[stitcher] {done}/{len(items)} corners · {len(rows)} edges · "
                       f"{done / max(1e-6, time.time() - t0):.0f} corner/s", flush=True)
 
-    out_asv = a.asv
-    if a.out:
+    out_asv = asv
+    if out:
         import shutil
-        shutil.copy2(a.asv, a.out)
-        out_asv = a.out
+        shutil.copy2(asv, out)
+        out_asv = out
     n = write_affinities(out_asv, rows, corners=corners_meta)
     print(f"[stitcher] DONE: wrote {n} affinity rows (both directions) over {len(items)} corners into {out_asv} "
           f"in {time.time() - t0:.0f}s", flush=True)
+    return out_asv, n
+
+
+def infer_run(a) -> None:
+    """``hercuvit stitcher infer`` CLI entry — validates the flags and calls :func:`stitch_asv`."""
+    if not (a.embeddings_zarr and a.asv):
+        raise SystemExit("hercuvit stitcher infer: need --embeddings-zarr and --asv.")
+    stitch_asv(a.embeddings_zarr, a.asv, a.stitcher, out=a.out,
+               top_k=getattr(a, "top_k", 0), batch=getattr(a, "batch", 16), device=a.device)

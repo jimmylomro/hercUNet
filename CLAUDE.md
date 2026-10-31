@@ -8,7 +8,9 @@ treat it as such.
 > package, over shared top-level modules:
 > - **HercuLabels** — `hercunet/herculabels/` — stage-1 label generation + the Qt editor (`viz/`). CLI: `herculabels`.
 > - **HercUNet** — `hercunet/hercunet/` — the nnU-Net refiner (training + recipes). CLI: `hercunet` (train + infer).
-> - **HercuViT** — `hercunet/hercuvit/` — Dinovol sheet segmentation. CLI: `hercuvit`. Spec: `docs/hercuvit.md`.
+> - **HercuViT** — `hercunet/hercuvit/` — Dinovol sheet segmentation **+ the cross-window stitcher** (`hercuvit/stitch/`,
+>   assembles per-window sheets into scroll-spanning instances). CLI: `hercuvit` (`infer` / `labels create` /
+>   `stitcher train|infer`). Specs: `docs/hercuvit.md`, `docs/stitcher.md`.
 > - **Shared** (used by more than one): `hercunet/data` (streaming layer + the training `dataset.py`),
 >   `hercunet/infer` (model-agnostic engine), `hercunet/losses` (MALIS + affinity), `hercunet/labels` (label
 >   GEOMETRY primitives: corpus, io, mesh, meshlets, embedding, fields, selection), `hercunet/pretrained`, `hercunet/config`.
@@ -48,8 +50,10 @@ unmodified) wrapped by the `hercunet` CLI. The full pipeline spans three product
 - **HercuLabels** — stage-1 pseudo-label generation + editor (`herculabels …`; `docs/herculabels.md`),
 - **HercUNet train** — the stage-2 refiner chain (`hercunet train …`; `docs/training.md`),
 - **HercUNet infer** — stage-3 full-volume inference (`hercunet infer …`; `docs/infer.md`),
-plus the streaming **data layer** (`docs/data-layer.md`) and the sheet-segmentation decoder
-(`--meshes`; `docs/tracer-sheet-decoder.md`). Install & CLI overview: `docs/README.md`.
+plus the streaming **data layer** (`docs/data-layer.md`), the frozen-encoder **HercuViT** sheet segmenter and its
+sheet-mesh `.asv` output (`hercuvit infer`; `docs/hercuvit.md`), and the cross-window **stitcher** that assembles
+those per-window sheets into scroll-spanning instances (`hercuvit stitcher`; `docs/stitcher.md`). Install & CLI
+overview: `docs/README.md`.
 
 ## Hard constraints (non-negotiable)
 1. **No environment variables as user-facing configuration.** Every option a user controls is a `--flag`.
@@ -70,6 +74,11 @@ Public, no token. Rebuilding/mining/re-uploading any of this by hand is wasted w
   `--pretrained-hf jimmylomro/hercunet-v0` (train warm-start) and `--model-hf jimmylomro/hercunet-v0` (infer).
 - **`scrollprize/surface_m7_nnunet`** (model) — the m7 plans the `preprocess` step transplants (pulled
   automatically) and the default m7 warm-start source.
+- **`jimmylomro/hercuvit-v0`** (model) — the HercuViT sheet segmenter; `--model-hf jimmylomro/hercuvit-v0`
+  (for `hercuvit infer` and `hercuvit labels create`).
+- **`jimmylomro/hercuvit-stitcher`** (model) — the cross-window stitcher; the default for `hercuvit infer --stitcher`
+  and `hercuvit stitcher infer` (resolved as `hf://…`, like every other model). **Upload pending** — until it is
+  pushed, a bare `--stitcher` will 404; pass `--stitcher file://<ckpt-dir>` meanwhile.
 
 Only build a corpus from scratch (`labels create` / `labels m7-mine`) if you deliberately need a *new* one;
 to reproduce HercUNet v0, download the published corpus (`docs/training.md`, Option A).
@@ -113,8 +122,9 @@ to reproduce HercUNet v0, download the published corpus (`docs/training.md`, Opt
 
 ## Layout
 - **Products:** `hercunet/herculabels/` (+ `viz/`), `hercunet/hercunet/` (`training/`, `recipes/`, `refine/`, `cli.py`),
-  `hercunet/hercuvit/`.
-- **Shared:** `hercunet/{data,infer,losses,labels,pretrained.py,config.py}` (`labels/` = geometry primitives only).
+  `hercunet/hercuvit/` (incl. `stitch/` — the cross-window stitcher).
+- **Shared:** `hercunet/{data,infer,losses,labels,meshes,pretrained.py,config.py}` (`labels/` = geometry primitives
+  only; `meshes/` = the sheet-mesh fit + the `.asv` store, used by both herculabels and hercuvit).
 - `docs/` (per-stage guides + `hercuvit-migration.md`) · `tests/` · `submission/` (writeup).
 - **CLIs:** `herculabels` (`hercunet.herculabels.cli`), `hercunet` (`hercunet.hercunet.cli`, also `python -m hercunet`),
   `hercuvit` (`hercunet.hercuvit.cli`). Reinstall (`pip install -e .`) after pulling to refresh the console scripts.

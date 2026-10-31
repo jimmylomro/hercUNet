@@ -37,9 +37,25 @@ def _drive(a, *, across_pods: bool) -> None:
     if a.s3_prefix and a.surf != "upload" and a.mesh != "upload":
         raise SystemExit("hercuvit infer: --s3-prefix given but neither --surf nor --mesh is 'upload' — "
                          "specify what to upload (e.g. --mesh upload).")
-    store_emb = bool(getattr(a, "store_embeddings", False))
+    # --stitcher implies --store-embeddings (the stitcher needs the emb zarr + the per-sheet medians) and runs the
+    # cross-window stitch in the LEADER process once the sheets + embeddings are merged (fast enough not to shard).
+    stitcher_uri = getattr(a, "stitcher", None)
+    stitcher_local = None
+    emb_mode = getattr(a, "store_embeddings", None)                    # None | "local" | "upload"
+    if stitcher_uri and emb_mode is None:
+        emb_mode = "local"                                            # --stitcher implies at least storing them
+    store_emb = emb_mode is not None
+    # upload the emb zarr when it was explicitly requested (--store-embeddings upload) OR when the run is already
+    # uploading its sheet deliverable (--mesh upload) — i.e. "ship everything". Never when embeddings weren't stored.
+    emb_upload = store_emb and (emb_mode == "upload" or a.mesh == "upload")
     if store_emb and a.mesh == "off":
-        raise SystemExit("hercuvit infer: --store-embeddings needs the sheets — set --mesh local (or upload).")
+        raise SystemExit("hercuvit infer: --store-embeddings/--stitcher needs the sheets — set --mesh local (or upload).")
+    if emb_upload and not a.s3_prefix:
+        raise SystemExit("hercuvit infer: uploading embeddings needs --s3-prefix <s3://…> "
+                         "(--store-embeddings upload, or --mesh upload alongside stored embeddings).")
+    if stitcher_uri:
+        from ..stitch.infer import resolve_stitcher_uri                # resolve ONCE in the parent (cached download);
+        stitcher_local = resolve_stitcher_uri(stitcher_uri)           #   the leader worker reuses this local path
 
     model_dir = _resolve_model(a)
     region = parse_region(a.region)
@@ -50,6 +66,8 @@ def _drive(a, *, across_pods: bool) -> None:
         model_import="hercunet.hercuvit.infer.model",          # so a worker subprocess registers the model
         surf_store=a.surf, mesh_store=a.mesh,
         store_embeddings=store_emb, emb_dim=int(getattr(a, "emb_dim", 3)),
+        emb_upload=emb_upload,                                # ship {out}_emb.zarr to --s3-prefix (leader, after merge)
+        stitcher=stitcher_local,                              # None → no stitch; set → leader stitches after the merge
         finalise=(a.finalise if a.surf != "off" else "no"),   # surface pyramid only when the surface is stored
         upload=("last" if a.surf == "upload" else "no"),      # surface S3 upload gated by --surf (meshes by --mesh)
         model_opts=dict(attention_backend=a.attention_backend, overlap=a.overlap,

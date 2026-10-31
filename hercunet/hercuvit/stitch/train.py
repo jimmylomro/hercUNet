@@ -194,7 +194,7 @@ def train_run(a) -> None:
     files = find_samples(samples_dir)
     tr_files, va_files = split_samples(files, fold=cfg.val_fold) if cfg.val_interval > 0 else (files, [])
 
-    label_mode = getattr(a, "label_mode", "raw") or "raw"
+    label_mode = getattr(a, "label_mode", "v2") or "v2"          # v2 = the default (mark certain negatives, not ignore)
     tr_ds = StitchSampleDataset(tr_files, pca_dim=cfg.pca_dim, label_mode=label_mode)
     loader = DataLoader(tr_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=a.num_workers,
                         collate_fn=stitch_collate, drop_last=True, pin_memory=(a.device != "cpu"))

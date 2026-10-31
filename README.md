@@ -12,12 +12,14 @@ HercuLabels, HercUNet, and HercuViT — over one shared streaming data layer.**
 
 Each is a standalone piece of work with its own module, CLI, and write-up; they share only the fast streaming
 reader for teravoxel OME-Zarr scroll volumes. HercuLabels and HercUNet are the v0 submission; HercuViT is a newer
-third contribution (write-up in progress).
+third contribution, and the **cross-window stitcher** assembles HercuViT's per-window sheets into scroll-spanning
+instances.
 
 
 🧠 **[HercuLabels](#-herculabels--unsupervised-pseudo-labels)** — unsupervised pseudo-labels (the training corpus)  
 🧠 **[HercUNet](#-hercunet--the-iterative-refiner)** — the iterative sheet refiner  
-🧠 **[HercuViT](#-hercuvit--sheet-segmentation-on-a-frozen-µct-encoder)** — sheet segmentation on a frozen µCT encoder
+🧠 **[HercuViT](#-hercuvit--sheet-segmentation-on-a-frozen-µct-encoder)** — sheet segmentation on a frozen µCT encoder  
+🧵 **[Stitcher](#-stitcher--cross-window-instance-assembly)** — learned cross-window instance stitching
 
 ![The iterative refiner across passes (magenta) versus the m7 baseline (blue), on a 2 mm cross-section of PHerc1447.](submission/images/banner-PHerc1447-m7-passes.jpg)
 
@@ -134,9 +136,52 @@ pipenv run hercuvit infer single-instance PHerc1447 \     # SOURCE: scroll id, o
   --out ./hercuvit-demo                                   # -> ./hercuvit-demo_meshes.asv (the sheet store)
 ```
 
-Fitted per-window sheet meshes, read straight from the compact `.asv` sheet store and coloured per sheet. Each window segments and labels its sheets independently, so the per-sheet colours do not carry across window boundaries — yet the sheet *surfaces* line up across them for the most part: the per-window geometry already agrees, and only the identities need reconciling (cross-window stitching, future work).
+Fitted per-window sheet meshes, read straight from the compact `.asv` sheet store and coloured per sheet. Each window segments and labels its sheets independently, so the per-sheet colours do not carry across window boundaries — yet the sheet *surfaces* line up across them for the most part: the per-window geometry already agrees, and only the identities need reconciling. That reconciliation — cross-window stitching — is the **[stitcher](#-stitcher--cross-window-instance-assembly)** below.
 
 ![HercuViT fitted sheet meshes across a block of windows, from the .asv, coloured per sheet — colours break at window seams (independent per-window IDs) but the sheet surfaces are continuous across them.](submission/images/hercuvit-disjoint-windows.jpg)
+
+---
+
+## 🧵 Stitcher — cross-window instance assembly
+
+HercuViT segments **window by window**, so a sheet spanning several windows comes out as several disjoint meshes with
+unrelated per-window ids (the seams in the image above). The stitcher reconnects them with a small learned decoder —
+**no hand-crafted geometric matching, no manual annotation**. It is deliberately **primitive-agnostic**: our
+deployment stitches HercuViT sheets, but the method applies to any instances (sheet/fibre) for which you have an
+embedding field in the same space.
+
+1. **Store the embeddings** — `hercuvit infer` keeps a pooled per-window embedding zarr and each sheet's **median
+   embedding** in the `.asv` (both out of one HercuViT forward); passing `--stitcher` triggers this automatically.
+2. **Per-window normalised-PCA** — reduce each window's embeddings independently to a compact `D`-dim code; a sheet's
+   query is the median of its cells *after* the projection.
+3. **Corners** — at each point where 8 windows meet, gather their pooled tokens (overlap kept, slot- and
+   position-tagged) and the touching sheets' descriptors.
+4. **The decoder** — a DETR-style decoder: queries self-attend, cross-attend to the spatial tokens (position + source
+   slot flow into keys **and** values), and a cosine head emits a **signed** affinity per sheet pair.
+5. **Self-supervised labels** — at each corner, run HercuViT on the 8 octant windows **plus a centred pass** and
+   overlap-vote a same-object label matrix; train with a deep-supervised focal-BCE + supervised-contrastive loss.
+6. **Affinities in the `.asv`** — `hercuvit infer --stitcher` runs the trained decoder in the **leader** process right
+   after the sheets are merged (or run `hercuvit stitcher infer` standalone), writing a signed
+   `affinities(src,dst,logit,…)` edge table into the `.asv` (both directions, indexed), so one file carries the sheets
+   **and** their cross-window graph.
+7. **Assemble** — signed-graph agglomeration (GASP) turns the edges into whole sheets — batch over the volume, or
+   interactively in VC3D (affinity colouring + auto-stitch from a selected sheet).
+
+```bash
+pipenv install ".[hercuvit]"                                 # or in a venv: pip install ".[hercuvit]"
+# ONE command — segment + store embeddings + stitch in the leader → a single stitched .asv:
+pipenv run hercuvit infer single-instance PHerc1447 --model-hf jimmylomro/hercuvit-v0 \
+  --region 11618:11810,3197:3389,3552:3744 --mesh local --overlap 0.1 \
+  --stitcher \                                               # bare = hf://jimmylomro/hercuvit-stitcher
+  --out ./demo                                               # -> ./demo_stitched-meshes.asv (sheets + affinities)
+```
+
+`--stitcher` implies `--store-embeddings` and stitches the merged sheets in the leader process. To keep the artifacts
+as separate files (or when **training** a stitcher), run the two steps by hand instead — `hercuvit infer
+--store-embeddings` then `hercuvit stitcher infer` — see the guide.
+
+→ Guide: **[docs/stitcher.md](docs/stitcher.md)** (the `labels create` / `stitcher train` / `stitcher infer` CLIs) ·
+Methodology: **[submission/writeup/hercuvit-stitcher.md](submission/writeup/hercuvit-stitcher.md)**
 
 ---
 
@@ -158,10 +203,14 @@ the data layer has its own guide under [`docs/`](docs/):
 - **[HercuLabels](docs/herculabels.md)** — the `herculabels` CLI, the grinding viewer, the `.herculabels` corpus format.
 - **[HercUNet — training](docs/training.md)** · **[HercUNet — inference](docs/infer.md)** — the refiner chain + the iterative full-volume driver.
 - **[HercuViT](docs/hercuvit.md)** — the frozen-encoder sheet segmenter.
+- **[Stitcher](docs/stitcher.md)** — the cross-window instance stitcher (`labels create` / `stitcher train` / `stitcher infer`), the affinities `.asv` table, and VC3D auto-stitch.
 - **Reorg note:** **[docs/hercuvit-migration.md](docs/hercuvit-migration.md)** — old→new module paths, CLI rename, install extras.
 
 ## Status
 
 The **data layer**, **HercuLabels** (with its interactive viewer), and **HercUNet** (train + iterative inference)
 are complete and documented above. **HercuViT** is implemented and trained — the released checkpoint (`train_v5`
-@ epoch 462) is on 🤗 [`jimmylomro/hercuvit-v0`](https://huggingface.co/jimmylomro/hercuvit-v0); its write-up is in progress.
+@ epoch 462) is on 🤗 [`jimmylomro/hercuvit-v0`](https://huggingface.co/jimmylomro/hercuvit-v0). The **stitcher**
+is implemented end to end (`labels create` → `stitcher train` → `stitcher infer`, writing the affinities `.asv`
+table consumed by VC3D's affinity colouring + auto-stitch); its write-up is
+[submission/writeup/hercuvit-stitcher.md](submission/writeup/hercuvit-stitcher.md).

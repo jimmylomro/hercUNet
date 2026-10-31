@@ -192,6 +192,8 @@ reads, an on-disk cache, prefetch, material tiling), configured via `HERCUNET_*`
 | **[herculabels.md](herculabels.md)** | **Stage 1 usage** — the `create` / `edit` / `merge` / `export` CLI over `.herculabels` corpora, the interactive grinding viewer, and the corpus + export outputs (incl. the `meta.json` manifest). | ✅ available |
 | **[training.md](training.md)** | **Stage 2 training** — the `hercunet train` chain (export → build → preprocess → export-owner → fit) over pinned `nnunetv2==2.8.1`, direct-instantiation launch (no copy-paste), DDP, and the design. | ✅ available |
 | **[infer.md](infer.md)** | **Stage 3 inference** — the `hercunet infer` single-instance (local multi-GPU) / multi-instance (pods) commands, iterative Jacobi refinement with the Gaussian blend, OME-Zarr output, and the small-cube smoke test. | ✅ available |
+| **[hercuvit.md](hercuvit.md)** | **HercuViT** — the frozen-encoder sheet instance-segmenter: the `hercuvit infer` CLI, per-window sheet-mesh fit, and the compact `.asv` sheet store. | ✅ available |
+| **[stitcher.md](stitcher.md)** | **Cross-window stitcher** — `hercuvit infer --store-embeddings`, `hercuvit labels create` (self-supervised samples), `hercuvit stitcher train`, and `hercuvit stitcher infer` (writes the signed `affinities` edge table into the `.asv`); consumed by VC3D's affinity colouring + auto-stitch. | ✅ available |
 
 The **methodology** for stage 1 (how the labels are derived — meshlets, slab, contrastive embedding,
 probeom, medial fit, confidence, and the ablation validating it) is the research write-up
@@ -205,3 +207,8 @@ provenance in [`../submission/writeup/corpus.md`](../submission/writeup/corpus.m
 3. **[herculabels.md](herculabels.md)** — running stage 1 and the viewer.
 4. **[training.md](training.md)** — stage 2, training the refiner (`hercunet train`).
 5. **[infer.md](infer.md)** — stage 3, full-volume inference (`hercunet infer`).
+
+HercuViT is a parallel track (frozen-encoder sheet segmentation, not the `hercunet` refiner):
+
+6. **[hercuvit.md](hercuvit.md)** — segment a volume into per-window sheet meshes (`hercuvit infer`) + the `.asv` store.
+7. **[stitcher.md](stitcher.md)** — assemble those per-window sheets across windows (`hercuvit labels create` → `stitcher train` → `stitcher infer`), and the affinities `.asv` table.

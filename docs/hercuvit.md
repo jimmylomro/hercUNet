@@ -28,8 +28,9 @@ config differs — **except** where that would change one of the three architect
 - **Fibre and ink are future**: Dinovol was SSL-supervised for them too, but we segment sheets now. The point /
   ink / region heads are **wired but inactive** (stubbed with Dinovol's `dense_head` dims) so they can be
   supervised later without re-architecting.
-- Out of scope v1: cross-tile sheet-ID reconciliation (the stitcher, design §10/§12); ResEnc-L logit
-  distillation; Variant B.
+- Cross-tile sheet-ID reconciliation (the **stitcher**) is a separate component, not part of the segmenter proper —
+  now built and integrated into inference via `hercuvit infer --stitcher` (see [stitcher.md](stitcher.md)). Still out
+  of scope here: ResEnc-L logit distillation; Variant B.
 
 ---
 
@@ -245,7 +246,15 @@ rest (see Part II → "Model-agnostic inference engine").
   surface volume `{out}_pass0.zarr` (+pyramid) and/or the sheet store `{out}_meshes.asv`, each optionally uploaded to
   `--s3-prefix` (error if `--s3-prefix` is set but neither is `upload`, or if both are `off`). With `--surf off` the
   run is **mesh-only** (no surface volume; meshes run a strided window grid at `--overlap`, each window once).
-  Meshes are **per-window** — **no cross-window sheet-ID stitching yet** (design §10/§12 → future; see the writeup §8.4).
+- **Cross-window stitching (`--store-embeddings`, `--stitcher`).** `--store-embeddings [local|upload]` (bare = local;
+  D via `--emb-dim`, default 3) also writes a pooled per-window embedding zarr `{out}_emb.zarr` + each sheet's median
+  embedding into its `.asv` record — the stitcher's inputs. `upload` (or any `--mesh upload` run with embeddings stored)
+  also ships `{out}_emb.zarr` to `--s3-prefix`. **`--stitcher <hf|file>://PATH`** (bare = `hf://jimmylomro/hercuvit-stitcher`) goes further:
+  it **implies `--store-embeddings`** and, once the leader has merged the per-window sheets, runs the cross-window
+  stitcher **in the leader process** (single-leader — the decoder is tiny/corner-batched, seconds per volume) and
+  writes the `affinities` edge table into the `.asv`. The deliverable is then one file — **`{out}_stitched-meshes.asv`**
+  (sheets **and** their cross-window graph), vs `{out}_meshes.asv` unstitched. Needs `--mesh != off`. See
+  [stitcher.md](stitcher.md) and the writeup §7–8.
 
 ### 9.1 The `.asv` sheet store — format & how to read it
 
@@ -321,6 +330,10 @@ hercuvit infer single-instance SOURCE  --model DIR|--model-hf [REPO]  --out PREF
                       [--surf off|local|upload] [--mesh off|local|upload]   # what to produce/upload (default local/local)
                       [--mesh-fit-iters N]          # field sheet-fit iters per window (default 40)
                       [--overlap F]                 # mesh window overlap (0 = disjoint; small = a tiny per-face overlap)
+                      [--store-embeddings [local|upload] --emb-dim D]   # write {out}_emb.zarr + per-sheet median emb;
+                                                                        #   'upload' (or --mesh upload) ships emb.zarr to s3
+                      [--stitcher [<hf|file>://PATH]]    # ALSO stitch (implies --store-embeddings): leader writes
+                                                         #   {out}_stitched-meshes.asv (sheets + affinities); bare = hf default
                       [--region z0:z1,y0:y1,x0:x1 --level L] [--s3-prefix s3://… --pre-sync-source DIR]
 hercuvit infer multi-instance  SOURCE  … --leader                    # same flags; --leader on exactly one pod
 hercuvit labels create OUT_DIR  --model DIR|--model-hf [REPO]         # cross-window STITCHER pseudo-labels (no GT); see
@@ -513,10 +526,12 @@ to `model/decoder_common.py` (above). What remains on the build path:
   GPU on the `.done` claim-queue (single GPU / `--device cpu` → in-process), across pods with `--leader`. The engine
   streams, tiles, and writes the surface `{out}_pass0.zarr` (+pyramid) and/or the per-window sheet meshes
   `{out}_meshes.asv` (per-worker shards → leader merge), per `--surf`/`--mesh`; `_resolve_model` resolves the
-  checkpoint (local dir/.pth or HF snapshot) once in the parent. Meshes are per-window; cross-window sheet-ID
-  stitching = future. The hercuvit CLI (`infer single-instance` / `infer multi-instance`) carries the full fan-out
-  flag set (`--gpus`, `--pre-sync-source`, `--s3-prefix`, `--surf`/`--mesh`/`--mesh-fit-iters`, `--overlap`,
-  `--resume`, `--keep-buffers`, `--claim-chunk`, `--tta`, `--leader`, …).
+  checkpoint (local dir/.pth or HF snapshot) once in the parent. With `--stitcher` (implies `--store-embeddings`) the
+  leader also runs the cross-window stitcher after the merge (`stitch.infer.stitch_asv`, resolved once in the parent)
+  and writes the `affinities` table into `{out}_stitched-meshes.asv`. The hercuvit CLI (`infer single-instance` /
+  `infer multi-instance`) carries the full fan-out flag set (`--gpus`, `--pre-sync-source`, `--s3-prefix`,
+  `--surf`/`--mesh`/`--mesh-fit-iters`, `--overlap`, `--store-embeddings`/`--emb-dim`, `--stitcher`, `--resume`,
+  `--keep-buffers`, `--claim-chunk`, `--tta`, `--leader`, …).
 - `meshes/` — the sheet-mesh subsystem (top-level, shared with herculabels' geometry; no product-code deps).
   `fit.py` = the herculabels **slab/KNN** fit (`fit_sheet_meshes`, `init_sheet_grid`, `grid_triangles`) — label
   quality, **untouched**. `field_fit.py` = the fast **KNN-free field fit** used at inference (`fit_sheets_field`:

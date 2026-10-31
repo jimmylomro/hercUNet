@@ -18,6 +18,7 @@ import argparse
 _CORPUS_HF = "jimmylomro/hercunet-corpus"
 _DINOVOL_HF = "scrollprize/dinovol_ps8_9.6um_101626"
 _MODEL_HF = "jimmylomro/hercuvit-v0"
+_STITCHER_HF = "jimmylomro/hercuvit-stitcher"
 _BACKENDS = ("auto", "flash", "cudnn", "efficient", "math")
 _VARIANTS = ("small", "tiny", "nano")
 
@@ -265,11 +266,21 @@ def _add_infer_common(p: argparse.ArgumentParser) -> None:
                         "Default local; loads the instance head automatically when not off.")
     p.add_argument("--mesh-fit-iters", dest="mesh_fit_iters", type=int, default=40, metavar="N",
                    help="field sheet-fit iterations per window (default 40; the fast KNN-free fit)")
-    p.add_argument("--store-embeddings", dest="store_embeddings", action="store_true",
+    p.add_argument("--store-embeddings", dest="store_embeddings", nargs="?", const="local", default=None,
+                   choices=("local", "upload"), metavar="local|upload",
                    help="also write per-window pooled normalised-PCA embeddings to {out}_emb.zarr and each sheet's "
-                        "median embedding into its .asv annotation (stitcher/tracer inputs). Requires --mesh != off.")
+                        "median embedding into its .asv annotation (stitcher/tracer inputs). Bare flag = local; "
+                        "'upload' also ships {out}_emb.zarr to --s3-prefix (as do --mesh upload runs). Requires "
+                        "--mesh != off; implied (local) by --stitcher.")
     p.add_argument("--emb-dim", dest="emb_dim", type=int, default=3, metavar="D",
-                   help="--store-embeddings PCA dim D (default 3; match the stitcher's --pca-dim)")
+                   help="--store-embeddings/--stitcher PCA dim D (default 3; match the stitcher's --pca-dim)")
+    p.add_argument("--stitcher", dest="stitcher", nargs="?", const=f"hf://{_STITCHER_HF}", default=None,
+                   metavar="<hf|file>://PATH",
+                   help="also STITCH: materialise the embeddings zarr AND run the cross-window stitcher in the leader "
+                        "process, writing both the sheets and an `affinities` table into one {out}_stitched-meshes.asv "
+                        "(vs {out}_meshes.asv unstitched). Implies --store-embeddings; needs --mesh != off. The model "
+                        f"is resolved like any other: hf://<repo> | file://<path> | local .pth/dir (bare flag = "
+                        f"hf://{_STITCHER_HF}). Stitching is single-leader (fast enough not to shard across GPUs).")
     p.add_argument("--resume", action="store_true",
                    help="continue an interrupted run: skip _complete passes + re-queue tiles orphaned by killed workers")
     p.add_argument("--keep-buffers", action="store_true", dest="keep_buffers",
@@ -404,10 +415,11 @@ def _add_stitcher_train(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--val-interval", dest="val_interval", type=int, default=None,
                    help="validate edge AP every N epochs (default 5; 0 = no validation, train on all samples)")
     p.add_argument("--num-workers", dest="num_workers", type=int, default=4, help="DataLoader workers (default 4)")
-    p.add_argument("--label-mode", dest="label_mode", default="raw", choices=("raw", "v1", "v2"),
+    p.add_argument("--label-mode", dest="label_mode", default="v2", choices=("raw", "v1", "v2"),
                    help="load-time label-quality fix on TRAIN (val stays raw for comparable AP): raw=baseline; "
                         "v1=same-slot->neg + drop off-seam queries (100%% labelled, seam-scoped); "
-                        "v2=same-slot->neg + off-seam pairs->neg (100%% labelled, off-seam as hard negatives)")
+                        "v2=same-slot->neg + off-seam pairs->neg (100%% labelled, off-seam as hard negatives). "
+                        "Default v2.")
     p.add_argument("--continue", dest="continue_", action="store_true",
                    help="resume from {out}/checkpoint_latest.pth instead of starting fresh")
     p.add_argument("--device", default="cuda", help="cuda | cuda:N | cpu (default cuda)")
@@ -426,7 +438,9 @@ def _add_stitcher_infer(sub: argparse._SubParsersAction) -> None:
                    help="pooled per-window normalised-PCA embeddings (emitted by `hercuvit infer --store-embeddings`)")
     p.add_argument("--asv", default=None, metavar="ASV", help="per-window sheet meshes with the median-embedding "
                    "annotation (the affinities table is written into this file unless --out is given)")
-    p.add_argument("--stitcher", default=None, metavar="file://PATH|REPO", help="trained stitcher (local .pth/dir or HF repo)")
+    p.add_argument("--stitcher", default=f"hf://{_STITCHER_HF}", metavar="<hf|file>://PATH",
+                   help=f"trained stitcher, resolved like every other inference model: hf://<repo> | file://<path> | "
+                        f"a local .pth/dir | a bare HF repo id (default hf://{_STITCHER_HF})")
     p.add_argument("--out", default=None, metavar="ASV", help="write the augmented .asv here instead of editing --asv "
                    "in place (the sheets are copied, then the affinities table added)")
     p.add_argument("--top-k", dest="top_k", type=int, default=0, metavar="K",

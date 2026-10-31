@@ -571,7 +571,8 @@ def run_inference(source, out_prefix, *, model_type="nnunet-jacobi", model=None,
                   air=25, region=None, level=0, keep_buffers=False, finalise="last", resume=False, batch=4, nb=4,
                   s3_prefix=None, upload="last", multi=False, reclaim=False, claim_chunk=6, leader=False,
                   readahead=2, prefetch_workers=3, tta="none", tta_passes="all",
-                  surf_store="local", mesh_store="off", store_embeddings=False, emb_dim=3):
+                  surf_store="local", mesh_store="off", store_embeddings=False, emb_dim=3, emb_upload=False,
+                  stitcher=None):
     """Model-agnostic inference engine. Build the model (:class:`hercunet.infer.model.InferenceModel`) named by
     ``model_type`` from ``model``/``model_hf`` + ``model_opts``, then run ``model.passes`` double-buffered passes over
     ``source`` and write per-pass surface-prob OME-Zarrs ``{out_prefix}_pass{p}.zarr``. Returns the final pass path.
@@ -860,7 +861,9 @@ def run_inference(source, out_prefix, *, model_type="nnunet-jacobi", model=None,
             import glob
             import time as _time
             from ..meshes.asv import merge_asv
-            final = f"{out_prefix}_meshes.asv"
+            # one file carries the sheets; when a --stitcher is given it ALSO carries the affinities table, so name it
+            # {out}_stitched-meshes.asv (vs {out}_meshes.asv unstitched).
+            final = f"{out_prefix}_stitched-meshes.asv" if stitcher else f"{out_prefix}_meshes.asv"
             if multi:                                                 # wait until every active shard has closed
                 for _ in range(1800):
                     act = len(glob.glob(os.path.join(donedir, "_meshshard_*.active")))
@@ -869,6 +872,7 @@ def run_inference(source, out_prefix, *, model_type="nnunet-jacobi", model=None,
                         break
                     _time.sleep(1.0)
             shards = sorted(s for s in glob.glob(f"{out_prefix}_meshes.*.asv") if s != final)
+            merged_ok = False
             if shards:
                 res = merge_asv(shards, final, frame=mesh_frame, voxel_um=l0_voxel, grid_step_um=30.0, overwrite=True)
                 print(f"[engine] merged {len(shards)} mesh shard(s) -> {final} ({res['sheet_count']} sheets)", flush=True)
@@ -877,18 +881,37 @@ def run_inference(source, out_prefix, *, model_type="nnunet-jacobi", model=None,
                         os.remove(s)
                     except OSError:
                         pass
-                if mesh_store == "upload" and s3_prefix:
-                    uri = f"{s3_prefix.rstrip('/')}/meshes.asv"
-                    try:
-                        NI.upload_file_to_s3(final, uri)
-                        print(f"[engine] MESHES ON S3 — {NI.s3_to_https(uri)}", flush=True)
-                    except Exception as e:
-                        print(f"[engine] mesh upload FAILED: {e}", flush=True)
+                merged_ok = True
+            efinal = None
             if store_embeddings:                                      # concatenate per-worker emb zarr shards -> one zarr
                 from ..meshes.extract import merge_emb_shards
                 efinal = f"{out_prefix}_emb.zarr"
                 nw = merge_emb_shards(sorted(glob.glob(f"{out_prefix}_emb.*.zarr")), efinal)
                 print(f"[engine] merged emb shards -> {efinal} ({nw} windows)", flush=True)
+                if emb_upload and s3_prefix and os.path.isdir(efinal):   # ship the embeddings zarr alongside the sheets
+                    uri = f"{s3_prefix.rstrip('/')}/emb.zarr"
+                    try:
+                        NI.upload_zarr_to_s3(efinal, uri, incremental=False)
+                        print(f"[engine] EMBEDDINGS ON S3 — {NI.s3_to_https(uri)}", flush=True)
+                    except Exception as e:
+                        print(f"[engine] embeddings upload FAILED: {e}", flush=True)
+            # leader-only cross-window stitch: add the affinities table into the merged .asv IN PLACE (single process —
+            # the decoder is tiny and corner-batched, so stitching a whole volume is seconds; no GPU sharding needed).
+            if stitcher and merged_ok and efinal:
+                from ..hercuvit.stitch.infer import stitch_asv
+                print(f"[engine] stitching {final} (leader, stitcher={stitcher}) …", flush=True)
+                try:
+                    _, naff = stitch_asv(efinal, final, stitcher, out=None, top_k=0, batch=16, device=device)
+                    print(f"[engine] stitched: {naff} affinity rows written into {final}", flush=True)
+                except Exception as e:                                # a stitch failure must not lose the merged sheets
+                    print(f"[engine] stitch FAILED (sheets kept in {final}): {e}", flush=True)
+            if merged_ok and mesh_store == "upload" and s3_prefix:    # upload the (possibly stitched) deliverable
+                uri = f"{s3_prefix.rstrip('/')}/{os.path.basename(final)}"
+                try:
+                    NI.upload_file_to_s3(final, uri)
+                    print(f"[engine] MESHES ON S3 — {NI.s3_to_https(uri)}", flush=True)
+                except Exception as e:
+                    print(f"[engine] mesh upload FAILED: {e}", flush=True)
 
         if want_surf and not keep_buffers and p >= 1 and prev_path is not None and (leader or not multi):
             import shutil                                              # p-1's finalize already joined above (bound=1)
