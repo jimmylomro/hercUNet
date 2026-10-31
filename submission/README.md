@@ -15,11 +15,12 @@ source of truth.
 
 ## Reproduction inputs — [`corpus/`](corpus/README.md)
 
-The window lists that regenerate the training data from scratch: [`corpus/corpus_windows.txt`](corpus/corpus_windows.txt)
-(the stage-1 ∇φ corpus, for `hercunet labels create --coords-file`), and the mined m7 rehearsal corpus as both a
-human index [`corpus/m7_windows.txt`](corpus/m7_windows.txt) and the byte-exact rebuild manifest
-[`corpus/m7_scout_himat_manifest.json`](corpus/m7_scout_himat_manifest.json) (for `hercunet labels m7-mine --manifest`). See
-[`corpus/README.md`](corpus/README.md) for the exact commands.
+The window/corner lists that regenerate the training data from scratch: [`corpus/corpus_windows.txt`](corpus/corpus_windows.txt)
+(the stage-1 ∇φ corpus, for `hercunet labels create --coords-file`); [`corpus/stitch_corpus_windows.txt`](corpus/stitch_corpus_windows.txt)
+(the HercuViT **stitcher** corpus — 22,619 region-sampled corners, for `hercuvit labels create --coords-file`); and the
+mined m7 rehearsal corpus as both a human index [`corpus/m7_windows.txt`](corpus/m7_windows.txt) and the byte-exact
+rebuild manifest [`corpus/m7_scout_himat_manifest.json`](corpus/m7_scout_himat_manifest.json) (for
+`hercunet labels m7-mine --manifest`). See [`corpus/README.md`](corpus/README.md) for the exact commands.
 
 ## Figures
 
