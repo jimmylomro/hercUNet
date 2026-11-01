@@ -52,7 +52,10 @@ pipenv run hercuvit infer single-instance PHerc1447 --model-hf jimmylomro/hercuv
 ```
 
 Stitching is single-leader (the decoder is tiny and corner-batched, so a whole volume stitches in seconds — not worth
-sharding across GPUs). The sections below cover the separate commands, needed when you are **training** a stitcher or
+sharding across GPUs). It is **streamed a z-plane at a time** — a feeder pool (`--feed-workers`, `--readahead`) reads
+each plane's pooled embeddings and sheet medians just ahead of the decoder, so the leader never holds the whole
+embedding array or the whole sheet table in RAM (both are several GB for a scroll), only a sliding two-plane window
+and one GPU batch. The sections below cover the separate commands, needed when you are **training** a stitcher or
 want the artifacts as distinct files.
 
 ---
@@ -75,8 +78,8 @@ pipenv run hercuvit infer single-instance PHerc1447 \
 ```
 
 - Use an **overlap** (`--overlap 0.1` is the stitcher's assumption) so window cores tile and corners are well formed.
-- `_emb.zarr` holds one pooled normalised-PCA grid per window plus its global-L0 origin; it is small (loads in one go
-  at stitch time).
+- `_emb.zarr` holds one pooled normalised-PCA grid per window plus its global-L0 origin; at stitch time it is read a
+  z-plane at a time (only the tiny `origin` index is loaded whole), so even a scroll-sized array never sits in RAM.
 - Each sheet's median descriptor is stored in its `.asv` record, so a sheet that has no valid `D`-dim embedding is
   simply skipped as a query at stitch time.
 - `--store-embeddings` is tri-state like `--surf`/`--mesh`: bare = **local**, `--store-embeddings upload` also ships
@@ -180,6 +183,8 @@ pipenv run hercuvit stitcher infer \
 | `--out ASV` | — | write the augmented `.asv` here instead of editing `--asv` in place (sheets copied, then the table added) |
 | `--top-k K` | `0` | per sheet, keep only its K highest-affinity neighbours per corner (`0` = all in-range pairs; `10` is sensible for a large graph) |
 | `--batch N` | `16` | corners per decoder forward |
+| `--feed-workers N` | `3` | threads prefetching z-planes of embeddings + sheet medians while the decoder runs (the work is streamed a plane at a time; the whole embedding array / sheet table is never held in RAM) |
+| `--readahead N` | `2` | z-planes to prefetch ahead of the one being stitched |
 | `--device` | `cuda` | `cuda` \| `cuda:N` \| `cpu` |
 
 **Both directions** `(A→B)` and `(B→A)` are stored (the head is symmetric), so "every neighbour of sheet X" is a

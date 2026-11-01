@@ -447,6 +447,12 @@ def _add_stitcher_infer(sub: argparse._SubParsersAction) -> None:
                    help="per sheet, keep only its K highest-affinity neighbours at each corner (0 = all in-range "
                         "pairs, the default; docs §8.1 recommends 10 for a large graph)")
     p.add_argument("--batch", type=int, default=16, help="corners per decoder forward (default 16)")
+    p.add_argument("--feed-workers", dest="feed_workers", type=int, default=3, metavar="N",
+                   help="threads prefetching z-planes of embeddings + sheet medians while the decoder runs "
+                        "(default 3); the work is streamed a plane at a time, so the whole embedding array is never "
+                        "held in RAM")
+    p.add_argument("--readahead", type=int, default=2, metavar="N",
+                   help="z-planes to prefetch ahead of the one being stitched (default 2)")
     p.add_argument("--device", default="cuda", help="cuda | cuda:N | cpu (default cuda)")
     p.set_defaults(func=lambda a: __import__("hercunet.hercuvit.stitch.infer", fromlist=["infer_run"]).infer_run(a))
 

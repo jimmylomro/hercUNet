@@ -12,6 +12,14 @@ import numpy as np
 from .field_fit import fit_sheets_field
 
 
+def window_name(z, y, x) -> str:
+    """The canonical per-window id string ``'z{z}_y{y}_x{x}'`` from a window's (z,y,x) START on the working-level
+    grid — the SAME ints that go into the emb-zarr ``origin`` row. This is the format half of the pair whose parse
+    half is :func:`hercunet.hercuvit.stitch.infer._parse_window`; the stitcher reconstructs this exact string to
+    look a window's sheets up by the indexed ``sheets.window`` column, so the two must never drift."""
+    return f"z{int(z)}_y{int(y)}_x{int(x)}"
+
+
 def prune_sheet_masks(owner, gate, memb, *, mass_frac: float = 0.10, conf_thr: float = 0.70):
     """Drop spurious sheet masks from ``gate`` BEFORE mesh fitting, returning a new gate with the dropped sheets'
     voxels cleared. A sheet (an id in ``owner`` within ``gate``) is dropped **iff it is both small and unconfident**:
@@ -252,7 +260,7 @@ class MeshSink:
         per-sheet ``'emb'`` medians. Each sheet is stored in global L0 XYZ."""
         oz, oy, ox = (float(v) for v in origin_zyx)
         off = np.array([oz, oy, ox], np.float32)
-        wname = f"z{int(oz)}_y{int(oy)}_x{int(ox)}"
+        wname = window_name(oz, oy, ox)
         self.n_windows += 1
         meshes = dict(meshes)
         emb_grid = meshes.pop("_emb_grid", None)                                      # sentinel: the window's pooled grid

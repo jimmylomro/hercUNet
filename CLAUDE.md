@@ -77,8 +77,8 @@ Public, no token. Rebuilding/mining/re-uploading any of this by hand is wasted w
 - **`jimmylomro/hercuvit-v0`** (model) — the HercuViT sheet segmenter; `--model-hf jimmylomro/hercuvit-v0`
   (for `hercuvit infer` and `hercuvit labels create`).
 - **`jimmylomro/hercuvit-stitcher`** (model) — the cross-window stitcher; the default for `hercuvit infer --stitcher`
-  and `hercuvit stitcher infer` (resolved as `hf://…`, like every other model). **Upload pending** — until it is
-  pushed, a bare `--stitcher` will 404; pass `--stitcher file://<ckpt-dir>` meanwhile.
+  and `hercuvit stitcher infer` (resolved as `hf://…`, like every other model). Published — a bare `--stitcher`
+  pulls it (`fulldata22k_v2` ep59, edge-AP ~0.70).
 
 Only build a corpus from scratch (`labels create` / `labels m7-mine`) if you deliberately need a *new* one;
 to reproduce HercUNet v0, download the published corpus (`docs/training.md`, Option A).
