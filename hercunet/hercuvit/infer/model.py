@@ -99,7 +99,7 @@ class HercuvitSurfaceModel(InferenceModel):
         if self._store_emb:                                                  # --store-embeddings: encoder tokens for PCA
             t = self.net.backbone.forward_features(xb_base, view_kind="global")["x_norm_patchtokens"]  # (B,G³,C)
             Gtok = round(round(t.shape[1]) ** (1.0 / 3))
-            tok = t.float().reshape(t.shape[0], Gtok, Gtok, Gtok, -1).cpu().numpy()
+            tok = t.float().reshape(t.shape[0], Gtok, Gtok, Gtok, -1)                 # stays on GPU for the SVD below
             POOL = self._p // Gtok
         meshes = []
         for b in range(xb_base.shape[0]):
@@ -115,12 +115,13 @@ class HercuvitSurfaceModel(InferenceModel):
                 device=owner.device.type)
             for _sid, _m in mb.items():
                 _m.update(stats.get(int(_sid), {}))                                    # attach mass/conf stats
-            if self._store_emb:                                                        # per-window PCA + per-sheet median
-                from ..stitch.embed import reduce_normalised_pca, median_after_pca
+            if self._store_emb:                                                        # per-window PCA ON THE GPU + median
+                from ..stitch.embed import median_after_pca, reduce_normalised_pca_torch
                 sl = slice(POOL // 2, None, POOL)
+                g8t = gate[sl, sl, sl].bool()                                           # (G,G,G) confident gate @1/8 (GPU)
+                emb = reduce_normalised_pca_torch(tok[b], g8t, self._D).cpu().numpy()   # GPU SVD → tiny (G,G,G,D) to CPU
                 o8 = owner[sl, sl, sl].to(torch.int32).cpu().numpy()                    # (G,G,G) owner at 1/8
-                g8 = gate[sl, sl, sl].cpu().numpy().astype(bool)                        # (G,G,G) confident gate at 1/8
-                emb = reduce_normalised_pca(tok[b], g8, self._D)                        # (G,G,G,D) per-window PCA
+                g8 = g8t.cpu().numpy()
                 for _sid, _m in mb.items():
                     cells = (o8 == int(_sid)) & g8
                     med = median_after_pca(emb, cells) if bool(cells.any()) else np.zeros(self._D, np.float32)

@@ -39,6 +39,34 @@ def reduce_normalised_pca(feats: np.ndarray, surf_mask: np.ndarray, D: int) -> n
     return emb.reshape(*lead, D).astype(np.float32)
 
 
+def reduce_normalised_pca_torch(feats, surf_mask, D: int):
+    """GPU/torch twin of :func:`reduce_normalised_pca` — identical maths, device-preserving, so inference can reduce a
+    window's encoder tokens on the GPU (tiny SVD, microseconds) instead of copying the whole ``(G,G,G,C)`` token tensor
+    to the CPU for a numpy SVD (the dominant cost of ``--store-embeddings``). ``feats`` ``(..., C)`` and ``surf_mask``
+    ``(...)`` are torch tensors on any device; returns ``(..., D)`` float32 on the same device.
+
+    Matches the numpy twin bit-for-bit in the maths (population std, i.e. ``unbiased=False``; fit on surface cells with
+    the same ``> D + 8`` fallback; centre-then-project). The only difference is the LAPACK sign of the principal
+    directions, which is already arbitrary PER WINDOW in the numpy path too (a window's tokens AND its median flip
+    together, so within-window geometry is preserved and cross-window signs are independent either way) — so the
+    trained stitcher, fit on that per-window-arbitrary sign, sees numpy- and torch-reduced embeddings as the same
+    distribution. See ``tests/hercuvit/test_pca_torch_equiv.py`` (equal up to per-component sign)."""
+    import torch
+
+    lead = feats.shape[:-1]
+    X = feats.reshape(-1, feats.shape[-1]).float()
+    s = surf_mask.reshape(-1) > 0.5
+    fit = X[s] if int(s.sum()) > D + 8 else X
+    mu = fit.mean(0)
+    sd = fit.std(0, unbiased=False) + 1e-6                        # population std, matching numpy's ddof=0
+    Z = (fit - mu) / sd
+    zc = Z.mean(0)
+    _, _, Vh = torch.linalg.svd(Z - zc, full_matrices=False)      # Vh rows = right singular vectors (numpy's vt)
+    V = Vh[:D]
+    emb = (((X - mu) / sd) - zc) @ V.T
+    return emb.reshape(*lead, D).to(torch.float32)
+
+
 def median_after_pca(emb: np.ndarray, cells: np.ndarray) -> np.ndarray:
     """Per-dim median of a fragment's already-projected cells (docs §3.4) → ``(D,)``.
 
