@@ -348,7 +348,11 @@ def run_pass(model, vol, prev_arr, cur_arr, region, offset, P, device,
         for bi, (req, blk, org) in enumerate(iter_windows(vol, reqs, readahead=readahead, workers=prefetch_workers)):
             process_block(np.asarray(blk), blocks[bi])
             if log_every and bi and bi % log_every == 0:
-                print(f"[pass] P{pass_idx}/{passes - 1} block {bi}/{len(blocks)} ({rate()})", flush=True)
+                el = time.time() - t0; rb = bi / max(el, 1e-9)                 # blocks/s so far → per-pass + run ETA
+                eta = (len(blocks) - bi) / rb if rb > 0 else float("inf")
+                run_eta = eta + max(0, passes - 1 - pass_idx) * (len(blocks) / rb if rb > 0 else float("inf"))
+                print(f"[pass] P{pass_idx}/{passes - 1} block {bi}/{len(blocks)} ({rate()}) "
+                      f"| pass ETA {_hms(eta)} ({100 * bi // len(blocks)}%) · run ETA {_hms(run_eta)}", flush=True)
         flush()
     else:                                                                     # ---- multi instance: claim-queue
         ntot = len(blocks); nproc = 0
@@ -507,7 +511,11 @@ def run_pass_blend(model, vol, prev_arr, cur_arr, region, offset, P, S, T, devic
             if j < len(tiles): pvq.append(prev_ex.submit(_read_prev, tiles[j])); j += 1
             process_tile(np.asarray(blk), tiles[bi], pv)
             if log_every and bi and bi % log_every == 0:
-                print(f"[pass-blend] P{pass_idx}/{passes - 1} tile {bi}/{len(tiles)} ({rate()})", flush=True)
+                el = time.time() - t0; rt = bi / max(el, 1e-9)                 # tiles/s so far → per-pass + run ETA
+                eta = (len(tiles) - bi) / rt if rt > 0 else float("inf")
+                run_eta = eta + max(0, passes - 1 - pass_idx) * (len(tiles) / rt if rt > 0 else float("inf"))
+                print(f"[pass-blend] P{pass_idx}/{passes - 1} tile {bi}/{len(tiles)} ({rate()}) "
+                      f"| pass ETA {_hms(eta)} ({100 * bi // len(tiles)}%) · run ETA {_hms(run_eta)}", flush=True)
     else:                                                                          # ---- multi instance: claim-queue
         ntot = len(tiles); nproc = 0
         g0, tg0 = CQ.count_done(donedir), time.time()
