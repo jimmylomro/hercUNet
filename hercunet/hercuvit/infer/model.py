@@ -87,9 +87,14 @@ class HercuvitSurfaceModel(InferenceModel):
         each the window's ``{sheet_id: mesh}`` dict (verts in window-local voxel z,y,x). ``voxel_um`` is the engine's
         working-level voxel size (so the fit's 30 µm grid maps to the right pixel step). No second encoder pass."""
         import torch
+
+        from ...perf import add, now, report, sync
         from ..model.decoder_common import mask_logits_from_embed
         from ...meshes.extract import extract_window_sheets, confident_sheet_masks, sheet_stats
+        _acc = self.__dict__.setdefault("_phase_t", {})                       # HERCUNET_PERF=1 → DEBUG phase timings
+        _c = now()
         out = self.net(xb_base, run_instance=True)
+        sync(); add(_acc, "net", _c)
         sem = out["sem_logits"]                                               # deep-sup LIST: [0] = full-res
         sem = (sem[0] if isinstance(sem, (list, tuple)) else sem)            # [B,2,P,P,P]
         mf = out["mask_features"]                                             # tensor [B,C,P,P,P] (or list)
@@ -97,22 +102,27 @@ class HercuvitSurfaceModel(InferenceModel):
         me = out["instance"]["layers"][-1]["mask_embed"].float()             # [B,Q,C]
         tok = Gtok = POOL = None
         if self._store_emb:                                                  # --store-embeddings: encoder tokens for PCA
-            t = self.net.backbone.forward_features(xb_base, view_kind="global")["x_norm_patchtokens"]  # (B,G³,C)
-            Gtok = round(round(t.shape[1]) ** (1.0 / 3))
+            t = out["patch_tokens"]                                          # REUSE the backbone tokens from the forward
+            Gtok = round(round(t.shape[1]) ** (1.0 / 3))                     # above — NO second encoder pass (was 2×)
             tok = t.float().reshape(t.shape[0], Gtok, Gtok, Gtok, -1)                 # stays on GPU for the SVD below
             POOL = self._p // Gtok
         meshes = []
         for b in range(xb_base.shape[0]):
+            _c = now()
             ml = mask_logits_from_embed(me[b:b + 1], mf[b:b + 1])[0]                        # (Q,P,P,P)
+            sync(); add(_acc, "mask", _c); _c = now()
             owner, gate, memb = confident_sheet_masks(                                      # shared surviving-sheet masks
                 ml, sem[b], thresh=self._mesh["thresh"], merge_thr=self._mesh["merge_thr"],
                 mass_frac=self._mesh["mass_frac"], conf_thr=self._mesh["conf_thr"])
+            sync(); add(_acc, "masks", _c); _c = now()
             min_pts = max(self._mesh["min_pts"], int(self._mesh["vox_frac"] * owner.numel()))
             stats = sheet_stats(owner, gate, memb)                                      # per-sheet quality stats
+            sync(); add(_acc, "stats", _c); _c = now()
             mb = extract_window_sheets(
                 owner, gate, voxel_um=float(voxel_um), sigma=self._mesh["sigma"], min_pts=min_pts,
                 step_um=self._mesh["step_um"], iters=self._mesh["iters"], lr=self._mesh["lr"], lam=self._mesh["lam"],
                 device=owner.device.type)
+            sync(); add(_acc, "fit", _c); _c = now()
             for _sid, _m in mb.items():
                 _m.update(stats.get(int(_sid), {}))                                    # attach mass/conf stats
             if self._store_emb:                                                        # per-window PCA ON THE GPU + median
@@ -127,5 +137,7 @@ class HercuvitSurfaceModel(InferenceModel):
                     med = median_after_pca(emb, cells) if bool(cells.any()) else np.zeros(self._D, np.float32)
                     _m["emb"] = [float(v) for v in np.asarray(med).ravel()]
                 mb["_emb_grid"] = emb.astype(np.float16)                                # sentinel for MeshSink -> zarr
+            sync(); add(_acc, "pca", _c)
             meshes.append(mb)
+        report("meshes", _acc)
         return sem, meshes

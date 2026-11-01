@@ -300,10 +300,14 @@ def run_pass(model, vol, prev_arr, cur_arr, region, offset, P, device,
     t0 = time.time(); done = [0]
     buf, meta = [], []
 
+    from ..perf import add, now, report, sync                                 # HERCUNET_PERF=1 → DEBUG fwd/store split
+    _tm = {}
+
     def flush():
         if not buf:
             return
         xb = torch.from_numpy(np.stack(buf)).to(device, non_blocking=True)     # [B,Cbase,P,P,P]
+        _c = now()
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
             if mesh_sink is not None:                                         # one run_instance forward: surface + meshes
                 logits, meshes = model.forward_meshes(xb, voxel_um)
@@ -311,13 +315,16 @@ def run_pass(model, vol, prev_arr, cur_arr, region, offset, P, device,
                 logits = _tta_surface(model, xb, tta_variants)                # [B,2,P,P,P] (TTA-averaged if on)
                 meshes = None
             prob = torch.softmax(logits, 1)[:, 1]                             # [B,P,P,P]
+        sync(); add(_tm, "fwd", _c)
         if cur_arr is not None:                                               # surface write (skipped in mesh-only runs)
             u8 = prob.mul_(255.0).round_().clamp_(0, 255).to(torch.uint8).cpu().numpy()
             for i, (z, y, x) in enumerate(meta):
                 cur_arr[z:z + P, y:y + P, x:x + P] = u8[i]
+        _c = now()
         if mesh_sink is not None:                                             # per-window meshes -> .asv shard
             for i, (z, y, x) in enumerate(meta):
                 mesh_sink.add_window((z, y, x), meshes[i])
+        add(_tm, "store", _c); report("flush", _tm, win=done[0])
         buf.clear(); meta.clear()
 
     def process_block(ct_blk, block):

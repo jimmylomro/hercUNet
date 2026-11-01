@@ -22,6 +22,20 @@ import numpy as np
 from .fit import grid_triangles, init_sheet_grid
 from .normals import _gaussian1d, _separable_blur
 
+_INIT_POOL = None
+
+
+def _init_pool():
+    """A shared thread pool for the per-sheet grid init (:func:`init_sheet_grid` releases the GIL — numpy SVD + scipy
+    ndimage — so its window's sheets init in parallel). Created once; sized to a sane core count (``os.cpu_count`` can
+    over-report in a container, so it is capped)."""
+    global _INIT_POOL
+    if _INIT_POOL is None:
+        import concurrent.futures as _cf
+        import os
+        _INIT_POOL = _cf.ThreadPoolExecutor(max_workers=min(16, max(2, (os.cpu_count() or 8))))
+    return _INIT_POOL
+
 
 def fit_sheets_field(owner, gate, *, voxel_um: float, sigma: float = 3.0, iters: int = 40, lr: float = 1.0,
                      lam: float = 0.3, step_um: float = 30.0, min_pts: int = 400, min_grid: int = 3,
@@ -32,38 +46,51 @@ def fit_sheets_field(owner, gate, *, voxel_um: float, sigma: float = 3.0, iters:
     gradient-ascent steps / step size / Laplacian weight. Returns ``{sid: mesh}`` (verts in window-local z,y,x)."""
     import torch
     import torch.nn.functional as F
+
+    from ..perf import add, now, report
     dev = device
+    _acc = globals().setdefault("_PERF_ACC", {})
+    _t = now()
     owner_t = torch.as_tensor(owner, device=dev)
     gate_t = torch.as_tensor(gate, device=dev, dtype=torch.bool)
-    owner_np = owner_t.cpu().numpy(); gate_np = gate_t.cpu().numpy()
-    D, H, W = owner_np.shape
+    D, H, W = owner_t.shape
     step_px = float(step_um) / float(voxel_um)
 
     # --- per-sheet grid init + drops -------------------------------------------------------------------------------
-    # Gated voxel coords + their owner id, computed ONCE (one argwhere over the whole window instead of one per
-    # sheet). A stable sort groups them per sheet while keeping the original row-major order, so each group is
-    # bit-identical to the old per-sheet ``argwhere((owner==sid) & gate)``.
-    gate_coords = np.argwhere(gate_np).astype(np.float32)                   # (Nfg,3) z,y,x, row-major
-    gate_owner = owner_np[gate_np]                                          # (Nfg,) owner id, same order
-    order = np.argsort(gate_owner, kind="stable")
-    coords_s = gate_coords[order]; owner_s = gate_owner[order]
+    # Gated voxel coords + their owner id, grouped per sheet — ON THE GPU (nonzero + stable argsort), moving only the
+    # grouped result to the host. ``torch.nonzero`` yields the same row-major order as ``np.argwhere`` and the stable
+    # sort keeps it, so each group is identical to the old per-sheet ``argwhere((owner==sid) & gate)`` — this just
+    # avoids a full-window CPU argwhere + sort and the owner/gate host copies (a top fit cost beside an idle GPU).
+    idxg = gate_t.nonzero(as_tuple=False)                                   # (Nfg,3) z,y,x, row-major (GPU)
+    owner_g = owner_t[gate_t]                                               # (Nfg,) owner id, same order (GPU)
+    order = torch.argsort(owner_g, stable=True)
+    coords_s = idxg[order].to(torch.float32).cpu().numpy()                  # (Nfg,3) grouped, to host for init
+    owner_s = owner_g[order].cpu().numpy()
     uids, starts = np.unique(owner_s, return_index=True)
     bounds = np.append(starts, len(owner_s))
+    add(_acc, "pre", _t); _t = now()
 
+    # Per-sheet grid init runs in a thread pool: init_sheet_grid is numpy SVD + scipy ndimage, both of which release
+    # the GIL, so the window's sheets init in parallel across the box's cores (serial, it was a top fit cost). Order is
+    # preserved (pool.map), so the result is identical to the serial loop.
+    cand = [(int(sid), coords_s[bounds[k]:bounds[k + 1]])                     # (sid, coords) after the min_pts drop
+            for k, sid in enumerate(int(u) for u in uids)
+            if bounds[k + 1] - bounds[k] >= min_pts]
     grids, sheet_pts = [], []
-    for k, sid in enumerate(int(u) for u in uids):
-        coords = coords_s[bounds[k]:bounds[k + 1]]                          # == argwhere((owner==sid) & gate)
-        if len(coords) < min_pts:
-            continue
-        V0, foot, (nu, nv) = init_sheet_grid(coords, step_px)
-        if nu < min_grid or nv < min_grid or int(foot.sum()) < 3:          # degenerate grid -> failure drop
-            continue
-        grids.append((V0, foot, nu, nv, sid))
-        sheet_pts.append(coords)                                           # reused for the cKDTree fit metric
+    if cand:
+        pool = _init_pool()
+        for (sid, coords), (V0, foot, (nu, nv)) in zip(
+                cand, pool.map(lambda sc: init_sheet_grid(sc[1], step_px), cand)):
+            if nu < min_grid or nv < min_grid or int(foot.sum()) < 3:          # degenerate grid -> failure drop
+                continue
+            grids.append((V0, foot, nu, nv, sid))
+            sheet_pts.append(coords)                                           # reused for the fit metric
+    add(_acc, "init", _t)
     if not grids:
         return {}
     N = len(grids)
 
+    _t = now()
     # --- per-sheet field (blurred mask) + its gradient, batched ----------------------------------------------------
     with torch.no_grad():
         # Per-sheet gated masks as one GPU one-hot (owner==sid & gate) instead of N host masks + as_tensor copies.
@@ -114,18 +141,27 @@ def fit_sheets_field(owner, gate, *, voxel_um: float, sigma: float = 3.0, iters:
 
         Vnp = V.cpu().numpy()
 
-    from scipy.spatial import cKDTree
+    add(_acc, "gpu", _t); _t = now()                                          # (V.cpu() above already synced the GPU)
     out, voff = {}, 0
     for n, (V0, foot, nu, nv, sid) in enumerate(grids):
         Vf = Vnp[voff:voff + nu * nv].reshape(nu, nv, 3); fm = foot.reshape(-1)
         verts = Vf.reshape(-1, 3)[fm]                                           # (nvert,3) window-local z,y,x voxels
         # Fit quality vs the mask: nearest-vertex distance from each gated mask voxel to the mesh. fit_rms_um is the
-        # RMS displacement (um); coverage is the fraction of mask voxels within one grid step of the mesh.
+        # RMS displacement (um); coverage is the fraction of mask voxels within one grid step of the mesh. Computed on
+        # the GPU (chunked cdist → min) — a serial per-sheet CPU cKDTree over ~2k sheet-windows was the fit's dominant
+        # cost (GPU idle beside it); euclidean nearest-vertex distance is identical, just on-device.
         pts = sheet_pts[n]                                                     # == argwhere(masks[n]), precomputed
-        d, _ = cKDTree(verts).query(pts, k=1)
+        vt = torch.as_tensor(verts, device=dev, dtype=torch.float32)
+        pt = torch.as_tensor(pts, device=dev, dtype=torch.float32)
+        d = torch.cat([torch.cdist(pt[i:i + 16384], vt).amin(1)                # chunk pts to bound the (npts×nvert) tmp
+                       for i in range(0, pt.shape[0], 16384)]).cpu().numpy()   # matmul mode: ~1e-3 vs cKDTree (QC-only)
         fit_rms_um = float(np.sqrt(np.mean(d * d))) * float(voxel_um)
         coverage = float(np.mean(d <= step_px))
         out[sid] = dict(V=Vf, foot=foot, nu=nu, nv=nv, verts=verts, tris=grid_triangles(foot),
                         fit_rms_um=fit_rms_um, coverage=coverage)
         voff += nu * nv
+    add(_acc, "kd", _t)
+    _acc["n"] = _acc.get("n", 0) + 1
+    if _acc["n"] % 8 == 0:                                                     # throttle: this runs once per window
+        report("fit", {k: _acc[k] for k in ("pre", "init", "gpu", "kd") if k in _acc}, n_sheets=N)
     return out
