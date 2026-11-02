@@ -325,6 +325,13 @@ def merge_asv(shards: Iterable[str | os.PathLike], out: str | os.PathLike, *, fr
 # stitcher affinities: an edge table added to an existing .asv (docs/hercuvit-stitching.md §8), so one file carries
 # both the sheets AND their cross-window affinities
 # --------------------------------------------------------------------------------------------------------------------
+def _hms_build(sec: float) -> str:
+    """``95.0`` → ``'1m35s'`` — compact timing for the index-build log line."""
+    sec = int(max(0, sec))
+    m, sec = divmod(sec, 60)
+    return f"{m}m{sec:02d}s" if m else f"{sec}s"
+
+
 def write_affinities(path: str | os.PathLike, rows: Iterable[tuple], *,
                      corners: Iterable[tuple] | None = None, replace: bool = True) -> int:
     """Add (or replace) an ``affinities`` edge table in the existing ``.asv`` at ``path``, in place.
@@ -335,8 +342,22 @@ def write_affinities(path: str | os.PathLike, rows: Iterable[tuple], *,
     that produced the pair (a pair can recur at several corners; aggregation is a later, separate step — §9).
     ``corners`` (optional): ``(corner, z, y, x, n_queries)`` provenance rows. Returns the affinity row count.
     """
+    import time as _time
+
     db = sqlite3.connect(str(path))
     try:
+        # Bulk-load PRAGMAs. A full scroll's affinity table is hundreds of millions of rows, and the slow part is
+        # building its index over them (one big sort). This .asv is a REGENERABLE derivative — re-run the stitch to
+        # rebuild it — so during the load we trade durability for speed with zero downside: a ~2 GB page cache and no
+        # fsync (synchronous=OFF) remove the per-write barrier, and journal_mode=OFF skips the rollback journal
+        # ENTIRELY. OFF (not MEMORY) matters here: `replace` drops the previous ~GB affinities table+index inside this
+        # one transaction, and a MEMORY journal would hold all of that freed-page undo in RAM (tens of GB on a scroll).
+        # With OFF there is no journal at all, so a crash mid-build leaves a partial file — fine, just re-run the stitch.
+        # (busy_timeout is cheap hygiene; the streaming stitcher pre-loads its medians, so nothing else reads this file.)
+        db.execute("PRAGMA busy_timeout=60000")
+        db.execute("PRAGMA synchronous=OFF")
+        db.execute("PRAGMA journal_mode=OFF")
+        db.execute("PRAGMA cache_size=-524288")                  # bounded ~512 MB page cache (negative ⇒ KiB)
         if replace:
             db.execute("DROP TABLE IF EXISTS affinities")
             db.execute("DROP TABLE IF EXISTS affinity_corners")
@@ -344,14 +365,32 @@ def write_affinities(path: str | os.PathLike, rows: Iterable[tuple], *,
                    "src INTEGER NOT NULL, dst INTEGER NOT NULL, logit REAL NOT NULL, prob REAL NOT NULL, "
                    "corner INTEGER NOT NULL)")
         db.executemany("INSERT INTO affinities(src,dst,logit,prob,corner) VALUES(?,?,?,?,?)", rows)
-        db.execute("CREATE INDEX IF NOT EXISTS affinities_src ON affinities(src)")
+        n = int(db.execute("SELECT COUNT(*) FROM affinities").fetchone()[0])
+        # ONE index: the (src,dst) composite. It serves `WHERE src=?` (the only query this table gets — "neighbours of
+        # sheet X") as a leftmost-prefix just as well as a single-column src index would, so a separate `affinities(src)`
+        # would duplicate ~half the index for no query it uniquely answers. Built AFTER the bulk load (a single sort +
+        # sequential B-tree write), not incrementally (which would be random-insert slow). This is the silent tail, so
+        # it is logged.
+        print(f"[asv] building (src,dst) index over {n} affinity rows …", flush=True)
+        _t = _time.time()
         db.execute("CREATE INDEX IF NOT EXISTS affinities_src_dst ON affinities(src,dst)")
+        print(f"[asv] index built in {_hms_build(_time.time() - _t)}", flush=True)
         if corners is not None:
             db.execute("CREATE TABLE IF NOT EXISTS affinity_corners("
                        "corner INTEGER PRIMARY KEY, z INTEGER, y INTEGER, x INTEGER, n_queries INTEGER)")
             db.executemany("INSERT INTO affinity_corners(corner,z,y,x,n_queries) VALUES(?,?,?,?,?)", corners)
-        n = int(db.execute("SELECT COUNT(*) FROM affinities").fetchone()[0])
         db.commit()
+        # Re-stitch reclaim: `replace` drops any prior affinities table, but SQLite frees those pages to an internal
+        # freelist WITHOUT shrinking the file — so re-stitching an .asv that already held a big affinities table would
+        # leave tens of GB of dead pages (e.g. a top_k=0 → top_k=10 rebuild). VACUUM rewrites the file at its true
+        # size. Guarded on >1 GB of free pages, so a FRESH stitch (empty freelist) skips the costly rewrite entirely.
+        free_bytes = (db.execute("PRAGMA freelist_count").fetchone()[0]
+                      * db.execute("PRAGMA page_size").fetchone()[0])
+        if free_bytes > (1 << 30):
+            print(f"[asv] reclaiming {free_bytes / 1e9:.1f} GB of freed pages (VACUUM) …", flush=True)
+            _t = _time.time()
+            db.execute("VACUUM")
+            print(f"[asv] vacuumed in {_hms_build(_time.time() - _t)}", flush=True)
     finally:
         db.close()
     return n

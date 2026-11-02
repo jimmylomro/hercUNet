@@ -20,11 +20,11 @@ is a later, separate step over this table.
 The stitching core is :func:`stitch_asv`, shared by this CLI AND by ``hercuvit infer --stitcher`` (which runs it in
 the leader process straight after it has merged the per-window sheets + embeddings).
 
-**Memory:** the work is **streamed one z-plane at a time** — a feeder pool reads each plane's pooled grids
-(``emb_arr.oindex`` over just that plane's rows) and its sheets' medians (one indexed ``sheets.window`` lookup per
-window), and the per-corner samples are forwarded and written in batches. Only a sliding two-plane window and one
-GPU batch are resident, so the leader never holds the whole embedding array or the whole sheet table (which, for a
-scroll, is several GB) — see :func:`stitch_asv`.
+**Memory:** the multi-GB pooled-embedding zarr is **streamed one z-plane at a time** — a feeder pool reads each
+plane's pooled grids (``emb_arr.oindex`` over just that plane's rows) while the per-corner samples are forwarded and
+written in batches, so only a sliding two-plane window and one GPU batch of embeddings are resident. The small
+per-sheet medians are read once up front and kept in a dict; crucially nothing reads the ``.asv`` while the
+``affinities`` table is being streamed into it (that would deadlock the single writer) — see :func:`stitch_asv`.
 """
 from __future__ import annotations
 
@@ -101,6 +101,14 @@ def _parse_window(s: str) -> tuple[int, int, int]:
 _OCT = [(sz, sy, sx) for sz in (-1, 1) for sy in (-1, 1) for sx in (-1, 1)]
 
 
+def _hms(sec: float) -> str:
+    """``9315.0`` → ``'2h35m'`` — compact elapsed/ETA formatting for the progress log."""
+    sec = int(max(0, sec))
+    h, sec = divmod(sec, 3600)
+    m, sec = divmod(sec, 60)
+    return f"{h}h{m:02d}m" if h else (f"{m}m{sec:02d}s" if m else f"{sec}s")
+
+
 def _corner_item(emb_by_oct, sheets_by_oct, *, half, h, fov, nsp, CROP, POOL, cz, cy, cx):
     """Build ONE corner's training-shaped sample from its 8 octant windows' pooled grids (``emb_by_oct``) and the
     sheets touching the corner cube (``sheets_by_oct``: octant-sign → list of ``{id,emb,conf,lo,hi}``). Returns
@@ -140,15 +148,19 @@ def stitch_asv(embeddings_zarr: str, asv: str, stitcher: str, *, out: str | None
     interior core-grid corner, and write the pairwise affinities into the ``.asv`` (in place, or into ``out`` if
     given). ``top_k`` = neighbours kept per sheet per corner (0 = all in-range). Returns ``(out_asv, n_rows)``.
 
-    STREAMED, bounded memory. The only thing loaded whole is the tiny ``(N,3)`` ``origin`` index (~12 B/window); it
-    drives the lattice geometry AND groups window rows by z-plane. Then, plane by plane along z, ``feed_workers``
-    threads prefetch (up to ``readahead`` planes ahead) each plane's pooled grids — ``emb_arr.oindex`` over just that
-    plane's rows, so a plane's chunks are read once — and its sheets' medians (one indexed ``sheets.window`` lookup
-    per existing window, each feeder on its own read-only connection). Corners of row ``zi`` use the sliding pair of
-    planes ``{uz[zi], uz[zi+1]}``; the lower plane is evicted when the row completes. Per-corner samples are
-    forwarded in batches of ``batch`` and their affinity rows streamed straight into ``write_affinities`` (which
-    consumes the row generator with ``executemany``), so neither the whole embedding array, the whole sheet table,
-    nor the full row list is ever resident — only a two-plane window and one GPU batch.
+    STREAMED, bounded memory. The multi-GB artifact — the pooled-embedding zarr — is never held whole: plane by
+    plane along z, ``feed_workers`` threads prefetch (up to ``readahead`` planes ahead) each plane's pooled grids
+    (``emb_arr.oindex`` over just that plane's rows, so a plane's chunks are read once). The tiny ``(N,3)`` ``origin``
+    index (~12 B/window) is loaded whole to drive the lattice geometry and group window rows by z-plane, and the
+    per-sheet medians (id + D floats + bbox each — a few hundred MB for a whole scroll) are read ONCE up front,
+    grouped by window, then that connection is closed. This ordering is load-bearing: the feeders touch only the
+    zarr, so NOTHING reads the .asv while ``write_affinities`` is writing the ``affinities`` table into it — a
+    concurrent sqlite reader during the open write transaction would deadlock (the writer holds the lock while the
+    generator it drives blocks waiting on that reader). Corners of row ``zi`` use the sliding pair of planes
+    ``{uz[zi], uz[zi+1]}``; the lower plane is evicted when the row completes. Per-corner samples are forwarded in
+    batches of ``batch`` and their affinity rows streamed straight into ``write_affinities`` (which consumes the row
+    generator with ``executemany``), so neither the whole embedding array nor the full row list is ever resident —
+    only the medians dict, a two-plane window, and one GPU batch.
 
     This is the ONE stitching implementation — the ``hercuvit stitcher infer`` CLI and ``hercuvit infer --stitcher``
     (leader process) both call it, so the two paths never diverge."""
@@ -202,69 +214,78 @@ def stitch_asv(embeddings_zarr: str, asv: str, stitcher: str, *, out: str | None
     for n in range(N):
         plane_ns.setdefault(int(origin[n, 0]), []).append(n)
 
+    # Corner budget for the progress %/ETA: interior corners whose 8 octant windows are ALL present (air corners are
+    # skipped). Vectorised over the unique-coordinate lattice. An upper bound on the corners actually stitched (some
+    # are further dropped for <2 reachable sheets), so the reported % lands a little short of 100 at the end — a solid
+    # denominator for an ETA rather than an exact count.
+    _liz = np.searchsorted(uz, origin[:, 0]); _liy = np.searchsorted(uy, origin[:, 1]); _lix = np.searchsorted(ux, origin[:, 2])
+    _P = np.zeros((uz.size, uy.size, ux.size), dtype=bool); _P[_liz, _liy, _lix] = True
+    corner_budget = int((_P[:-1, :-1, :-1] & _P[1:, :-1, :-1] & _P[:-1, 1:, :-1] & _P[:-1, :-1, 1:] &
+                         _P[1:, 1:, :-1] & _P[1:, :-1, 1:] & _P[:-1, 1:, 1:] & _P[1:, 1:, 1:]).sum())
+
     out_asv = asv
     if out:
         shutil.copy2(asv, out)
         out_asv = out
 
-    # Index sheets by their window id so each window's medians are an O(log S) lookup while streaming (we open the
-    # .asv read-write here anyway — the affinities table is written into it at the end). Without this the per-window
-    # `WHERE window=?` would be a full scan per window => O(windows × sheets).
-    idb = sqlite3.connect(out_asv)
+    # Read every sheet's median descriptor ONCE here, up front, into RAM (grouped by window), then CLOSE the
+    # connection — BEFORE the streaming write below opens the .asv for `affinities`. This is deliberate: a sqlite
+    # reader that touches the file WHILE `write_affinities` holds an open write transaction on the same rollback-
+    # journal file DEADLOCKS — the writer holds the lock while the generator it drives blocks on `fut.result()`
+    # waiting for exactly that reader, so neither can proceed (a busy_timeout only delays which side errors). The
+    # medians are tiny — id + D floats + bbox per sheet, a few hundred MB even for a whole scroll — so holding them
+    # whole costs nothing; it is the pooled-embedding ZARR (multi-GB) that the streaming feeder keeps off the heap.
+    medians_by_win: dict[str, list] = {}
+    n_skipped = 0
+    db0 = sqlite3.connect(out_asv)
     try:
-        idb.execute("CREATE INDEX IF NOT EXISTS sheets_window ON sheets(window)")
-        n_sheets = int(idb.execute("SELECT COUNT(*) FROM sheets").fetchone()[0])
-        idb.commit()
+        n_sheets = int(db0.execute("SELECT COUNT(*) FROM sheets").fetchone()[0])
+        for win, sid, ann, x0, x1, y0, y1, z0, z1, conf in db0.execute(
+                "SELECT window,id,annotation,min_x,max_x,min_y,max_y,min_z,max_z,confidence FROM sheets"):
+            try:
+                emb = json.loads(ann).get("emb")
+            except Exception:
+                emb = None
+            if emb is None or len(emb) != D:
+                n_skipped += 1
+                continue
+            medians_by_win.setdefault(win, []).append(
+                dict(id=int(sid), emb=np.asarray(emb, np.float32), conf=float(conf or 0.0),
+                     lo=(float(x0), float(y0), float(z0)), hi=(float(x1), float(y1), float(z1))))
     finally:
-        idb.close()
+        db0.close()
 
     if uz.size < 2 or uy.size < 2 or ux.size < 2:
         raise SystemExit(f"hercuvit stitcher infer: grid {uz.size}x{uy.size}x{ux.size} has no interior corner "
                          f"(need ≥2 windows on each axis) — nothing to stitch.")
 
     print(f"[stitcher] {N} windows (grid {uz.size}x{uy.size}x{ux.size}, stride {stride:.0f}, fov {fov:.0f}), "
-          f"{n_sheets} sheets -> affinities in {out_asv} "
-          f"(streamed: {feed_workers} feed worker(s), {readahead}-plane readahead)", flush=True)
+          f"{n_sheets} sheets ({n_skipped} without a {D}-d median) -> ~{corner_budget} corners to stitch "
+          f"into {out_asv} (streamed: {feed_workers} feed worker(s), {readahead}-plane readahead)", flush=True)
 
     def load_plane(zval: int):
-        """Feeder task: one z-plane's pooled-embedding grids + its sheets' median descriptors. Opens its OWN
-        read-only sqlite connection so feeder threads never share a cursor. Returns ``(emb_dict, sheet_dict,
-        n_skipped)`` keyed by window origin ``(z,y,x)``."""
+        """Feeder task: one z-plane's pooled-embedding grids, read from the ZARR only (``emb_arr.oindex`` over this
+        plane's rows, so a plane's chunks are read once). The per-sheet medians were pre-loaded whole into
+        ``medians_by_win`` above, so a feeder never opens the .asv — nothing reads it while it is being written.
+        Returns ``(emb_dict, sheet_dict)`` keyed by window origin ``(z,y,x)``."""
         ns = plane_ns.get(int(zval))
         emb_dict: dict[tuple, np.ndarray] = {}
         sheet_dict: dict[tuple, list] = {}
-        skipped = 0
         if not ns:
-            return emb_dict, sheet_dict, skipped
+            return emb_dict, sheet_dict
         ns_arr = np.asarray(sorted(ns), dtype=np.int64)
         embs = np.asarray(emb_arr.oindex[ns_arr]).astype(np.float32)      # (len,G,G,G,D) — this plane's chunks, once
         for i, n in enumerate(ns_arr):
-            emb_dict[(int(origin[n, 0]), int(origin[n, 1]), int(origin[n, 2]))] = embs[i]
-        db = sqlite3.connect(f"file:{out_asv}?mode=ro", uri=True)
-        try:
-            db.execute("PRAGMA busy_timeout=60000")                       # tolerate the writer's final commit
-            for (oz, oy, ox) in emb_dict:
-                for sid, ann, x0, x1, y0, y1, z0, z1, conf in db.execute(
-                        "SELECT id,annotation,min_x,max_x,min_y,max_y,min_z,max_z,confidence FROM sheets "
-                        "WHERE window=?", (window_name(oz, oy, ox),)):
-                    try:
-                        emb = json.loads(ann).get("emb")
-                    except Exception:
-                        emb = None
-                    if emb is None or len(emb) != D:
-                        skipped += 1
-                        continue
-                    sheet_dict.setdefault((oz, oy, ox), []).append(
-                        dict(id=int(sid), emb=np.asarray(emb, np.float32), conf=float(conf or 0.0),
-                             lo=(float(x0), float(y0), float(z0)), hi=(float(x1), float(y1), float(z1))))
-        finally:
-            db.close()
-        return emb_dict, sheet_dict, skipped
+            o = (int(origin[n, 0]), int(origin[n, 1]), int(origin[n, 2]))
+            emb_dict[o] = embs[i]
+            sheet_dict[o] = medians_by_win.get(window_name(*o), ())
+        return emb_dict, sheet_dict
 
     # streaming producer: yields affinity rows and fills `corners_meta` + `stats` as a side effect. write_affinities
     # consumes this generator FULLY (executemany) BEFORE it reads `corners`, so corners_meta is complete by then.
     corners_meta: list[tuple] = []
-    stats = dict(corners=0, edges=0, skipped=0, t0=time.time())
+    _t0 = time.time()
+    stats = dict(corners=0, edges=0, skipped=n_skipped, t0=_t0, last_t=_t0, last_c=0, last_e=0)
 
     def _rows():
         ex = ThreadPoolExecutor(max_workers=feed_workers)
@@ -281,9 +302,7 @@ def stitch_asv(embeddings_zarr: str, asv: str, stitcher: str, *, out: str | None
             zv = int(uz[zi])
             if zv not in cache:
                 fut = futures.pop(zv, None) or ex.submit(load_plane, zv)
-                emb_d, sh_d, sk = fut.result()
-                cache[zv] = (emb_d, sh_d)
-                stats["skipped"] += sk
+                cache[zv] = fut.result()
             return cache[zv]
 
         buf_items: list = []
@@ -349,9 +368,17 @@ def stitch_asv(embeddings_zarr: str, asv: str, stitcher: str, *, out: str | None
                         if len(buf_items) >= batch:
                             yield from run_batch()
                             if stats["corners"] and (stats["corners"] // batch) % 20 == 0:
-                                print(f"[stitcher] {stats['corners']} corners · {stats['edges']} edges · "
-                                      f"{stats['corners'] / max(1e-6, time.time() - stats['t0']):.0f} corner/s",
-                                      flush=True)
+                                nowt = time.time()
+                                el = nowt - stats["t0"]
+                                dt = nowt - stats["last_t"]                       # INSTANTANEOUS rate since the last
+                                ics = (stats["corners"] - stats["last_c"]) / dt if dt > 0 else 0.0   # print — not a
+                                ies = (stats["edges"] - stats["last_e"]) / dt if dt > 0 else 0.0     # cumulative mean,
+                                pct = 100.0 * stats["corners"] / max(1, corner_budget)               # which only sinks
+                                eta = (corner_budget - stats["corners"]) / max(1e-6, ics)            # after a fast start
+                                print(f"[stitcher] {stats['corners']}/{corner_budget} corners ({pct:.0f}%) · "
+                                      f"{stats['edges']} edges · {ics:.0f} corner/s · {ies / 1e3:.0f}k edges/s · "
+                                      f"{_hms(el)} elapsed · ETA {_hms(eta)}", flush=True)
+                                stats["last_t"], stats["last_c"], stats["last_e"] = nowt, stats["corners"], stats["edges"]
                 cache.pop(int(uz[zi]), None)                              # row done → evict lower plane (zi+1 stays)
             yield from run_batch()                                        # tail batch
         finally:
@@ -360,7 +387,8 @@ def stitch_asv(embeddings_zarr: str, asv: str, stitcher: str, *, out: str | None
     n = write_affinities(out_asv, _rows(), corners=corners_meta)
     dt = time.time() - stats["t0"]
     print(f"[stitcher] DONE: wrote {n} affinity rows (both directions) over {stats['corners']} corners "
-          f"({stats['skipped']} sheets without a {D}-d median skipped) into {out_asv} in {dt:.0f}s", flush=True)
+          f"({stats['skipped']} sheets without a {D}-d median skipped) into {out_asv} in {_hms(dt)} "
+          f"({stats['corners'] / max(1e-6, dt):.0f} corner/s, {n / max(1e-6, dt):.0f} rows/s)", flush=True)
     return out_asv, n
 
 

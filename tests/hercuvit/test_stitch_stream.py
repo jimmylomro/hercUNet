@@ -12,6 +12,7 @@ so the plane-grouping can't accidentally depend on storage order.
 from __future__ import annotations
 
 import dataclasses
+import os
 import sqlite3
 
 import numpy as np
@@ -185,16 +186,17 @@ def test_streamed_invariant_to_feeder_knobs(tmp_path):
     assert _affinity_multiset(out_a) == _affinity_multiset(out_b)
 
 
-def test_sheets_window_index_created(tmp_path):
-    """stitch_asv adds the sheets(window) index it relies on for O(log S) per-window median lookups."""
+def test_stitch_leaves_no_wal_sidecar(tmp_path):
+    """The medians are read up front and the .asv is written by a single writer with no concurrent reader, so the
+    output stays a self-contained single file — no ``-wal``/``-shm`` sidecar left beside it to be missed on upload."""
     ckpt = str(tmp_path / "stitcher.pth")
     _build_checkpoint(ckpt)
     zpath, apath = _build_artifacts(tmp_path)
     out = str(tmp_path / "idx.asv")
     stitch_asv(zpath, apath, ckpt, out=out, device="cpu")
+    assert not os.path.exists(out + "-wal") and not os.path.exists(out + "-shm")
     db = sqlite3.connect(f"file:{out}?mode=ro", uri=True)
     try:
-        names = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        assert int(db.execute("SELECT COUNT(*) FROM affinities").fetchone()[0]) > 0
     finally:
         db.close()
-    assert "sheets_window" in names
